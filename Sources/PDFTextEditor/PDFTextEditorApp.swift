@@ -1,0 +1,64 @@
+import SwiftUI
+
+@main
+struct PDFTextEditorApp: App {
+    @StateObject private var model: EditorModel
+
+    init() {
+        let initialURL = CommandLine.arguments
+            .dropFirst()
+            .first
+            .map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath) }
+        _model = StateObject(wrappedValue: EditorModel(initialURL: initialURL))
+    }
+
+    var body: some Scene {
+        WindowGroup("PDF editor") {
+            EditorScreen()
+                .environmentObject(model)
+                .frame(minWidth: 1_080, minHeight: 720)
+        }
+        .defaultSize(width: 1_280, height: 840)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("PDFを開く…") {
+                    model.openFromPanel()
+                }
+                .keyboardShortcut("o")
+
+                Button("PDFを結合…") {
+                    model.showMergeSheet()
+                }
+
+                Button("ページサイズを変更…") {
+                    model.showResizeSheet()
+                }
+                .disabled(model.document == nil)
+            }
+
+            CommandGroup(replacing: .saveItem) {
+                Button("編集済みPDFを書き出す…") {
+                    model.exportFromPanel()
+                }
+                .keyboardShortcut("s")
+                .disabled(model.document == nil)
+            }
+
+            CommandGroup(replacing: .undoRedo) {
+                Button("直前の変更を取り消す") {
+                    model.undoLastEdit()
+                }
+                .keyboardShortcut("z")
+                .disabled(!model.canUndo)
+            }
+
+            CommandGroup(replacing: .printItem) {
+                Button("印刷…") {
+                    model.printFromPanel()
+                }
+                .keyboardShortcut("p")
+                .disabled(!model.canPrint)
+            }
+        }
+    }
+}

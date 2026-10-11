@@ -1,0 +1,457 @@
+import AppKit
+import PDFKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct AppliedEdit {
+    let pageIndex: Int
+    let annotations: [PDFAnnotation]
+    var replacement: ReplacementEdit
+}
+
+struct InsertionDraft {
+    let pageIndex: Int
+    let annotation: PDFAnnotation
+    let detectedFontName: String?
+    let automaticFontName: String
+}
+
+enum PendingPrintInputDecision {
+    case commit
+    case discard
+    case cancel
+}
+
+@MainActor
+final class EditorModel: ObservableObject {
+    @Published private(set) var document: PDFDocument?
+    @Published private(set) var sourceURL: URL?
+    @Published private(set) var mode: EditorMode = .replacement
+    @Published var selectedTarget: TextTarget?
+    @Published private(set) var insertionDraft: InsertionDraft?
+    @Published var replacementText = ""
+    @Published private(set) var replacementFocusRequest = 0
+    @Published private(set) var insertionFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var insertionFontSize: Double = 12
+    @Published private(set) var insertionFontColor: NSColor = .black
+    @Published private(set) var edits: [AppliedEdit] = []
+    @Published private(set) var revision = 0
+    @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
+    @Published var isShowingMergeSheet = false
+    @Published var isShowingResizeSheet = false
+
+    init(initialURL: URL?) {
+        if let initialURL { load(url: initialURL) }
+    }
+
+    var canUndo: Bool { !edits.isEmpty }
+    var canPrint: Bool { document != nil && sourceURL != nil }
+    var hasPendingEditorInput: Bool { selectedTarget != nil || insertionDraft != nil }
+    var hasSelection: Bool { selectedTarget != nil }
+    var hasInsertionLocation: Bool { insertionDraft != nil }
+    var canEditText: Bool { mode == .replacement ? hasSelection : hasInsertionLocation }
+    var canCommit: Bool {
+        canEditText && !replacementText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    var pageCountText: String {
+        guard let document else { return "PDF未選択" }
+        return "\(document.pageCount)ページ"
+    }
+    var detectedFontName: String? { insertionDraft?.detectedFontName }
+    var effectiveInsertionFontName: String {
+        insertionFontChoice.fontName ?? insertionDraft?.automaticFontName ?? "Hiragino Sans"
+    }
+
+    func openFromPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "編集するPDFを1つ選んでください"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        load(url: url)
+    }
+
+    func showMergeSheet() {
+        isShowingMergeSheet = true
+    }
+
+    func showResizeSheet() {
+        guard document != nil else { return }
+        isShowingResizeSheet = true
+    }
+
+    func load(url: URL) {
+        guard url.pathExtension.lowercased() == "pdf" else {
+            statusMessage = "PDFファイルを指定してください。"
+            return
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            statusMessage = "指定されたPDFが見つかりません。"
+            return
+        }
+        guard let loadedDocument = PDFDocument(url: url), loadedDocument.pageCount > 0 else {
+            statusMessage = "PDFを読み込めませんでした。破損または未対応の形式です。"
+            return
+        }
+
+        discardInsertionDraft()
+        document = loadedDocument
+        sourceURL = url
+        selectedTarget = nil
+        replacementText = ""
+        edits = []
+        revision += 1
+        statusMessage = mode == .replacement
+            ? "変更したい文字をクリックしてください。"
+            : "PDF上の追加したい位置をクリックしてください。"
+    }
+
+    func setMode(_ newMode: EditorMode) {
+        guard mode != newMode else { return }
+        discardInsertionDraft()
+        mode = newMode
+        selectedTarget = nil
+        replacementText = ""
+        revision += 1
+        statusMessage = newMode == .replacement
+            ? "変更したい文字をクリックしてください。"
+            : "PDF上の追加したい位置をクリックしてください。"
+    }
+
+    func select(_ target: TextTarget?) {
+        guard mode == .replacement else { return }
+        selectedTarget = target
+        replacementText = target?.originalText ?? ""
+        if let target {
+            replacementFocusRequest += 1
+            statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。"
+        } else {
+            statusMessage = "文字のない場所です。既存の文字をクリックしてください。"
+        }
+    }
+
+    func beginInsertion(pageIndex: Int, point: CGPoint) {
+        guard mode == .insertion, let document, let page = document.page(at: pageIndex) else { return }
+        discardInsertionDraft()
+
+        let style = PDFFontResolver.resolve(on: page, at: point)
+        insertionFontChoice = .automatic
+        insertionFontSize = Double(style.size.rounded())
+        insertionFontColor = style.color
+        replacementText = ""
+        let bounds = PDFEditEngine.insertionBounds(
+            at: point,
+            text: "",
+            fontName: style.resolvedName,
+            fontSize: CGFloat(insertionFontSize),
+            pageBounds: page.bounds(for: .mediaBox)
+        )
+        let annotation = PDFEditEngine.makeInsertionAnnotation(
+            bounds: bounds,
+            text: "",
+            fontName: style.resolvedName,
+            fontSize: CGFloat(insertionFontSize),
+            fontColor: style.color
+        )
+        page.addAnnotation(annotation)
+        insertionDraft = InsertionDraft(
+            pageIndex: pageIndex,
+            annotation: annotation,
+            detectedFontName: style.detectedName,
+            automaticFontName: style.resolvedName
+        )
+        replacementFocusRequest += 1
+        revision += 1
+        statusMessage = "\(pageIndex + 1)ページ目に入力位置を置きました。文字を入力してください。"
+    }
+
+    func updateEditorText(_ text: String) {
+        replacementText = text
+        refreshInsertionPreview()
+    }
+
+    func setInsertionFontChoice(_ choice: InsertionFontChoice) {
+        insertionFontChoice = choice
+        refreshInsertionPreview()
+    }
+
+    func setInsertionFontSize(_ size: Double) {
+        insertionFontSize = min(max(size, 6), 72)
+        refreshInsertionPreview()
+    }
+
+    func setInsertionFontColor(_ color: NSColor) {
+        insertionFontColor = color
+        refreshInsertionPreview()
+    }
+
+    func commitEditorText() {
+        if mode == .replacement { applyReplacement() } else { applyInsertion() }
+    }
+
+    func applyReplacement() {
+        guard let document, let target = selectedTarget,
+              let page = document.page(at: target.pageIndex) else { return }
+        let normalized = replacementText.trimmingCharacters(in: .newlines)
+        guard !normalized.isEmpty else {
+            statusMessage = "置換後の文字を入力してください。"
+            return
+        }
+        let result = PDFEditEngine.applyReplacement(normalized, to: page, target: target)
+        edits.append(AppliedEdit(
+            pageIndex: target.pageIndex,
+            annotations: [result.annotation],
+            replacement: result.edit
+        ))
+        selectedTarget = nil
+        replacementText = ""
+        revision += 1
+        statusMessage = result.fontIsExact
+            ? "文字を置換しました。確認後に編集済みPDFを書き出してください。"
+            : "文字を置換しました(元フォントを再現できないため代替フォントで描画します)。確認後に編集済みPDFを書き出してください。"
+    }
+
+    func deleteSelection() {
+        guard mode == .replacement, let document, let target = selectedTarget,
+              let page = document.page(at: target.pageIndex) else { return }
+        let result = PDFEditEngine.applyDeletion(to: page, target: target)
+        edits.append(AppliedEdit(
+            pageIndex: target.pageIndex,
+            annotations: [result.annotation],
+            replacement: result.edit
+        ))
+        selectedTarget = nil
+        replacementText = ""
+        revision += 1
+        statusMessage = "選択した文字を表示から削除しました。確認後に編集済みPDFを書き出してください。"
+    }
+
+    func applyInsertion() {
+        guard let draft = insertionDraft else { return }
+        let normalized = replacementText.trimmingCharacters(in: .newlines)
+        guard !normalized.isEmpty else {
+            statusMessage = "追加する文字を入力してください。"
+            return
+        }
+        let id = UUID()
+        draft.annotation.contents = normalized
+        draft.annotation.fontColor = insertionFontColor
+        draft.annotation.userName = PDFEditEngine.annotationMarkerPrefix + id.uuidString
+        let edit = ReplacementEdit(
+            insertionOn: draft.pageIndex,
+            bounds: draft.annotation.bounds,
+            text: normalized,
+            fontName: effectiveInsertionFontName,
+            fontSize: CGFloat(insertionFontSize),
+            fontColor: insertionFontColor,
+            id: id
+        )
+        edits.append(AppliedEdit(pageIndex: draft.pageIndex, annotations: [draft.annotation], replacement: edit))
+        insertionDraft = nil
+        replacementText = ""
+        revision += 1
+        statusMessage = "テキストを追加しました。追加した文字はドラッグで移動できます。"
+    }
+
+    func moveInsertion(marker: String, pageIndex: Int, bounds: CGRect) {
+        guard marker.hasPrefix(PDFEditEngine.annotationMarkerPrefix) else { return }
+        if marker == PDFEditEngine.draftMarker {
+            insertionDraft?.annotation.bounds = bounds
+            revision += 1
+            return
+        }
+        let rawID = String(marker.dropFirst(PDFEditEngine.annotationMarkerPrefix.count))
+        guard let id = UUID(uuidString: rawID),
+              let index = edits.lastIndex(where: { $0.pageIndex == pageIndex && $0.replacement.id == id }) else { return }
+        edits[index].replacement = edits[index].replacement.moved(to: bounds)
+        revision += 1
+        statusMessage = "追加したテキストの位置を移動しました。"
+    }
+
+    func undoLastEdit() {
+        guard let document, let edit = edits.popLast(),
+              let page = document.page(at: edit.pageIndex) else { return }
+        for annotation in edit.annotations.reversed() { page.removeAnnotation(annotation) }
+        selectedTarget = nil
+        replacementText = ""
+        revision += 1
+        statusMessage = "直前の変更を取り消しました。"
+    }
+
+    func exportFromPanel() {
+        guard document != nil, let sourceURL else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-edited.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "元のPDFは上書きせず、編集済みPDFを別名で保存します"
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        guard outputURL.standardizedFileURL != sourceURL.standardizedFileURL else {
+            statusMessage = "元のPDFとは別のファイル名を指定してください。"
+            return
+        }
+        do {
+            try PDFExportEngine.export(sourceURL: sourceURL, edits: edits.map(\.replacement), to: outputURL)
+            statusMessage = "保存しました: \(outputURL.lastPathComponent)"
+        } catch {
+            statusMessage = "PDFの保存に失敗しました。"
+        }
+    }
+
+    @discardableResult
+    func resizeFromPanel(size: PDFPageSize, label: String) -> Bool {
+        guard let sourceURL, let document else { return false }
+        guard size.isValid else {
+            statusMessage = PDFPageResizeError.invalidSize.localizedDescription
+            return false
+        }
+        guard document.allowsCopying && document.allowsDocumentAssembly else {
+            statusMessage = "このPDFは内容のコピーまたはページの変更が許可されていません。"
+            return false
+        }
+        guard !hasPendingEditorInput else {
+            statusMessage = "入力中の文字を確定してからページサイズを変更してください。"
+            return false
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-\(label).pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "元のPDFは上書きせず、ページサイズを変更したPDFを別名で保存します"
+        guard panel.runModal() == .OK, let outputURL = panel.url else {
+            statusMessage = "保存をキャンセルしました。"
+            return false
+        }
+
+        let preparedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-resize-prepared-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: preparedURL) }
+        do {
+            let resizeSourceURL: URL
+            if edits.isEmpty {
+                resizeSourceURL = sourceURL
+            } else {
+                try PDFExportEngine.exportForPrinting(
+                    sourceURL: sourceURL,
+                    edits: edits.map(\.replacement),
+                    to: preparedURL
+                )
+                resizeSourceURL = preparedURL
+            }
+            try PDFPageResizeEngine.resize(
+                sourceURL: resizeSourceURL,
+                to: outputURL,
+                size: size,
+                protecting: [sourceURL]
+            )
+            statusMessage = "ページサイズを変更して保存しました: \(outputURL.lastPathComponent)"
+            return true
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func printFromPanel() {
+        guard let sourceURL else { return }
+
+        if hasPendingEditorInput {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "未確定の入力があります"
+            alert.informativeText = "印刷用PDFへ反映するには入力を確定してください。入力を破棄して確定済みの編集だけを印刷することもできます。"
+            alert.addButton(withTitle: "入力を確定して印刷")
+            alert.addButton(withTitle: "入力を破棄して印刷")
+            alert.addButton(withTitle: "印刷をキャンセル")
+
+            let decision: PendingPrintInputDecision
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                decision = .commit
+            case .alertSecondButtonReturn:
+                decision = .discard
+            default:
+                decision = .cancel
+            }
+            guard resolvePendingPrintInput(decision) else {
+                if decision == .commit {
+                    statusMessage = "入力を確定できませんでした。内容を確認してから印刷してください。"
+                } else {
+                    statusMessage = "印刷をキャンセルしました。"
+                }
+                return
+            }
+        }
+
+        do {
+            let prepared = try PDFPrintPreparationEngine.prepare(
+                sourceURL: sourceURL,
+                edits: edits.map(\.replacement)
+            )
+            defer { prepared.cleanup() }
+            guard let operation = prepared.document.printOperation(
+                for: NSPrintInfo.shared,
+                scalingMode: .pageScaleDownToFit,
+                autoRotate: true
+            ) else {
+                statusMessage = "標準の印刷ダイアログを準備できませんでした。"
+                return
+            }
+            operation.showsPrintPanel = true
+            operation.showsProgressPanel = true
+            statusMessage = operation.run()
+                ? "印刷ジョブを送信しました。"
+                : "印刷をキャンセルしました。"
+        } catch {
+            statusMessage = "印刷の準備に失敗しました: \(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    func resolvePendingPrintInput(_ decision: PendingPrintInputDecision) -> Bool {
+        guard hasPendingEditorInput else { return decision != .cancel }
+        switch decision {
+        case .commit:
+            commitEditorText()
+            return !hasPendingEditorInput
+        case .discard:
+            discardPendingEditorInput()
+            return true
+        case .cancel:
+            return false
+        }
+    }
+
+    private func refreshInsertionPreview() {
+        guard mode == .insertion, let draft = insertionDraft,
+              let page = document?.page(at: draft.pageIndex) else { return }
+        PDFEditEngine.updateInsertionAnnotation(
+            draft.annotation,
+            page: page,
+            text: replacementText,
+            fontName: effectiveInsertionFontName,
+            fontSize: CGFloat(insertionFontSize),
+            fontColor: insertionFontColor
+        )
+        revision += 1
+    }
+
+    private func discardInsertionDraft() {
+        guard let draft = insertionDraft else { return }
+        document?.page(at: draft.pageIndex)?.removeAnnotation(draft.annotation)
+        insertionDraft = nil
+    }
+
+    private func discardPendingEditorInput() {
+        discardInsertionDraft()
+        selectedTarget = nil
+        replacementText = ""
+        revision += 1
+    }
+}

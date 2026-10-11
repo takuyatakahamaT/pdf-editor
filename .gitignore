@@ -1,0 +1,9 @@
+.build/
+dist/
+.DS_Store
+tmp/
+*.pdf
+*.edited.pdf
+*-edited.pdf
+__pycache__/
+*.pyc
