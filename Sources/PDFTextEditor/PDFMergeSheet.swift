@@ -138,8 +138,9 @@ struct PDFMergeSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("PDFを結合")
                         .font(.title2.weight(.semibold))
+                        .foregroundStyle(NihoPalette.heading)
                     Text("サムネイルをドラッグして順番を変更。左から右、上から下の順に結合します。")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NihoPalette.muted)
                 }
                 Spacer()
                 Button("閉じる") { dismiss() }
@@ -173,7 +174,7 @@ struct PDFMergeSheet: View {
                                                         dragEnded: { finishDrag(id: item.id, value: $0) }
                                                     )
                                                     .offset(dragOffset(for: item.id))
-                                                    .shadow(color: .black.opacity(draggedID == item.id ? 0.35 : 0), radius: 12)
+                                                    .shadow(color: NihoPalette.heading.opacity(draggedID == item.id ? 0.25 : 0), radius: 12)
                                                 }
                                                 .frame(minWidth: 0, maxWidth: .infinity)
                                                 .background {
@@ -232,7 +233,7 @@ struct PDFMergeSheet: View {
             if let message = mergeModel.message {
                 Text(message)
                     .font(.callout)
-                    .foregroundStyle(mergeModel.completedResult == nil ? Color.red : Color.secondary)
+                    .foregroundStyle(mergeModel.completedResult == nil ? NihoPalette.danger : NihoPalette.muted)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -241,7 +242,7 @@ struct PDFMergeSheet: View {
                 Button("PDFを追加…") { mergeModel.addFromPanel() }
                 Spacer()
                 Text("\(mergeModel.items.count)ファイル・合計 \(mergeModel.totalPageCount)ページ")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .monospacedDigit()
                 Button("結合して保存…") { mergeModel.saveFromPanel() }
                     .buttonStyle(.borderedProminent)
@@ -250,6 +251,10 @@ struct PDFMergeSheet: View {
         }
         .padding(24)
         .frame(width: 900, height: 660)
+        .background(NihoPalette.canvas)
+        .foregroundStyle(NihoPalette.ink)
+        .tint(NihoPalette.green)
+        .preferredColorScheme(.light)
     }
 
     private func updateDrag(id: UUID, value: DragGesture.Value) {
@@ -306,7 +311,8 @@ private struct PDFMergeThumbnailCard: View {
                 Text("\(index + 1)")
                     .font(.caption.weight(.bold).monospacedDigit())
                     .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(Color.accentColor.opacity(0.22), in: Capsule())
+                    .foregroundStyle(NihoPalette.green)
+                    .background(NihoPalette.sageTint, in: Capsule())
                 Spacer()
                 Button(role: .destructive) { model.remove(id: item.id) } label: {
                     Image(systemName: "trash")
@@ -319,7 +325,7 @@ private struct PDFMergeThumbnailCard: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: 180)
                 .padding(8)
-                .background(Color.black.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+                .background(NihoPalette.pdfStage, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 4, coordinateSpace: .named("mergeThumbnails"))
@@ -333,7 +339,7 @@ private struct PDFMergeThumbnailCard: View {
                 .help(item.url.path)
             HStack {
                 Text("\(item.pageCount)ページ")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(NihoPalette.muted)
                 Spacer()
                 Button { model.moveUp(id: item.id) } label: { Image(systemName: "arrow.left") }
                     .disabled(index == 0).help("前へ移動").accessibilityLabel("前へ移動")
@@ -343,10 +349,10 @@ private struct PDFMergeThumbnailCard: View {
             .buttonStyle(.borderless)
         }
         .padding(10)
-        .background(Color.white.opacity(isDropTarget ? 0.12 : 0.045), in: RoundedRectangle(cornerRadius: 10))
+        .background(isDropTarget ? NihoPalette.sageTint : NihoPalette.surface, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isDropTarget ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isDropTarget ? 3 : 1)
+                .strokeBorder(isDropTarget ? NihoPalette.green : NihoPalette.line, lineWidth: isDropTarget ? 3 : 1)
         }
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .task(id: item.id) { await model.loadThumbnail(for: item) }
@@ -359,7 +365,7 @@ private struct PDFMergeThumbnailCard: View {
                 .accessibilityLabel("\(item.url.lastPathComponent)の先頭ページ")
         } else {
             Image(systemName: "doc.richtext")
-                .font(.system(size: 42)).foregroundStyle(.secondary)
+                .font(.system(size: 42)).foregroundStyle(NihoPalette.muted)
                 .accessibilityLabel("プレビューを読み込み中")
         }
     }

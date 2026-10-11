@@ -6,7 +6,7 @@ struct EditorScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
-            Divider().overlay(Color.white.opacity(0.08))
+            NihoDivider()
 
             if let document = model.document {
                 HStack(spacing: 0) {
@@ -21,7 +21,7 @@ struct EditorScreen: View {
                             model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
                         }
                     )
-                    .background(Color(red: 0.10, green: 0.10, blue: 0.09))
+                    .background(NihoPalette.pdfStage)
 
                     inspector
                         .frame(width: 370)
@@ -32,8 +32,10 @@ struct EditorScreen: View {
 
             statusBar
         }
-        .background(Color(red: 0.08, green: 0.08, blue: 0.075))
-        .preferredColorScheme(.dark)
+        .background(NihoPalette.canvas)
+        .foregroundStyle(NihoPalette.ink)
+        .tint(NihoPalette.green)
+        .preferredColorScheme(.light)
         .sheet(isPresented: $model.isShowingMergeSheet) {
             PDFMergeSheet()
         }
@@ -47,10 +49,10 @@ struct EditorScreen: View {
         HStack(spacing: 16) {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(red: 0.95, green: 0.77, blue: 0.20))
+                    .fill(NihoPalette.green)
                 Text("T/")
                     .font(.custom("Avenir Next", size: 16).weight(.heavy))
-                    .foregroundStyle(Color.black)
+                    .foregroundStyle(Color.white)
             }
             .frame(width: 34, height: 34)
 
@@ -58,9 +60,10 @@ struct EditorScreen: View {
                 Text("PDF EDITOR")
                     .font(.custom("Avenir Next", size: 13).weight(.bold))
                     .tracking(1.8)
+                    .foregroundStyle(NihoPalette.heading)
                 Text(model.sourceURL?.lastPathComponent ?? "PDFを選択してください")
                     .font(.custom("Hiragino Sans", size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .lineLimit(1)
             }
 
@@ -68,7 +71,7 @@ struct EditorScreen: View {
 
             Text(model.pageCountText)
                 .font(.custom("Avenir Next", size: 12).weight(.medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
 
             actionButton("PDFを開く", icon: "folder", emphasized: false) {
                 model.openFromPanel()
@@ -95,7 +98,7 @@ struct EditorScreen: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 62)
-        .background(Color(red: 0.115, green: 0.11, blue: 0.10))
+        .background(NihoPalette.canvas)
     }
 
     private var inspector: some View {
@@ -104,7 +107,7 @@ struct EditorScreen: View {
                 Text("TEXT PATCH")
                     .font(.custom("Avenir Next", size: 12).weight(.bold))
                     .tracking(1.7)
-                    .foregroundStyle(Color(red: 0.95, green: 0.77, blue: 0.20))
+                    .foregroundStyle(NihoPalette.green)
                 Picker("編集方法", selection: Binding(
                     get: { model.mode },
                     set: { newMode in model.setMode(newMode) }
@@ -119,29 +122,30 @@ struct EditorScreen: View {
 
                 Text(model.mode == .replacement ? "既存の文字をクリック・ドラッグ" : "PDF上をクリックして配置")
                     .font(.custom("Hiragino Sans", size: 21).weight(.semibold))
+                    .foregroundStyle(NihoPalette.heading)
                 Text(model.mode == .replacement
                     ? "括弧を含む範囲は先頭から末尾までドラッグして選べます。"
                     : "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。")
                     .font(.custom("Hiragino Sans", size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(24)
 
-            Divider().overlay(Color.white.opacity(0.08))
+            NihoDivider()
 
             VStack(alignment: .leading, spacing: 18) {
                 if model.mode == .replacement {
                     fieldLabel("選択した文字")
                     Text(model.selectedTarget?.originalText ?? "まだ選択されていません")
                         .font(.custom("Hiragino Sans", size: 15).weight(.medium))
-                        .foregroundStyle(model.hasSelection ? .primary : .secondary)
+                        .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(14)
-                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                         .overlay {
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                .stroke(NihoPalette.line, lineWidth: 1)
                         }
                 } else {
                     HStack(spacing: 9) {
@@ -149,11 +153,11 @@ struct EditorScreen: View {
                             .foregroundStyle(accentColor)
                         Text(model.hasInsertionLocation ? "入力位置を配置済み" : "PDF上の追加位置をクリック")
                             .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                            .foregroundStyle(model.hasInsertionLocation ? .primary : .secondary)
+                            .foregroundStyle(model.hasInsertionLocation ? NihoPalette.ink : NihoPalette.muted)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
-                    .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                    .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                 }
 
                 fieldLabel(model.mode == .replacement ? "置換後の文字" : "追加する文字")
@@ -168,10 +172,10 @@ struct EditorScreen: View {
                 )
                     .frame(minHeight: 20)
                     .padding(14)
-                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
                     .overlay {
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(model.canEditText ? accentColor.opacity(0.55) : Color.white.opacity(0.08), lineWidth: 1)
+                            .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
                     }
 
                 if model.mode == .insertion {
@@ -185,7 +189,7 @@ struct EditorScreen: View {
                         Image(systemName: "arrow.right")
                     }
                     .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
-                    .foregroundStyle(Color.black)
+                    .foregroundStyle(Color.white)
                     .padding(.horizontal, 16)
                     .frame(height: 46)
                     .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
@@ -198,16 +202,16 @@ struct EditorScreen: View {
                     Button("選択文字を表示から削除", action: model.deleteSelection)
                         .buttonStyle(.plain)
                         .font(.custom("Hiragino Sans", size: 13).weight(.medium))
-                        .foregroundStyle(model.hasSelection ? Color.white : Color.white.opacity(0.35))
+                        .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted.opacity(0.6))
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(Color.white.opacity(model.hasSelection ? 0.11 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+                        .background(model.hasSelection ? NihoPalette.creamTint : NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                         .disabled(!model.hasSelection)
                 }
 
                 Button("直前の変更を取り消す", action: model.undoLastEdit)
                     .buttonStyle(.plain)
                     .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                    .foregroundStyle(model.canUndo ? Color.white.opacity(0.72) : Color.white.opacity(0.25))
+                    .foregroundStyle(model.canUndo ? NihoPalette.muted : NihoPalette.muted.opacity(0.45))
                     .disabled(!model.canUndo)
             }
             .padding(24)
@@ -221,34 +225,39 @@ struct EditorScreen: View {
                     ? "白い背景の帳票向けMVPです。白塗りは元の文字を見えなくするだけで、書き出したPDFのテキスト抽出では元の文字列が残ります。元ファイルは上書きせず、編集済みPDFを別名保存します。"
                     : "文字は1行で追加され、書き出し時にベクター化されます。回転・縦書き・複数行は未対応です。")
                     .font(.custom("Hiragino Sans", size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(20)
-            .background(Color.black.opacity(0.18))
+            .background(NihoPalette.surface)
+            .overlay(alignment: .top) { NihoDivider() }
         }
-        .background(Color(red: 0.135, green: 0.13, blue: 0.12))
+        .background(NihoPalette.canvas)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(NihoPalette.line).frame(width: 1)
+        }
     }
 
     private var landing: some View {
         VStack(spacing: 28) {
             ZStack {
                 RoundedRectangle(cornerRadius: 18)
-                    .fill(Color.white.opacity(0.035))
+                    .fill(NihoPalette.canvas)
                 RoundedRectangle(cornerRadius: 18)
                     .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [8, 8]))
-                    .foregroundStyle(Color.white.opacity(0.16))
+                    .foregroundStyle(NihoPalette.heading.opacity(0.28))
 
                 VStack(spacing: 20) {
                     Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 44, weight: .light))
-                        .foregroundStyle(Color(red: 0.95, green: 0.77, blue: 0.20))
+                        .foregroundStyle(NihoPalette.green)
                     VStack(spacing: 8) {
                         Text("PDFを作業台へ")
                             .font(.custom("Hiragino Sans", size: 26).weight(.semibold))
+                            .foregroundStyle(NihoPalette.heading)
                         Text("既存文字の置換も、好きな位置への文字追加もできます。")
                             .font(.custom("Hiragino Sans", size: 13))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(NihoPalette.muted)
                     }
                     actionButton("PDFを1つ選ぶ", icon: "folder", emphasized: true) {
                         model.openFromPanel()
@@ -261,41 +270,36 @@ struct EditorScreen: View {
             .frame(width: 560, height: 340)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            LinearGradient(
-                colors: [Color.black.opacity(0.12), Color(red: 0.16, green: 0.145, blue: 0.10).opacity(0.35)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
+        .background(NihoPalette.surface)
     }
 
     private var statusBar: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(Color(red: 0.95, green: 0.77, blue: 0.20))
+                .fill(NihoPalette.green)
                 .frame(width: 6, height: 6)
             Text(model.statusMessage)
                 .font(.custom("Hiragino Sans", size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
             Spacer()
             Text("⌘O 開く  ·  ⌘P 印刷  ·  ⌘S 書き出す  ·  ⌘Z 取り消す")
                 .font(.custom("Avenir Next", size: 10))
-                .foregroundStyle(Color.white.opacity(0.28))
+                .foregroundStyle(NihoPalette.muted)
         }
         .padding(.horizontal, 18)
         .frame(height: 32)
-        .background(Color(red: 0.085, green: 0.082, blue: 0.075))
+        .background(NihoPalette.canvas)
+        .overlay(alignment: .top) { NihoDivider() }
     }
 
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
             .font(.custom("Hiragino Sans", size: 11).weight(.medium))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(NihoPalette.muted)
     }
 
     private var accentColor: Color {
-        Color(red: 0.95, green: 0.77, blue: 0.20)
+        NihoPalette.green
     }
 
     private func actionButton(
@@ -309,9 +313,9 @@ struct EditorScreen: View {
                 .font(.custom("Hiragino Sans", size: 12).weight(.semibold))
                 .padding(.horizontal, 14)
                 .frame(height: 34)
-                .foregroundStyle(emphasized ? Color.black : Color.white.opacity(0.82))
+                .foregroundStyle(emphasized ? Color.white : NihoPalette.ink)
                 .background(
-                    emphasized ? Color(red: 0.95, green: 0.77, blue: 0.20) : Color.white.opacity(0.07),
+                    emphasized ? NihoPalette.green : NihoPalette.creamTint,
                     in: RoundedRectangle(cornerRadius: 7)
                 )
         }
@@ -364,7 +368,7 @@ private struct InsertionStylePanel: View {
                     Text("使用: \(model.effectiveInsertionFontName)")
                 }
                 .font(.custom("Avenir Next", size: 10))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
             }
 
             HStack(spacing: 12) {
@@ -380,16 +384,16 @@ private struct InsertionStylePanel: View {
             }
         }
         .padding(12)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                .stroke(NihoPalette.line, lineWidth: 1)
         }
     }
 
     private func label(_ text: String) -> some View {
         Text(text)
             .font(.custom("Hiragino Sans", size: 11).weight(.medium))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(NihoPalette.muted)
     }
 }

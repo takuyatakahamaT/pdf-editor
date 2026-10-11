@@ -61,10 +61,11 @@ struct PDFPageResizeSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("ページサイズを変更")
                     .font(.title2.weight(.semibold))
+                    .foregroundStyle(NihoPalette.heading)
                 Text(currentSizeText)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
                 Text("全\(model.document?.pageCount ?? 0)ページを指定した仕上がりサイズに変更します。")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(NihoPalette.muted)
             }
 
             Picker("仕上がりサイズ", selection: $choice) {
@@ -86,13 +87,13 @@ struct PDFPageResizeSheet: View {
 
             Text("元ページの縦横比は保ちます。比率が違う場合は余白が入ります。写真の解像度は上がりません。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !message.isEmpty {
                 Text(message)
                     .font(.callout)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(NihoPalette.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -113,7 +114,10 @@ struct PDFPageResizeSheet: View {
         }
         .padding(28)
         .frame(width: 520)
-        .preferredColorScheme(.dark)
+        .background(NihoPalette.canvas)
+        .foregroundStyle(NihoPalette.ink)
+        .tint(NihoPalette.green)
+        .preferredColorScheme(.light)
     }
 
     private func dimensionField(_ title: String, value: Binding<String>) -> some View {
@@ -123,7 +127,7 @@ struct PDFPageResizeSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 100)
             Text("mm")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
         }
     }
 }

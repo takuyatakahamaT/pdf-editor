@@ -29,7 +29,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
         view.pageShadowsEnabled = true
-        view.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1)
+        view.backgroundColor = NihoPalette.pdfStageNSColor
         return view
     }
 
@@ -230,7 +230,7 @@ final class ClickablePDFView: PDFView {
         clearReplacementHighlight()
         let annotation = PDFAnnotation(bounds: bounds, forType: .square, withProperties: nil)
         annotation.color = .clear
-        annotation.interiorColor = NSColor.systemYellow.withAlphaComponent(0.35)
+        annotation.interiorColor = NihoPalette.selectionNSColor
         let border = PDFBorder()
         border.lineWidth = 0
         annotation.border = border
