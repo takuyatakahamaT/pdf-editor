@@ -34,6 +34,11 @@ struct PDFTextEditorApp: App {
                     model.showResizeSheet()
                 }
                 .disabled(model.document == nil)
+
+                Button("PDFを圧縮…") {
+                    model.showCompressionSheet()
+                }
+                .disabled(model.document == nil)
             }
 
             CommandGroup(replacing: .saveItem) {

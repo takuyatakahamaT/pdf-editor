@@ -43,6 +43,10 @@ struct EditorScreen: View {
             PDFPageResizeSheet()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.isShowingCompressionSheet) {
+            PDFCompressionSheet()
+                .environmentObject(model)
+        }
     }
 
     private var topBar: some View {
@@ -83,6 +87,11 @@ struct EditorScreen: View {
 
             actionButton("ページサイズ", icon: "arrow.up.left.and.arrow.down.right", emphasized: false) {
                 model.showResizeSheet()
+            }
+            .disabled(model.document == nil)
+
+            actionButton("PDFを圧縮", icon: "arrow.down.doc", emphasized: false) {
+                model.showCompressionSheet()
             }
             .disabled(model.document == nil)
 

@@ -39,6 +39,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
     @Published var isShowingMergeSheet = false
     @Published var isShowingResizeSheet = false
+    @Published var isShowingCompressionSheet = false
 
     init(initialURL: URL?) {
         if let initialURL { load(url: initialURL) }
@@ -79,6 +80,19 @@ final class EditorModel: ObservableObject {
     func showResizeSheet() {
         guard document != nil else { return }
         isShowingResizeSheet = true
+    }
+
+    func showCompressionSheet() {
+        guard document != nil else { return }
+        guard !hasPendingEditorInput else {
+            statusMessage = "入力中の文字を確定してからPDFを圧縮してください。"
+            return
+        }
+        isShowingCompressionSheet = true
+    }
+
+    func reportCompressionStatus(_ message: String) {
+        statusMessage = message
     }
 
     func load(url: URL) {
