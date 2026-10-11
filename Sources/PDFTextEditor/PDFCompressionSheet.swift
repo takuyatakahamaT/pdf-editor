@@ -16,8 +16,9 @@ struct PDFCompressionSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("PDFを圧縮")
                 .font(.title2.weight(.semibold))
+                .foregroundStyle(NihoPalette.heading)
             Text("写真の画質と容量のバランスを選べます。文字・ページサイズ・画像の画素数は変えません。")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             Picker("圧縮の程度", selection: $quality) {
@@ -30,7 +31,7 @@ struct PDFCompressionSheet: View {
 
             Text("弱圧縮ほど写真の画質を優先します。初期値は印刷向けの弱圧縮です。画質の%は目標ファイルサイズの%ではありません。可逆では画像データを変更しません。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NihoPalette.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             if isWorking {
@@ -43,14 +44,14 @@ struct PDFCompressionSheet: View {
                     Text(changeText(estimate))
                     Text("実測値: \(estimate.outputBytes.formatted())バイト")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(NihoPalette.muted)
                 }
                 .font(.headline)
             }
             if !message.isEmpty {
                 Text(message)
                     .font(.callout)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(NihoPalette.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -66,6 +67,10 @@ struct PDFCompressionSheet: View {
         }
         .padding(28)
         .frame(width: 540)
+        .background(NihoPalette.canvas)
+        .foregroundStyle(NihoPalette.ink)
+        .tint(NihoPalette.green)
+        .preferredColorScheme(.light)
         .onChange(of: model.revision) { _, _ in clearEstimate() }
         .onDisappear { clearEstimate() }
     }
