@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Install Poppler tools for redaction verification
+        run: brew list --versions poppler >/dev/null 2>&1 || brew install poppler
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.4'

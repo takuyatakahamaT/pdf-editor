@@ -29,6 +29,7 @@ struct EditorScreen: View {
                             mode: model.mode,
                             markupTool: model.selectedMarkupTool,
                             selectedTarget: model.selectedTarget,
+                            redactionRegions: model.redactionRegions,
                             selectedMarkupID: model.selectedMarkupID,
                             highlightedSearchSelections: model.highlightedSearchSelections,
                             focusedSearchSelection: model.focusedSearchSelection,
@@ -45,6 +46,9 @@ struct EditorScreen: View {
                             onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
                             onMarkupCreate: { pageIndex, bounds, points in
                                 model.addMarkup(pageIndex: pageIndex, bounds: bounds, points: points)
+                            },
+                            onRedactionRegion: { pageIndex, bounds in
+                                model.addRedactionRegion(pageIndex: pageIndex, bounds: bounds)
                             },
                             onSelectMarkup: { id in model.selectMarkup(id) },
                             onMoveMarkup: { id, bounds in model.moveMarkup(id: id, to: bounds) },
@@ -173,7 +177,7 @@ struct EditorScreen: View {
             actionButton("書き出す", icon: "square.and.arrow.up", emphasized: true) {
                 model.exportFromPanel()
             }
-            .disabled(model.document == nil)
+            .disabled(!model.canExport)
         }
         .padding(.horizontal, 20)
         .frame(height: 62)
@@ -299,6 +303,10 @@ struct EditorScreen: View {
                     .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                 }
 
+                if model.mode == .redaction {
+                    redactionControls
+                }
+
                 if model.mode == .insertion {
                     fieldLabel("追加する文字")
                     ReplacementTextField(
@@ -421,6 +429,8 @@ struct EditorScreen: View {
                     ? "白い背景の帳票向けMVPです。白塗りは元の文字を見えなくするだけで、書き出したPDFのテキスト抽出では元の文字列が残ります。元ファイルは上書きせず、編集済みPDFを別名保存します。"
                     : model.mode == .insertion
                     ? "文字は1行で追加され、書き出し時にベクター化されます。回転・縦書き・複数行は未対応です。"
+                    : model.mode == .redaction
+                    ? "墨消しは全ページを高解像度画像に変換します。元PDFの文書メタデータは引き継ぎません。生成日時やProducer情報は新しいPDFに付く場合があります。"
                     : "注釈・署名はPDF内の編集可能な注釈として保存します。書き出したPDFを別の編集アプリで開くと、表示が変わる場合があります。")
                     .font(.custom("Hiragino Sans", size: 11))
                     .foregroundStyle(NihoPalette.muted)
@@ -440,6 +450,7 @@ struct EditorScreen: View {
         switch model.mode {
         case .replacement: "既存の文字を選択して編集"
         case .insertion: "PDF上をクリックして配置"
+        case .redaction: "選択した文字を安全に墨消し"
         case .markup: "注釈・署名を追加"
         }
     }
@@ -448,8 +459,69 @@ struct EditorScreen: View {
         switch model.mode {
         case .replacement: "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
         case .insertion: "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。"
+        case .redaction: "文字をクリックして追加するか、ページをドラッグして範囲を指定します。画像PDFにも使えます。対象がある間は通常書き出し・印刷を止めます。"
         case .markup: "ツールを選び、文字を選択またはページ上をドラッグして注釈を配置します。"
         }
+    }
+
+    @ViewBuilder
+    private var redactionControls: some View {
+        fieldLabel("選択した文字")
+        Text(model.selectedTarget?.originalText ?? "PDF上の文字をクリックしてください")
+            .font(.custom("Hiragino Sans", size: 13))
+            .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+
+        Button("選択文字を墨消し対象に追加", action: model.addSelectedRedactionRegion)
+            .disabled(!model.hasSelection)
+            .buttonStyle(.borderedProminent)
+        Text("またはページ上をドラッグして範囲を指定（画像・図形PDFにも対応）")
+            .font(.custom("Hiragino Sans", size: 11))
+            .foregroundStyle(NihoPalette.muted)
+
+        fieldLabel("墨消しプレビュー（\(model.redactionRegions.count)か所）")
+        if model.redactionRegions.isEmpty {
+            Text("対象を追加すると、ページ上に黒いプレビューが表示されます。")
+                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
+        } else {
+            ForEach(model.redactionRegions) { region in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("\(region.pageIndex + 1)ページ · \(region.text.isEmpty ? "ドラッグ範囲" : region.text)")
+                        .font(.custom("Hiragino Sans", size: 11))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        model.removeRedactionRegion(id: region.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("この墨消し範囲を外す")
+                }
+                .padding(8)
+                .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 6))
+            }
+            Button("すべての範囲を外す", action: model.clearRedactionRegions)
+                .buttonStyle(.plain).foregroundStyle(NihoPalette.muted)
+        }
+
+        Button(action: model.applyRedactionsFromPanel) {
+            HStack {
+                Text("墨消しを適用して別名保存")
+                Spacer()
+                Image(systemName: "lock.doc")
+            }
+            .font(.custom("Hiragino Sans", size: 13).weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(height: 44)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.redactionRegions.isEmpty)
+        .opacity(model.redactionRegions.isEmpty ? 0.42 : 1)
     }
 
     @ViewBuilder

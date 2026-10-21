@@ -61,6 +61,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var insertionFontColor: NSColor = .black
     @Published private(set) var importedFontFamilies: [String] = []
     @Published private(set) var edits: [AppliedEdit] = []
+    @Published private(set) var redactionRegions: [PDFRedactionRegion] = []
     @Published private(set) var activeMarkupEdits: [PDFMarkupEdit] = []
     @Published private(set) var selectedMarkupTool: PDFMarkupTool = .highlight
     @Published private(set) var selectedMarkupID: UUID?
@@ -122,10 +123,11 @@ final class EditorModel: ObservableObject {
         }
         return visible.map(\.1)
     }
-    var canPrint: Bool { document != nil && sourceURL != nil }
+    var canPrint: Bool { document != nil && sourceURL != nil && redactionRegions.isEmpty }
+    var canExport: Bool { document != nil && redactionRegions.isEmpty }
     var hasOCRLayer: Bool { ocrLayerPresent }
     var canStartOCR: Bool { document != nil && !ocrIsRunning && !canUndo && !hasPendingEditorInput }
-    var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil }
+    var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil || !redactionRegions.isEmpty }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
     var selectedMarkup: PDFMarkupEdit? {
@@ -136,6 +138,7 @@ final class EditorModel: ObservableObject {
         switch mode {
         case .replacement: hasSelection
         case .insertion: hasInsertionLocation
+        case .redaction: false
         case .markup: hasSelection && selectedMarkupTool.isTextMarkup
         }
     }
@@ -219,6 +222,10 @@ final class EditorModel: ObservableObject {
     }
 
     func showMergeSheet() {
+        guard !hasPendingEditorInput else {
+            statusMessage = "墨消し範囲をプレビュー中は結合できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         isShowingMergeSheet = true
     }
 
@@ -237,6 +244,10 @@ final class EditorModel: ObservableObject {
 
     func showResizeSheet() {
         guard document != nil else { return }
+        guard !hasPendingEditorInput else {
+            statusMessage = "墨消し範囲をプレビュー中はページサイズを変更できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         isShowingResizeSheet = true
     }
 
@@ -341,6 +352,7 @@ final class EditorModel: ObservableObject {
         replacementFontChoice = .automatic
         replacementText = ""
         edits = []
+        redactionRegions = []
         ocrLowConfidenceLines = []
         ocrProcessedPages = []
         ocrProgress = ""
@@ -610,7 +622,8 @@ final class EditorModel: ObservableObject {
     }
 
     func select(_ target: TextTarget?) {
-        guard mode == .replacement || (mode == .markup && selectedMarkupTool.isTextMarkup) else { return }
+        guard mode == .replacement || mode == .redaction
+                || (mode == .markup && selectedMarkupTool.isTextMarkup) else { return }
         selectedMarkupID = nil
         selectedTarget = target
         isInlineEditing = false
@@ -621,11 +634,110 @@ final class EditorModel: ObservableObject {
         if let target {
             statusMessage = mode == .replacement
                 ? "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
+                : mode == .redaction
+                ? "\(target.pageIndex + 1)ページ目の文字を選択しました。墨消し対象に追加できます。"
                 : "\(target.pageIndex + 1)ページ目の文字を選択しました。注釈を適用できます。"
         } else {
             statusMessage = mode == .replacement
                 ? "文字のない場所です。既存の文字をクリックしてください。"
+                : mode == .redaction
+                ? "文字のない場所です。墨消しする文字をクリックしてください。"
                 : "文字のない場所です。注釈を付ける文字をクリックしてください。"
+        }
+    }
+
+    func addSelectedRedactionRegion() {
+        guard mode == .redaction, let target = selectedTarget else {
+            statusMessage = "先に墨消しする文字をPDF上で選択してください。"
+            return
+        }
+        addRedactionRegion(pageIndex: target.pageIndex, bounds: target.bounds, text: target.originalText)
+        selectedTarget = nil
+    }
+
+    func addRedactionRegion(pageIndex: Int, bounds: CGRect, text: String = "") {
+        guard mode == .redaction,
+              let page = document?.page(at: pageIndex),
+              bounds.width > 0, bounds.height > 0,
+              !bounds.isNull, !bounds.isInfinite else {
+            statusMessage = "PDFページ内の範囲を指定してください。"
+            return
+        }
+        let clippedBounds = bounds.intersection(page.bounds(for: .cropBox))
+        guard !clippedBounds.isNull, !clippedBounds.isEmpty else {
+            statusMessage = "墨消し範囲がページ内にありません。"
+            return
+        }
+        guard !redactionRegions.contains(where: {
+            $0.pageIndex == pageIndex && $0.bounds == clippedBounds
+        }) else {
+            statusMessage = "この範囲はすでに墨消し対象へ追加されています。"
+            return
+        }
+        redactionRegions.append(PDFRedactionRegion(pageIndex: pageIndex, bounds: clippedBounds, text: text))
+        selectedTarget = nil
+        revision += 1
+        statusMessage = "墨消し対象を\(redactionRegions.count)か所プレビューしています。"
+    }
+
+    func removeRedactionRegion(id: UUID) {
+        redactionRegions.removeAll { $0.id == id }
+        revision += 1
+        statusMessage = redactionRegions.isEmpty
+            ? "墨消し対象をすべて外しました。"
+            : "墨消し対象を\(redactionRegions.count)か所プレビューしています。"
+    }
+
+    func clearRedactionRegions() {
+        redactionRegions = []
+        selectedTarget = nil
+        revision += 1
+        statusMessage = "墨消し対象をすべて外しました。"
+    }
+
+    func applyRedactionsFromPanel() {
+        guard let sourceURL, !redactionRegions.isEmpty else {
+            statusMessage = "先に墨消し対象を追加してください。"
+            return
+        }
+
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .critical
+        confirmation.messageText = "墨消しを適用しますか？"
+        confirmation.informativeText = "適用後は元に戻せません。元PDFは変更せず別ファイルを作ります。全ページを高解像度画像に変換するため、テキスト選択・検索、注釈、リンク、フォームは出力に残りません。元PDFのタイトル・作者などの文書メタデータも引き継ぎません。PDF生成ライブラリが新しい作成日時やProducer情報を付ける場合があります。画像内の文字も選択範囲に重なる部分は黒くなります。"
+        confirmation.addButton(withTitle: "墨消し済みPDFを作成")
+        confirmation.addButton(withTitle: "キャンセル")
+        guard confirmation.runModal() == .alertFirstButtonReturn else {
+            statusMessage = "墨消しをキャンセルしました。"
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-redacted.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "元PDFを保持し、画像化した墨消し済みPDFを別名保存します"
+        guard panel.runModal() == .OK, let outputURL = panel.url else {
+            statusMessage = "墨消し済みPDFの保存をキャンセルしました。"
+            return
+        }
+        do {
+            try PDFRedactionEngine.export(
+                sourceURL: sourceURL,
+                regions: redactionRegions,
+                edits: activeReplacements,
+                markups: activeMarkupEdits,
+                forcePrepareSource: !edits.isEmpty,
+                to: outputURL
+            )
+            statusMessage = "墨消し済みPDFを保存しました。ページ本文を画像化し、元PDFの文書メタデータは引き継いでいません: \(outputURL.lastPathComponent)"
+            redactionRegions = []
+            selectedTarget = nil
+            revision += 1
+        } catch {
+            statusMessage = "安全な墨消しを完了できませんでした: \(error.localizedDescription)"
         }
     }
 
@@ -711,6 +823,7 @@ final class EditorModel: ObservableObject {
         switch mode {
         case .replacement: applyReplacement()
         case .insertion: applyInsertion()
+        case .redaction: addSelectedRedactionRegion()
         case .markup: applySelectedTextMarkup()
         }
     }
@@ -904,6 +1017,10 @@ final class EditorModel: ObservableObject {
 
     func exportFromPanel() {
         guard document != nil, let sourceURL else { return }
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は通常書き出しできません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
@@ -1053,6 +1170,10 @@ final class EditorModel: ObservableObject {
 
     func printFromPanel() {
         guard let sourceURL else { return }
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
 
         if hasPendingEditorInput {
             let alert = NSAlert()
@@ -1109,6 +1230,10 @@ final class EditorModel: ObservableObject {
 
     @discardableResult
     func resolvePendingPrintInput(_ decision: PendingPrintInputDecision) -> Bool {
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return false
+        }
         guard hasPendingEditorInput else { return decision != .cancel }
         switch decision {
         case .commit:
@@ -1157,14 +1282,6 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func statusForMode(_ mode: EditorMode) -> String {
-        switch mode {
-        case .replacement: "変更したい文字をクリックしてください。"
-        case .insertion: "PDF上の追加したい位置をクリックしてください。"
-        case .markup: "注釈・署名の種類を選び、PDF上に配置してください。"
-        }
-    }
-
     private func refreshInsertionPreview() {
         guard mode == .insertion, let draft = insertionDraft,
               let page = document?.page(at: draft.pageIndex) else { return }
@@ -1191,5 +1308,14 @@ final class EditorModel: ObservableObject {
         isInlineEditing = false
         replacementText = ""
         revision += 1
+    }
+
+    private func statusForMode(_ mode: EditorMode) -> String {
+        switch mode {
+        case .replacement: "変更したい文字をクリックしてください。"
+        case .insertion: "PDF上の追加したい位置をクリックしてください。"
+        case .redaction: "墨消し対象の文字を選択して、範囲をプレビューしてください。"
+        case .markup: "注釈・署名の種類を選び、PDF上に配置してください。"
+        }
     }
 }
