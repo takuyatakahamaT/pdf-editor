@@ -149,6 +149,11 @@ enum PDFMarkupEngine {
         }
     }
 
+    static func hitTestResizeHandle(_ point: CGPoint, bounds: CGRect, tolerance: CGFloat = 10) -> Bool {
+        let bounds = bounds.standardized
+        return hypot(point.x - bounds.maxX, point.y - bounds.maxY) < tolerance
+    }
+
     private static func distance(from point: CGPoint, toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {
         let dx = end.x - start.x
         let dy = end.y - start.y

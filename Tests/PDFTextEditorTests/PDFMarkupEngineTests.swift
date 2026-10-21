@@ -61,6 +61,18 @@ struct PDFMarkupEngineTests {
         #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 35), in: ink))
     }
 
+    @Test("selected line markup resize handle remains hittable outside the visible path")
+    func resizeHandleHitTestIsIndependentOfShapePath() {
+        let resizeHandle = CGPoint(x: 120, y: 90)
+        let arrow = PDFMarkupEdit(
+            pageIndex: 0, tool: .arrow, bounds: CGRect(x: 20, y: 30, width: 100, height: 60),
+            points: [CGPoint(x: 20, y: 90), CGPoint(x: 120, y: 30)]
+        )
+
+        #expect(!PDFMarkupEngine.hitTest(resizeHandle, in: arrow))
+        #expect(PDFMarkupEngine.hitTestResizeHandle(resizeHandle, bounds: arrow.bounds))
+    }
+
     @Test("text selection and markup selection are mutually exclusive")
     @MainActor
     func selectionTargetsAreExclusive() throws {

@@ -700,17 +700,30 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         guard let page = page(for: viewPoint, nearest: false), let document else { return true }
         let pagePoint = PDFMarkupEngine.clampedPoint(convert(viewPoint, to: page), to: page.bounds(for: .mediaBox))
         let pageIndex = document.index(for: page)
-        if let annotation = page.annotations.reversed().first(where: { annotation in
-            guard let edit = PDFMarkupEngine.edit(from: annotation, pageIndex: pageIndex) else { return false }
-            return PDFMarkupEngine.hitTest(pagePoint, in: edit)
-        }), let edit = PDFMarkupEngine.edit(from: annotation, pageIndex: pageIndex) {
+        let managedAnnotations = page.annotations.reversed().compactMap { annotation -> (PDFAnnotation, PDFMarkupEdit)? in
+            guard let edit = PDFMarkupEngine.edit(from: annotation, pageIndex: pageIndex) else { return nil }
+            return (annotation, edit)
+        }
+        if let (annotation, edit) = managedAnnotations.first(where: { $0.1.id == selectedMarkupID }),
+           PDFMarkupEngine.hitTestResizeHandle(pagePoint, bounds: edit.bounds) {
             selectMarkupHandler?(edit.id)
             draggedMarkupID = edit.id
             draggedAnnotation = annotation
             draggedPage = page
             dragStartPoint = pagePoint
             dragStartBounds = annotation.bounds
-            resizingMarkup = hypot(pagePoint.x - annotation.bounds.maxX, pagePoint.y - annotation.bounds.maxY) < 10
+            resizingMarkup = true
+            markupDidMove = false
+            return true
+        }
+        if let (annotation, edit) = managedAnnotations.first(where: { PDFMarkupEngine.hitTest(pagePoint, in: $0.1) }) {
+            selectMarkupHandler?(edit.id)
+            draggedMarkupID = edit.id
+            draggedAnnotation = annotation
+            draggedPage = page
+            dragStartPoint = pagePoint
+            dragStartBounds = annotation.bounds
+            resizingMarkup = PDFMarkupEngine.hitTestResizeHandle(pagePoint, bounds: edit.bounds)
             markupDidMove = false
             return true
         }
