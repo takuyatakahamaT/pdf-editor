@@ -25,6 +25,8 @@ jobs:
         run: go -C Tools/pdf-link-remap test ./...
       - name: Build PDF link remapper
         run: go -C Tools/pdf-link-remap build -trimpath -o "$RUNNER_TEMP/pdf-link-remap" .
+      - name: Install Poppler tools for PDF tests
+        run: brew install poppler
       - name: Release build and acceptance tests
         run: |
           swift build -c release

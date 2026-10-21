@@ -2,6 +2,7 @@ import SwiftUI
 
 struct EditorScreen: View {
     @EnvironmentObject private var model: EditorModel
+    @EnvironmentObject private var updater: AppUpdateController
     @StateObject private var zoomState = PDFZoomState()
     @State private var zoomInput = "100"
     @FocusState private var zoomInputIsFocused: Bool
@@ -10,6 +11,11 @@ struct EditorScreen: View {
         VStack(spacing: 0) {
             topBar
             NihoDivider()
+
+            if updater.updateNotice.isVisible && !updater.isRestartPending {
+                updateNotice
+                NihoDivider()
+            }
 
             if let document = model.document {
                 HStack(spacing: 0) {
@@ -101,6 +107,47 @@ struct EditorScreen: View {
             PDFOCRSheet()
                 .environmentObject(model)
         }
+    }
+
+    private var updateNotice: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(NihoPalette.green)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("新しい版 \(updater.updateNotice.availableVersion ?? "") があります")
+                    .font(.custom("Hiragino Sans", size: 13).weight(.semibold))
+                    .foregroundStyle(NihoPalette.heading)
+                Text("更新の確認後、PDF editorを再起動して反映します。")
+                    .font(.custom("Hiragino Sans", size: 11))
+                    .foregroundStyle(NihoPalette.muted)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("更新して再起動") {
+                updater.checkForUpdates()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(NihoPalette.green)
+
+            Button {
+                updater.dismissUpdateNotice()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(NihoPalette.muted)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("閉じる")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NihoPalette.surface)
     }
 
     private var topBar: some View {
