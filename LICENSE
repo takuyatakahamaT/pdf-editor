@@ -1,0 +1,22 @@
+Intended rights holder: NIHO株式会社, after its establishment and completion of
+the written assignment described below.
+
+Until that assignment takes effect, copyright remains with the current author.
+All rights are reserved by the applicable copyright holder.
+
+This repository contains proprietary software. Viewing this public repository
+does not grant permission to use, copy, modify, publish, distribute, sublicense,
+or sell the software or any derivative work. A separate written license from
+the applicable copyright holder is required for those activities. After the
+assignment described below takes effect, that holder is NIHO株式会社.
+
+Third-party components are governed by their own licenses. Their notices and
+license texts are included in Resources/ThirdParty/THIRD-PARTY-NOTICES.txt.
+
+The commercial terms for customers are described in docs/legal/end-user-license-agreement.md.
+
+Important for release preparation: NIHO株式会社 is being established. Before
+the first commercial release, the individual creator and NIHO株式会社 must
+execute a written assignment covering the existing source code, app assets,
+and documentation. Future contributions require a separate ownership
+agreement. This notice alone does not transfer copyright ownership.

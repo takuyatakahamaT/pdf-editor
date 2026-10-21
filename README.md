@@ -53,7 +53,11 @@ PDFを開き、上部の「ページサイズ」またはファイルメニュ�
 
 元ページの縦横比を保って指定サイズに収めます。比率が違う場合は余白が入り、画像の画素数は増えません。B5仕上がりの中綴じ冊子なら、印刷時はB4用紙と小冊子印刷を選びます。PDFのページサイズ変更だけでは小冊子用の面付けは行いません。
 
-変換には同梱の [pdfcpu](https://github.com/pdfcpu/pdfcpu) v0.16.1 を使用します。アプリのビルドにはGo 1.26以降が必要ですが、ビルド済みアプリの利用時にはGoのインストールは不要です。ライセンスは `Resources/ThirdParty/pdfcpu-LICENSE.txt` に収録しています。
+変換には同梱の [pdfcpu](https://github.com/pdfcpu/pdfcpu) v0.16.2 を使用します。アプリのビルドにはGo 1.26以降が必要ですが、ビルド済みアプリの利用時にはGoのインストールは不要です。Go依存ライブラリのライセンスとNOTICEは `Resources/ThirdParty/THIRD-PARTY-NOTICES.txt` に収録しています。
+
+## ライセンスと販売について
+
+このリポジトリのアプリ本体はNIHO株式会社向けのプロプライエタリソフトウェアです。NIHO株式会社の設立後、創作者からの権利譲渡を完了したうえで販売します。公開リポジトリからソースを閲覧できますが、利用・改変・再配布の許諾はありません。購入者向けの条件は `docs/legal/` のEULA、販売条件、プライバシーポリシーを参照してください。第三者コンポーネントは各コンポーネントのライセンスに従います。
 
 ### PDFを圧縮する
 
@@ -80,3 +84,5 @@ swift test
 ./scripts/build-app.sh
 PDFCPU_PATH="$PWD/dist/PDF editor.app/Contents/Helpers/pdfcpu" swift test --filter PDFPageResizeEngineTests
 ```
+
+販売ZIPの作成には、Apple Developer ID署名と公証の設定を済ませたうえで `scripts/package-release.sh` を使います。販売前の権利・販売条件・配布要件は `docs/legal/launch-checklist.md` を確認してください。
