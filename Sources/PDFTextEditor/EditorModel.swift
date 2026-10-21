@@ -123,7 +123,8 @@ final class EditorModel: ObservableObject {
         }
         return visible.map(\.1)
     }
-    var canPrint: Bool { document != nil && sourceURL != nil }
+    var canPrint: Bool { document != nil && sourceURL != nil && redactionRegions.isEmpty }
+    var canExport: Bool { document != nil && redactionRegions.isEmpty }
     var hasOCRLayer: Bool { ocrLayerPresent }
     var canStartOCR: Bool { document != nil && !ocrIsRunning && !canUndo && !hasPendingEditorInput }
     var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil || !redactionRegions.isEmpty }
@@ -221,6 +222,10 @@ final class EditorModel: ObservableObject {
     }
 
     func showMergeSheet() {
+        guard !hasPendingEditorInput else {
+            statusMessage = "墨消し範囲をプレビュー中は結合できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         isShowingMergeSheet = true
     }
 
@@ -239,6 +244,10 @@ final class EditorModel: ObservableObject {
 
     func showResizeSheet() {
         guard document != nil else { return }
+        guard !hasPendingEditorInput else {
+            statusMessage = "墨消し範囲をプレビュー中はページサイズを変更できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         isShowingResizeSheet = true
     }
 
@@ -642,17 +651,30 @@ final class EditorModel: ObservableObject {
             statusMessage = "先に墨消しする文字をPDF上で選択してください。"
             return
         }
-        guard !redactionRegions.contains(where: {
-            $0.pageIndex == target.pageIndex && $0.bounds == target.bounds
-        }) else {
-            statusMessage = "この文字はすでに墨消し対象へ追加されています。"
+        addRedactionRegion(pageIndex: target.pageIndex, bounds: target.bounds, text: target.originalText)
+        selectedTarget = nil
+    }
+
+    func addRedactionRegion(pageIndex: Int, bounds: CGRect, text: String = "") {
+        guard mode == .redaction,
+              let page = document?.page(at: pageIndex),
+              bounds.width > 0, bounds.height > 0,
+              !bounds.isNull, !bounds.isInfinite else {
+            statusMessage = "PDFページ内の範囲を指定してください。"
             return
         }
-        redactionRegions.append(PDFRedactionRegion(
-            pageIndex: target.pageIndex,
-            bounds: target.bounds,
-            text: target.originalText
-        ))
+        let clippedBounds = bounds.intersection(page.bounds(for: .cropBox))
+        guard !clippedBounds.isNull, !clippedBounds.isEmpty else {
+            statusMessage = "墨消し範囲がページ内にありません。"
+            return
+        }
+        guard !redactionRegions.contains(where: {
+            $0.pageIndex == pageIndex && $0.bounds == clippedBounds
+        }) else {
+            statusMessage = "この範囲はすでに墨消し対象へ追加されています。"
+            return
+        }
+        redactionRegions.append(PDFRedactionRegion(pageIndex: pageIndex, bounds: clippedBounds, text: text))
         selectedTarget = nil
         revision += 1
         statusMessage = "墨消し対象を\(redactionRegions.count)か所プレビューしています。"
@@ -702,7 +724,13 @@ final class EditorModel: ObservableObject {
             return
         }
         do {
-            try PDFRedactionEngine.export(sourceURL: sourceURL, regions: redactionRegions, to: outputURL)
+            try PDFRedactionEngine.export(
+                sourceURL: sourceURL,
+                regions: redactionRegions,
+                edits: activeReplacements,
+                markups: activeMarkupEdits,
+                to: outputURL
+            )
             statusMessage = "墨消し済みPDFを保存しました。ページ本文を画像化し、元PDFの文書メタデータは引き継いでいません: \(outputURL.lastPathComponent)"
             redactionRegions = []
             selectedTarget = nil
@@ -988,6 +1016,10 @@ final class EditorModel: ObservableObject {
 
     func exportFromPanel() {
         guard document != nil, let sourceURL else { return }
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は通常書き出しできません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
@@ -1137,6 +1169,10 @@ final class EditorModel: ObservableObject {
 
     func printFromPanel() {
         guard let sourceURL else { return }
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return
+        }
 
         if hasPendingEditorInput {
             let alert = NSAlert()
@@ -1193,6 +1229,10 @@ final class EditorModel: ObservableObject {
 
     @discardableResult
     func resolvePendingPrintInput(_ decision: PendingPrintInputDecision) -> Bool {
+        guard redactionRegions.isEmpty else {
+            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            return false
+        }
         guard hasPendingEditorInput else { return decision != .cancel }
         switch decision {
         case .commit:

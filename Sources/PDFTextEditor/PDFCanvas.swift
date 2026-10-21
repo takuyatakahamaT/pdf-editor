@@ -22,6 +22,7 @@ struct PDFCanvas: NSViewRepresentable {
     let onMoveSelection: (CGPoint) -> Void
     let onMoveExistingEdit: (UUID, CGPoint) -> Void
     let onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
+    let onRedactionRegion: (Int, CGRect) -> Void
     let onSelectMarkup: (UUID?) -> Void
     let onMoveMarkup: (UUID, CGRect) -> Void
     let onBeginInlineEditing: () -> Void
@@ -37,6 +38,7 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveSelection: onMoveSelection,
             onMoveExistingEdit: onMoveExistingEdit,
             onMarkupCreate: onMarkupCreate,
+            onRedactionRegion: onRedactionRegion,
             onSelectMarkup: onSelectMarkup,
             onMoveMarkup: onMoveMarkup,
             onBeginInlineEditing: onBeginInlineEditing,
@@ -81,6 +83,7 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onMoveSelection = onMoveSelection
         context.coordinator.onMoveExistingEdit = onMoveExistingEdit
         context.coordinator.onMarkupCreate = onMarkupCreate
+        context.coordinator.onRedactionRegion = onRedactionRegion
         context.coordinator.onSelectMarkup = onSelectMarkup
         context.coordinator.onMoveMarkup = onMoveMarkup
         context.coordinator.onBeginInlineEditing = onBeginInlineEditing
@@ -141,6 +144,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.moveSelectionHandler = coordinator.handleMoveSelection
         view.moveExistingEditHandler = coordinator.handleMoveExistingEdit
         view.markupCreateHandler = coordinator.handleMarkupCreate
+        view.redactionRegionHandler = coordinator.handleRedactionRegion
         view.selectMarkupHandler = coordinator.handleSelectMarkup
         view.moveMarkupHandler = coordinator.handleMoveMarkup
         view.beginInlineEditingHandler = coordinator.handleBeginInlineEditing
@@ -156,6 +160,7 @@ struct PDFCanvas: NSViewRepresentable {
         var onMoveSelection: (CGPoint) -> Void
         var onMoveExistingEdit: (UUID, CGPoint) -> Void
         var onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
+        var onRedactionRegion: (Int, CGRect) -> Void
         var onSelectMarkup: (UUID?) -> Void
         var onMoveMarkup: (UUID, CGRect) -> Void
         var onBeginInlineEditing: () -> Void
@@ -172,6 +177,7 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveSelection: @escaping (CGPoint) -> Void,
             onMoveExistingEdit: @escaping (UUID, CGPoint) -> Void,
             onMarkupCreate: @escaping (Int, CGRect, [CGPoint]) -> Void,
+            onRedactionRegion: @escaping (Int, CGRect) -> Void,
             onSelectMarkup: @escaping (UUID?) -> Void,
             onMoveMarkup: @escaping (UUID, CGRect) -> Void,
             onBeginInlineEditing: @escaping () -> Void,
@@ -187,6 +193,7 @@ struct PDFCanvas: NSViewRepresentable {
             self.onMoveSelection = onMoveSelection
             self.onMoveExistingEdit = onMoveExistingEdit
             self.onMarkupCreate = onMarkupCreate
+            self.onRedactionRegion = onRedactionRegion
             self.onSelectMarkup = onSelectMarkup
             self.onMoveMarkup = onMoveMarkup
             self.onBeginInlineEditing = onBeginInlineEditing
@@ -209,6 +216,9 @@ struct PDFCanvas: NSViewRepresentable {
         func handleMarkupCreate(_ pageIndex: Int, _ bounds: CGRect, _ points: [CGPoint]) {
             onMarkupCreate(pageIndex, bounds, points)
         }
+        func handleRedactionRegion(_ pageIndex: Int, _ bounds: CGRect) {
+            onRedactionRegion(pageIndex, bounds)
+        }
         func handleSelectMarkup(_ id: UUID?) { onSelectMarkup(id) }
         func handleMoveMarkup(_ id: UUID, _ bounds: CGRect) { onMoveMarkup(id, bounds) }
         func handleBeginInlineEditing() { onBeginInlineEditing() }
@@ -229,6 +239,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var moveSelectionHandler: ((CGPoint) -> Void)?
     var moveExistingEditHandler: ((UUID, CGPoint) -> Void)?
     var markupCreateHandler: ((Int, CGRect, [CGPoint]) -> Void)?
+    var redactionRegionHandler: ((Int, CGRect) -> Void)?
     var selectMarkupHandler: ((UUID?) -> Void)?
     var moveMarkupHandler: ((UUID, CGRect) -> Void)?
     var beginInlineEditingHandler: (() -> Void)?
@@ -263,6 +274,11 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private var redactionPreviewRegions: [PDFRedactionRegion] = []
     private var redactionPreviewMode: EditorMode?
     private var redactionPreviewAnnotations: [PDFAnnotation] = []
+    private weak var redactionDrawingPage: PDFPage?
+    private var redactionDrawingPageIndex: Int?
+    private var redactionDrawingStart = CGPoint.zero
+    private var redactionDrawingDidMove = false
+    private var redactionDrawingAnnotation: PDFAnnotation?
     private var draggedMarkupID: UUID?
     private var resizingMarkup = false
     private var markupDidMove = false
@@ -392,10 +408,16 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if editorMode == .insertion || editorMode == .markup { addCursorRect(bounds, cursor: .crosshair) }
+        if editorMode == .insertion || editorMode == .markup || editorMode == .redaction {
+            addCursorRect(bounds, cursor: .crosshair)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
+        if editorMode == .redaction {
+            handleRedactionMouseDown(event)
+            return
+        }
         if editorMode == .insertion {
             handleInsertionMouseDown(event)
             return
@@ -411,8 +433,11 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if editorMode == .redaction
-            || (editorMode == .markup && markupTool.isTextMarkup && draggedMarkupID == nil) {
+        if editorMode == .redaction {
+            handleRedactionMouseDragged(event)
+            return
+        }
+        if editorMode == .markup && markupTool.isTextMarkup && draggedMarkupID == nil {
             handleReplacementMouseDragged(event)
             return
         }
@@ -510,13 +535,16 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             return
         }
         if editorMode == .redaction {
-            if movingSelectionTarget != nil {
-                movingSelectionTarget = nil
-                movementDelta = .zero
-                return
+            if redactionDrawingDidMove,
+               let pageIndex = redactionDrawingPageIndex,
+               let bounds = redactionDrawingBounds(at: convert(event.locationInWindow, from: nil)) {
+                clearRedactionDrawingPreview()
+                selectionHandler?(nil)
+                redactionRegionHandler?(pageIndex, bounds)
+            } else {
+                clearRedactionDrawingPreview()
+                selectionHandler?(replacementDragTarget)
             }
-            if inlineField != nil { return }
-            selectionHandler?(replacementDragTarget)
             replacementDragTarget = nil
             replacementDragRun = nil
             replacementDragAnchorIndex = nil
@@ -891,6 +919,75 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         replacementDragTarget = hit.target
 
         showHighlight(bounds: hit.target.bounds, on: page)
+    }
+
+    private func handleRedactionMouseDown(_ event: NSEvent) {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard let page = page(for: viewPoint, nearest: false), let document else {
+            clearRedactionDrawingPreview()
+            replacementDragTarget = nil
+            return
+        }
+        redactionDrawingPage = page
+        redactionDrawingPageIndex = document.index(for: page)
+        redactionDrawingStart = PDFMarkupEngine.clampedPoint(
+            convert(viewPoint, to: page),
+            to: page.bounds(for: .cropBox)
+        )
+        redactionDrawingDidMove = false
+        handleReplacementMouseDown(event, allowMovingExistingContent: false)
+    }
+
+    private func handleRedactionMouseDragged(_ event: NSEvent) {
+        guard let page = redactionDrawingPage else { return }
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard let bounds = redactionDrawingBounds(at: viewPoint) else { return }
+        redactionDrawingDidMove = true
+        replacementDragTarget = nil
+        replacementDragRun = nil
+        replacementDragAnchorIndex = nil
+        replacementDragPage = nil
+        clearReplacementHighlight()
+
+        if redactionDrawingAnnotation == nil {
+            let annotation = PDFAnnotation(bounds: bounds, forType: .square, withProperties: nil)
+            annotation.userName = "PDFEditorRedactionDrawPreview"
+            annotation.shouldPrint = false
+            annotation.color = NSColor.systemRed.withAlphaComponent(0.9)
+            annotation.interiorColor = NSColor.black.withAlphaComponent(0.55)
+            let border = PDFBorder()
+            border.lineWidth = 1.5
+            annotation.border = border
+            page.addAnnotation(annotation)
+            redactionDrawingAnnotation = annotation
+        } else {
+            redactionDrawingAnnotation?.bounds = bounds
+        }
+        needsDisplay = true
+    }
+
+    private func redactionDrawingBounds(at viewPoint: CGPoint) -> CGRect? {
+        guard let page = redactionDrawingPage else { return nil }
+        let end = PDFMarkupEngine.clampedPoint(convert(viewPoint, to: page), to: page.bounds(for: .cropBox))
+        let bounds = CGRect(
+            x: min(redactionDrawingStart.x, end.x),
+            y: min(redactionDrawingStart.y, end.y),
+            width: abs(end.x - redactionDrawingStart.x),
+            height: abs(end.y - redactionDrawingStart.y)
+        )
+        guard bounds.width >= 3, bounds.height >= 3 else { return nil }
+        return bounds
+    }
+
+    private func clearRedactionDrawingPreview() {
+        if let redactionDrawingAnnotation {
+            redactionDrawingAnnotation.page?.removeAnnotation(redactionDrawingAnnotation)
+        }
+        redactionDrawingAnnotation = nil
+        redactionDrawingPage = nil
+        redactionDrawingPageIndex = nil
+        redactionDrawingDidMove = false
+        needsDisplay = true
     }
 
     private func handleReplacementMouseDragged(_ event: NSEvent) {

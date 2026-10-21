@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Foundation
 import PDFKit
 import Testing
@@ -46,6 +47,79 @@ struct PDFRedactionEngineTests {
         let metadata = try runTool("pdfinfo", arguments: [output.path])
         #expect(!metadata.contains("CONFIDENTIAL TITLE"))
         #expect(!metadata.contains("Private Author"))
+    }
+
+    @Test("redaction rasterizes committed text edits before removing the text layer")
+    func redactionIncludesCommittedEdits() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SECRET) Tj ET BT /F1 12 Tf 20 70 Td (EDITME) Tj ET"
+        )
+        let baseline = temporaryPDF()
+        let edited = temporaryPDF()
+        let marked = temporaryPDF()
+        defer { remove([source, baseline, edited, marked]) }
+        let target = TextTarget(
+            pageIndex: 0,
+            bounds: CGRect(x: 18, y: 66, width: 50, height: 16),
+            baseline: 70,
+            originalText: "EDITME",
+            fontSize: 12,
+            fontColor: .black,
+            fontKey: "F1",
+            fontIsExact: true,
+            coverBounds: CGRect(x: 18, y: 66, width: 50, height: 16),
+            maxWidth: 90
+        )
+        let font = CTFontCreateWithName("Helvetica" as CFString, 12, nil)
+        let replacement = ReplacementEdit(
+            target: target,
+            replacement: "UPDATED",
+            resolvedFont: font,
+            fontIsExact: true
+        )
+        let markup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .rectangle,
+            bounds: CGRect(x: 150, y: 30, width: 60, height: 45)
+        )
+        let region = PDFRedactionRegion(
+            pageIndex: 0,
+            bounds: CGRect(x: 18, y: 116, width: 86, height: 18),
+            text: "SECRET"
+        )
+
+        try PDFRedactionEngine.export(sourceURL: source, regions: [region], to: baseline)
+        try PDFRedactionEngine.export(
+            sourceURL: source,
+            regions: [region],
+            edits: [replacement],
+            markups: [],
+            to: edited
+        )
+        try PDFRedactionEngine.export(
+            sourceURL: source,
+            regions: [region],
+            edits: [],
+            markups: [markup],
+            to: marked
+        )
+
+        let baselinePage = try #require(PDFDocument(url: baseline)?.page(at: 0))
+        let editedPage = try #require(PDFDocument(url: edited)?.page(at: 0))
+        let markedPage = try #require(PDFDocument(url: marked)?.page(at: 0))
+        let baselineImage = try #require(PDFRedactionEngine.render(page: baselinePage, regions: []))
+        let editedImage = try #require(PDFRedactionEngine.render(page: editedPage, regions: []))
+        let markedImage = try #require(PDFRedactionEngine.render(page: markedPage, regions: []))
+        let baselinePixels = try #require(baselineImage.dataProvider?.data as Data?)
+        let editedPixels = try #require(editedImage.dataProvider?.data as Data?)
+        let markedPixels = try #require(markedImage.dataProvider?.data as Data?)
+        #expect(baselinePixels != editedPixels)
+        #expect(baselinePixels != markedPixels)
+        #expect((try #require(PDFDocument(url: edited)?.page(at: 0)).string ?? "").isEmpty)
+        let extracted = try runTool("pdftotext", arguments: ["-layout", edited.path, "-"])
+        #expect(!extracted.contains("EDITME"))
+        #expect(!extracted.contains("SECRET"))
     }
 
     @Test("redaction preserves the crop box and removes content hidden outside it")
@@ -175,6 +249,36 @@ struct PDFRedactionEngineTests {
         model.removeRedactionRegion(id: region.id)
         #expect(model.redactionRegions.isEmpty)
         #expect(!model.hasPendingEditorInput)
+    }
+
+    @Test("manual redaction rectangles work without selectable text and block unsafe outputs")
+    @MainActor
+    func manualRectanglesBlockNormalExportAndPrint() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: ""
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.redaction)
+        let bounds = CGRect(x: 40, y: 45, width: 70, height: 38)
+        model.addRedactionRegion(pageIndex: 0, bounds: bounds)
+
+        let region = try #require(model.redactionRegions.first)
+        #expect(region.bounds == bounds)
+        #expect(region.text.isEmpty)
+        #expect(!model.canExport)
+        #expect(!model.canPrint)
+        model.exportFromPanel()
+        #expect(model.statusMessage.contains("通常書き出しできません"))
+        #expect(!model.resolvePendingPrintInput(.discard))
+        #expect(model.redactionRegions.count == 1)
+        model.printFromPanel()
+        #expect(model.statusMessage.contains("印刷できません"))
+        model.showMergeSheet()
+        model.showResizeSheet()
+        #expect(!model.isShowingMergeSheet)
+        #expect(!model.isShowingResizeSheet)
     }
 
     private func temporaryPDF() -> URL {

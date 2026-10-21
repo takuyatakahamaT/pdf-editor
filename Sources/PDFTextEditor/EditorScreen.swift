@@ -47,6 +47,9 @@ struct EditorScreen: View {
                             onMarkupCreate: { pageIndex, bounds, points in
                                 model.addMarkup(pageIndex: pageIndex, bounds: bounds, points: points)
                             },
+                            onRedactionRegion: { pageIndex, bounds in
+                                model.addRedactionRegion(pageIndex: pageIndex, bounds: bounds)
+                            },
                             onSelectMarkup: { id in model.selectMarkup(id) },
                             onMoveMarkup: { id, bounds in model.moveMarkup(id: id, to: bounds) },
                             onBeginInlineEditing: { model.beginInlineEditing() },
@@ -174,7 +177,7 @@ struct EditorScreen: View {
             actionButton("書き出す", icon: "square.and.arrow.up", emphasized: true) {
                 model.exportFromPanel()
             }
-            .disabled(model.document == nil)
+            .disabled(!model.canExport)
         }
         .padding(.horizontal, 20)
         .frame(height: 62)
@@ -456,7 +459,7 @@ struct EditorScreen: View {
         switch model.mode {
         case .replacement: "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
         case .insertion: "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。"
-        case .redaction: "墨消しする文字をクリックして対象へ追加。適用前に黒塗り範囲を確認できます。"
+        case .redaction: "文字をクリックして追加するか、ページをドラッグして範囲を指定します。画像PDFにも使えます。対象がある間は通常書き出し・印刷を止めます。"
         case .markup: "ツールを選び、文字を選択またはページ上をドラッグして注釈を配置します。"
         }
     }
@@ -474,6 +477,9 @@ struct EditorScreen: View {
         Button("選択文字を墨消し対象に追加", action: model.addSelectedRedactionRegion)
             .disabled(!model.hasSelection)
             .buttonStyle(.borderedProminent)
+        Text("またはページ上をドラッグして範囲を指定（画像・図形PDFにも対応）")
+            .font(.custom("Hiragino Sans", size: 11))
+            .foregroundStyle(NihoPalette.muted)
 
         fieldLabel("墨消しプレビュー（\(model.redactionRegions.count)か所）")
         if model.redactionRegions.isEmpty {
@@ -482,7 +488,7 @@ struct EditorScreen: View {
         } else {
             ForEach(model.redactionRegions) { region in
                 HStack(alignment: .top, spacing: 8) {
-                    Text("\(region.pageIndex + 1)ページ · \(region.text)")
+                    Text("\(region.pageIndex + 1)ページ · \(region.text.isEmpty ? "ドラッグ範囲" : region.text)")
                         .font(.custom("Hiragino Sans", size: 11))
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)

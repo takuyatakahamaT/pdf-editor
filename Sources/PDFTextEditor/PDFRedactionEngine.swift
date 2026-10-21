@@ -120,6 +120,26 @@ enum PDFRedactionEngine {
         }
     }
 
+    static func export(
+        sourceURL: URL,
+        regions: [PDFRedactionRegion],
+        edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit],
+        to outputURL: URL
+    ) throws {
+        guard !PDFOCREngine.sameFile(sourceURL, outputURL) else { throw PDFRedactionError.sameFile }
+        guard !edits.isEmpty || !markups.isEmpty else {
+            try export(sourceURL: sourceURL, regions: regions, to: outputURL)
+            return
+        }
+
+        let preparedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-redaction-prepared-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: preparedURL) }
+        try PDFExportEngine.export(sourceURL: sourceURL, edits: edits, markups: markups, to: preparedURL)
+        try export(sourceURL: preparedURL, regions: regions, to: outputURL)
+    }
+
     static func render(page: PDFPage, regions: [PDFRedactionRegion]) -> CGImage? {
         let box = page.bounds(for: .mediaBox)
         let cropBox = page.bounds(for: .cropBox).intersection(box)
