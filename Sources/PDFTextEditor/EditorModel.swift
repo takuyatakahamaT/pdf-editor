@@ -860,7 +860,10 @@ final class EditorModel: ObservableObject {
         guard let id = UUID(uuidString: rawID),
               let index = edits.lastIndex(where: { $0.pageIndex == pageIndex && $0.replacement?.id == id }),
               let replacement = edits[index].replacement else { return }
-        edits[index].replacement = replacement.moved(to: bounds)
+        if replacement.bounds != bounds {
+            edits[index].replacement = replacement.moved(to: bounds)
+            redoEdits.removeAll()
+        }
         revision += 1
         statusMessage = "追加したテキストの位置を移動しました。"
     }

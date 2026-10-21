@@ -5,6 +5,24 @@ import Testing
 @testable import PDFTextEditor
 
 struct PDFMarkupEngineTests {
+    @Test("markup and signature bounds stay inside the page")
+    func clampsMarkupBoundsToPage() {
+        let pageBounds = CGRect(x: 12, y: 18, width: 200, height: 100)
+        let signature = PDFMarkupEngine.clampedBounds(
+            CGRect(x: 205, y: 112, width: 140, height: 40),
+            to: pageBounds,
+            minimumSize: CGSize(width: 80, height: 24)
+        )
+        #expect(signature == CGRect(x: 72, y: 78, width: 140, height: 40))
+
+        let oversizedResize = PDFMarkupEngine.clampedBounds(
+            CGRect(x: 50, y: 60, width: 320, height: 120),
+            to: pageBounds,
+            minimumSize: CGSize(width: 8, height: 8)
+        )
+        #expect(oversizedResize == pageBounds)
+    }
+
     @Test("markup tools produce editable PDF annotations")
     func annotationTypesAndPayloads() {
         let bounds = CGRect(x: 12, y: 18, width: 80, height: 24)

@@ -316,6 +316,33 @@ struct PDFWorkflowTests {
         #expect(model.document?.page(at: 0)?.annotations.count == annotationCount)
     }
 
+    @Test("moving an inserted text after undo discards the stale redo branch")
+    @MainActor
+    func movingInsertedTextClearsRedoHistory() throws {
+        let source = try makePDF(label: nil, bounds: CGRect(x: 0, y: 0, width: 240, height: 160))
+        defer { remove([source]) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.insertion)
+
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 30, y: 60))
+        model.updateEditorText("First")
+        model.applyInsertion()
+        let firstInsertion = try #require(model.edits.first?.replacement)
+
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 80, y: 60))
+        model.updateEditorText("Second")
+        model.applyInsertion()
+        model.undoLastEdit()
+        #expect(model.canRedo)
+
+        let movedBounds = firstInsertion.bounds.offsetBy(dx: 24, dy: 8)
+        let marker = PDFEditEngine.annotationMarkerPrefix + firstInsertion.id.uuidString
+        model.moveInsertion(marker: marker, pageIndex: 0, bounds: movedBounds)
+
+        #expect(model.edits.first?.replacement?.bounds == movedBounds)
+        #expect(!model.canRedo)
+    }
+
     private func makePDF(
         label: String?,
         bounds: CGRect,

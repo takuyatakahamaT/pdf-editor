@@ -76,6 +76,21 @@ struct PDFMarkupEdit {
 enum PDFMarkupEngine {
     static let markerPrefix = "PDFEditorMarkup:"
 
+    static func clampedBounds(
+        _ bounds: CGRect,
+        to pageBounds: CGRect,
+        minimumSize: CGSize = .zero
+    ) -> CGRect {
+        let pageBounds = pageBounds.standardized
+        let pageWidth = max(0, pageBounds.width)
+        let pageHeight = max(0, pageBounds.height)
+        let width = min(max(bounds.width, min(max(0, minimumSize.width), pageWidth)), pageWidth)
+        let height = min(max(bounds.height, min(max(0, minimumSize.height), pageHeight)), pageHeight)
+        let originX = min(max(bounds.minX, pageBounds.minX), max(pageBounds.maxX - width, pageBounds.minX))
+        let originY = min(max(bounds.minY, pageBounds.minY), max(pageBounds.maxY - height, pageBounds.minY))
+        return CGRect(x: originX, y: originY, width: width, height: height)
+    }
+
     static func edits(in document: PDFDocument) -> [PDFMarkupEdit] {
         (0..<document.pageCount).flatMap { pageIndex in
             document.page(at: pageIndex)?.annotations.compactMap {

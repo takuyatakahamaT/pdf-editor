@@ -451,16 +451,19 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         if editorMode == .markup, let id = draggedMarkupID {
             var bounds = dragStartBounds
             if resizingMarkup {
-                bounds.size.width = max(8, dragStartBounds.width + pagePoint.x - dragStartPoint.x)
-                bounds.size.height = max(8, dragStartBounds.height + pagePoint.y - dragStartPoint.y)
+                bounds.size.width = dragStartBounds.width + pagePoint.x - dragStartPoint.x
+                bounds.size.height = dragStartBounds.height + pagePoint.y - dragStartPoint.y
             } else {
                 let delta = CGPoint(x: pagePoint.x - dragStartPoint.x, y: pagePoint.y - dragStartPoint.y)
                 bounds.origin.x += delta.x
                 bounds.origin.y += delta.y
             }
             let pageBounds = page.bounds(for: .mediaBox)
-            bounds.origin.x = min(max(bounds.minX, pageBounds.minX), max(pageBounds.maxX - bounds.width, pageBounds.minX))
-            bounds.origin.y = min(max(bounds.minY, pageBounds.minY), max(pageBounds.maxY - bounds.height, pageBounds.minY))
+            bounds = PDFMarkupEngine.clampedBounds(
+                bounds,
+                to: pageBounds,
+                minimumSize: CGSize(width: 8, height: 8)
+            )
             annotation.bounds = bounds
             markupDidMove = true
             needsDisplay = true
@@ -700,13 +703,21 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         markupDrawingPoints = [pagePoint]
         if markupTool == .note {
             markupDrawingPoints = []
-            let bounds = CGRect(x: pagePoint.x, y: pagePoint.y, width: 20, height: 20)
+            let bounds = PDFMarkupEngine.clampedBounds(
+                CGRect(origin: pagePoint, size: CGSize(width: 20, height: 20)),
+                to: page.bounds(for: .mediaBox),
+                minimumSize: CGSize(width: 8, height: 8)
+            )
             markupDrawingPage = nil
             markupDrawingPageIndex = nil
             markupCreateHandler?(document.index(for: page), bounds, [])
         } else if markupTool == .signature {
             markupDrawingPoints = []
-            let bounds = CGRect(x: pagePoint.x, y: pagePoint.y, width: 140, height: 40)
+            let bounds = PDFMarkupEngine.clampedBounds(
+                CGRect(origin: pagePoint, size: CGSize(width: 140, height: 40)),
+                to: page.bounds(for: .mediaBox),
+                minimumSize: CGSize(width: 80, height: 24)
+            )
             markupDrawingPage = nil
             markupDrawingPageIndex = nil
             markupCreateHandler?(document.index(for: page), bounds, [])
