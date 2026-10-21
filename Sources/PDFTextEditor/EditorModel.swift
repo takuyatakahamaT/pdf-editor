@@ -34,6 +34,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var insertionFontChoice: InsertionFontChoice = .automatic
     @Published private(set) var insertionFontSize: Double = 12
     @Published private(set) var insertionFontColor: NSColor = .black
+    @Published private(set) var importedFontFamilies: [String] = []
     @Published private(set) var edits: [AppliedEdit] = []
     @Published private(set) var revision = 0
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
@@ -71,6 +72,31 @@ final class EditorModel: ObservableObject {
         panel.message = "編集するPDFを1つ選んでください"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         load(url: url)
+    }
+
+    func importFontFromPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.font]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "利用できるフォントファイルを選んでください"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let hasScopedAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasScopedAccess { url.stopAccessingSecurityScopedResource() }
+        }
+
+        do {
+            let families = try PDFEmbeddedFontLoader.registerFontFile(at: url)
+            importedFontFamilies = Array(Set(importedFontFamilies + families)).sorted()
+            revision += 1
+            statusMessage = families.isEmpty
+                ? "フォントファイルを読み込みました。PDF内のフォント名と一致すると置換に使われます。"
+                : "フォントを読み込みました: \(families.joined(separator: "、"))。一致するPDFの書体で使われます。"
+        } catch {
+            statusMessage = "フォントを読み込めませんでした: \(error.localizedDescription)"
+        }
     }
 
     func showMergeSheet() {

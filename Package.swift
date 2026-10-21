@@ -13,7 +13,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "PDFTextEditor",
-            path: "Sources/PDFTextEditor"
+            path: "Sources/PDFTextEditor",
+            resources: [.copy("Resources/Fonts")]
         ),
         .testTarget(
             name: "PDFTextEditorTests",

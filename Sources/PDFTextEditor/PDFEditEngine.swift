@@ -41,16 +41,22 @@ enum PDFEditEngine {
     ) -> PDFEmbeddedFontLoader.Resolution {
         guard let fontKey = target.fontKey,
               let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) else {
+            PDFEmbeddedFontLoader.registerBundledFonts()
             let containsJapanese = replacement.unicodeScalars.contains { scalar in
                 let value = scalar.value
                 return (0x3040...0x30FF).contains(value) || (0x4E00...0x9FFF).contains(value)
                     || (0x3400...0x4DBF).contains(value) || (0xFF66...0xFF9F).contains(value)
             }
-            let fallbackName = containsJapanese ? "Hiragino Sans" : "Helvetica Neue"
+            let fallbackName = containsJapanese ? "Noto Sans JP" : "Helvetica Neue"
             let font = CTFontCreateWithName(fallbackName as CFString, target.fontSize, nil)
             return PDFEmbeddedFontLoader.Resolution(font: font, isExact: false, exactGlyphs: nil)
         }
-        return PDFEmbeddedFontLoader.resolveFont(fontDict: fontDict, size: target.fontSize, replacementText: replacement)
+        return PDFEmbeddedFontLoader.resolveFont(
+            fontDict: fontDict,
+            size: target.fontSize,
+            replacementText: replacement,
+            supportingText: target.lineLayout?.text(replacingWith: replacement)
+        )
     }
 
     static func insertionBounds(

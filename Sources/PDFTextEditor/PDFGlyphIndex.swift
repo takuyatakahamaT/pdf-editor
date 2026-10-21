@@ -83,6 +83,60 @@ struct TextTarget: Equatable {
     let coverBounds: CGRect
     /// 右隣のグリフまでの使用可能幅。
     let maxWidth: CGFloat
+    /// 未埋め込みフォントで置換する際、同じ PDF テキスト run の後続文字を右へ移し、
+    /// 文字数増加分を行末の空きへ逃がすための情報。
+    let lineLayout: TextRunLayout?
+
+    init(
+        pageIndex: Int,
+        bounds: CGRect,
+        baseline: CGFloat,
+        originalText: String,
+        fontSize: CGFloat,
+        fontColor: NSColor,
+        fontKey: String?,
+        fontIsExact: Bool,
+        coverBounds: CGRect,
+        maxWidth: CGFloat,
+        lineLayout: TextRunLayout? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.bounds = bounds
+        self.baseline = baseline
+        self.originalText = originalText
+        self.fontSize = fontSize
+        self.fontColor = fontColor
+        self.fontKey = fontKey
+        self.fontIsExact = fontIsExact
+        self.coverBounds = coverBounds
+        self.maxWidth = maxWidth
+        self.lineLayout = lineLayout
+    }
+}
+
+struct TextRunLayout: Equatable {
+    struct Glyph: Equatable {
+        let text: String
+        let offsetX: CGFloat
+        let advance: CGFloat
+    }
+
+    let glyphs: [Glyph]
+    let selectedRange: Range<Int>
+    let lineStartX: CGFloat
+    let lineWidth: CGFloat
+    let maxWidth: CGFloat
+    let coverBounds: CGRect
+
+    var selectedStartX: CGFloat {
+        glyphs[selectedRange.lowerBound].offsetX
+    }
+
+    func text(replacingWith replacement: String) -> String {
+        let prefix = glyphs[..<selectedRange.lowerBound].map(\.text).joined()
+        let suffix = glyphs[selectedRange.upperBound...].map(\.text).joined()
+        return prefix + replacement + suffix
+    }
 }
 
 /// 1 ページ分の走査結果。クリック/ドラッグ判定はすべてここを介して行う。
@@ -242,6 +296,15 @@ struct PageTextIndex {
             maxWidth = max(bounds.width * 4, 200)
         }
 
+        let lineLayout = makeLineLayout(
+            for: run,
+            selectedRange: range,
+            sameLineRuns: sameLineRuns,
+            pageBounds: pageBounds,
+            coverMinY: coverMinY,
+            coverMaxY: coverMaxY
+        )
+
         return TextTarget(
             pageIndex: pageIndex,
             bounds: bounds,
@@ -252,8 +315,70 @@ struct PageTextIndex {
             fontKey: fontKey,
             fontIsExact: fontHasEmbeddedProgram[fontKey] ?? false,
             coverBounds: coverBounds,
-            maxWidth: maxWidth
+            maxWidth: maxWidth,
+            lineLayout: lineLayout
         )
+    }
+
+    private func makeLineLayout(
+        for run: ScannedRun,
+        selectedRange: Range<Int>,
+        sameLineRuns: [ScannedRun],
+        pageBounds: CGRect,
+        coverMinY: CGFloat,
+        coverMaxY: CGFloat
+    ) -> TextRunLayout? {
+        guard !run.glyphs.isEmpty,
+              selectedRange.lowerBound >= 0,
+              selectedRange.upperBound <= run.glyphs.count,
+              run.glyphs.allSatisfy({ !$0.text.isEmpty && $0.advance >= 0 }),
+              zip(run.glyphs, run.glyphs.dropFirst()).allSatisfy({ $0.advanceBox.minX <= $1.advanceBox.minX })
+        else { return nil }
+
+        let lineStartX = run.glyphs.map(\.advanceBox.minX).min() ?? run.box.minX
+        let lineEndX = run.glyphs.map(\.advanceBox.maxX).max() ?? run.box.maxX
+        let lineWidth = lineEndX - lineStartX
+        guard lineWidth > 0 else { return nil }
+
+        var rightBoundary = CGFloat.greatestFiniteMagnitude
+        for otherRun in sameLineRuns where !isSameRun(otherRun, run) {
+            for glyph in otherRun.glyphs where glyph.advanceBox.minX > lineStartX {
+                rightBoundary = min(rightBoundary, glyph.advanceBox.minX)
+            }
+        }
+        if rightBoundary == .greatestFiniteMagnitude {
+            rightBoundary = pageBounds.width > 0 ? pageBounds.maxX : lineStartX + max(lineWidth * 4, 200)
+        }
+        let maxWidth = rightBoundary - lineStartX
+        guard maxWidth >= lineWidth else { return nil }
+        let glyphs = run.glyphs.map {
+            TextRunLayout.Glyph(
+                text: $0.text,
+                offsetX: $0.advanceBox.minX - lineStartX,
+                advance: $0.advance
+            )
+        }
+        let coverBounds = CGRect(
+            x: lineStartX,
+            y: coverMinY,
+            width: lineWidth,
+            height: max(coverMaxY - coverMinY, 0)
+        )
+        return TextRunLayout(
+            glyphs: glyphs,
+            selectedRange: selectedRange,
+            lineStartX: lineStartX,
+            lineWidth: lineWidth,
+            maxWidth: maxWidth,
+            coverBounds: coverBounds
+        )
+    }
+
+    private func isSameRun(_ lhs: ScannedRun, _ rhs: ScannedRun) -> Bool {
+        lhs.fontKey == rhs.fontKey
+            && lhs.text == rhs.text
+            && lhs.box == rhs.box
+            && abs(lhs.baseline - rhs.baseline) < 0.01
     }
 
     /// フォントキーごとに「埋め込みフォントプログラムが存在したか」を保持する

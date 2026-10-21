@@ -29,6 +29,7 @@ struct ReplacementEdit {
     let maxWidth: CGFloat
     let resolvedFont: CTFont?
     let fontIsExact: Bool
+    let lineLayout: TextRunLayout?
     /// 元 PDF の CID を GID として直接指定できる場合の (GID, 送り幅[em]) 列。
     /// 埋め込みサブセットフォントが `cmap` を持たず `CTFontGetGlyphsForCharacters`
     /// が使えないときでも、元の GID を直接指定して真に同じグリフで描画するために使う。
@@ -54,6 +55,7 @@ struct ReplacementEdit {
         maxWidth = target.maxWidth
         self.resolvedFont = resolvedFont
         self.fontIsExact = fontIsExact
+        lineLayout = target.lineLayout
         self.exactGlyphs = exactGlyphs
     }
 
@@ -71,6 +73,7 @@ struct ReplacementEdit {
         maxWidth = target.maxWidth
         resolvedFont = nil
         fontIsExact = true
+        lineLayout = nil
         exactGlyphs = nil
     }
 
@@ -96,6 +99,7 @@ struct ReplacementEdit {
         maxWidth = bounds.width
         resolvedFont = nil
         fontIsExact = true
+        lineLayout = nil
         exactGlyphs = nil
     }
 
@@ -108,6 +112,16 @@ struct ReplacementEdit {
             fontSize: fontSize,
             fontColor: fontColor,
             id: id
+        )
+    }
+
+    var annotationBounds: CGRect {
+        guard !fontIsExact, let lineLayout else { return coverBounds }
+        return CGRect(
+            x: lineLayout.coverBounds.minX,
+            y: lineLayout.coverBounds.minY,
+            width: lineLayout.maxWidth,
+            height: lineLayout.coverBounds.height
         )
     }
 }

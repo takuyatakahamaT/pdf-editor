@@ -187,6 +187,28 @@ struct EditorScreen: View {
                             .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
                     }
 
+                if model.mode == .replacement {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Button(action: model.importFontFromPanel) {
+                            Label("フォントファイルを読み込む", systemImage: "textformat")
+                                .font(.custom("Hiragino Sans", size: 12).weight(.medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(NihoPalette.green)
+                        Text("一致するフォントは置換に使われます。読み込んだフォントはアプリ終了まで有効です。")
+                            .font(.custom("Hiragino Sans", size: 10))
+                            .foregroundStyle(NihoPalette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !model.importedFontFamilies.isEmpty {
+                            Text("読み込み済み: \(model.importedFontFamilies.joined(separator: "、"))")
+                                .font(.custom("Hiragino Sans", size: 10))
+                                .foregroundStyle(NihoPalette.green)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
                 if model.mode == .insertion {
                     InsertionStylePanel(model: model)
                 }

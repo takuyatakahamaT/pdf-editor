@@ -6,11 +6,20 @@ import PDFKit
 /// プレビュー（`ReplacementTextAnnotation.draw(with:in:)`）と書き出し
 /// （`PDFExportEngine`）の両方から呼ばれる、置換テキストの唯一の描画経路。
 /// 段落レイアウトや折り返しは一切使わず、1 行の `CTLine` を
-/// ベースライン固定で描く。幅が収まらない場合のみ水平圧縮→ポイントサイズ縮小を行う。
+/// ベースライン固定で描く。置換時は同じ行の後続文字を動かして空き幅を作る。
+/// 行内に空きがない場合も、横だけを細くせず縦横比を保って縮小する。
 enum PDFTextRenderer {
     static func draw(_ edit: ReplacementEdit, in context: CGContext) {
         context.saveGState()
         defer { context.restoreGState() }
+
+        if !edit.fontIsExact,
+           let lineLayout = edit.lineLayout,
+           !edit.replacement.isEmpty {
+            let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+            drawReflow(edit, layout: lineLayout, font: font, in: context)
+            return
+        }
 
         context.setFillColor(NSColor.white.cgColor)
         context.fill(edit.coverBounds)
@@ -29,8 +38,8 @@ enum PDFTextRenderer {
         let plan = renderPlan(text: edit.replacement, font: baseFont, color: edit.fontColor, maxWidth: edit.maxWidth)
 
         context.translateBy(x: edit.bounds.minX, y: edit.baseline)
-        if plan.scaleX != 1 {
-            context.scaleBy(x: plan.scaleX, y: 1)
+        if plan.scale != 1 {
+            context.scaleBy(x: plan.scale, y: plan.scale)
         }
         context.setFillColor(edit.fontColor.cgColor)
         drawGlyphOutlines(for: plan.line, in: context)
@@ -51,19 +60,14 @@ enum PDFTextRenderer {
             glyphs.reduce(0) { $0 + $1.emWidth } * size
         }
 
-        var scaleX: CGFloat = 1
+        var scale: CGFloat = 1
         while true {
             let width = totalWidth(at: fontSize)
             if width <= edit.maxWidth || width <= 0 {
-                scaleX = 1
                 break
             }
             if fontSize <= 6 {
-                scaleX = max(edit.maxWidth / width, 0.75)
-                break
-            }
-            if width * 0.75 <= edit.maxWidth {
-                scaleX = edit.maxWidth / width
+                scale = min(edit.maxWidth / width, 1)
                 break
             }
             let newSize = max(fontSize - 0.5, 6)
@@ -73,8 +77,8 @@ enum PDFTextRenderer {
         }
 
         context.translateBy(x: edit.bounds.minX, y: edit.baseline)
-        if scaleX != 1 {
-            context.scaleBy(x: scaleX, y: 1)
+        if scale != 1 {
+            context.scaleBy(x: scale, y: scale)
         }
         context.setFillColor(edit.fontColor.cgColor)
 
@@ -89,6 +93,96 @@ enum PDFTextRenderer {
             x += emWidth * fontSize
         }
         context.fillPath()
+    }
+
+    private static func drawReflow(
+        _ edit: ReplacementEdit,
+        layout: TextRunLayout,
+        font: CTFont,
+        in context: CGContext
+    ) {
+        let plan = reflowPlan(text: edit.replacement, font: font, layout: layout, color: edit.fontColor)
+        guard plan.outputEnd > 0, layout.maxWidth > 0 else {
+            context.setFillColor(NSColor.white.cgColor)
+            context.fill(edit.coverBounds)
+            return
+        }
+
+        // 後続の文字を右へ送って幅を確保する。ページ上の次の文字に当たる場合だけ
+        // 縦横比を保ったまま全体を縮め、横方向だけを押しつぶさない。
+        let coverWidth = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
+        var cover = layout.coverBounds
+        cover.size.width = coverWidth
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(cover)
+
+        context.saveGState()
+        context.translateBy(x: layout.lineStartX, y: edit.baseline)
+        context.scaleBy(x: plan.scale, y: plan.scale)
+
+        for glyph in layout.glyphs[..<layout.selectedRange.lowerBound] {
+            drawText(glyph.text, font: font, color: edit.fontColor, at: glyph.offsetX, in: context)
+        }
+        drawLine(plan.line, at: layout.selectedStartX, in: context)
+        for glyph in layout.glyphs[layout.selectedRange.upperBound...] {
+            drawText(glyph.text, font: font, color: edit.fontColor, at: glyph.offsetX + plan.shift, in: context)
+        }
+        context.restoreGState()
+    }
+
+    private static func drawText(
+        _ text: String,
+        font: CTFont,
+        color: NSColor,
+        at offsetX: CGFloat,
+        in context: CGContext
+    ) {
+        guard !text.isEmpty else { return }
+        let line = makeLine(text: text, font: font, color: color)
+        context.saveGState()
+        context.translateBy(x: offsetX, y: 0)
+        drawGlyphOutlines(for: line, in: context)
+        context.restoreGState()
+    }
+
+    private static func drawLine(_ line: CTLine, at offsetX: CGFloat, in context: CGContext) {
+        context.saveGState()
+        context.translateBy(x: offsetX, y: 0)
+        drawGlyphOutlines(for: line, in: context)
+        context.restoreGState()
+    }
+
+    struct ReflowPlan {
+        let line: CTLine
+        let shift: CGFloat
+        let outputEnd: CGFloat
+        let scale: CGFloat
+    }
+
+    static func reflowPlan(
+        text: String,
+        font: CTFont,
+        layout: TextRunLayout,
+        color: NSColor = .black
+    ) -> ReflowPlan {
+        let line = makeLine(text: text, font: font, color: color)
+        let replacementWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        let selectedAdvance = layout.glyphs[layout.selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
+        let shift = replacementWidth - selectedAdvance
+        let prefixEnd = layout.glyphs[..<layout.selectedRange.lowerBound]
+            .map { $0.offsetX + $0.advance }
+            .max() ?? 0
+        let suffixEnd = layout.glyphs[layout.selectedRange.upperBound...]
+            .map { $0.offsetX + $0.advance }
+            .max()
+        let outputEnd = max(
+            prefixEnd,
+            max(layout.selectedStartX + replacementWidth, (suffixEnd ?? 0) + shift)
+        )
+        let scale = outputEnd > layout.maxWidth && outputEnd > 0
+            ? layout.maxWidth / outputEnd
+            : 1
+        return ReflowPlan(line: line, shift: shift, outputEnd: outputEnd, scale: scale)
     }
 
     /// テキスト追加モードなど、置換以外の用途で単純に 1 行を描く場合に使う共通の輪郭描画。
@@ -117,12 +211,13 @@ enum PDFTextRenderer {
         context.fillPath()
     }
 
-    private struct RenderPlan {
+    struct RenderPlan {
         let line: CTLine
-        let scaleX: CGFloat
+        let fontSize: CGFloat
+        let scale: CGFloat
     }
 
-    private static func renderPlan(text: String, font: CTFont, color: NSColor, maxWidth: CGFloat) -> RenderPlan {
+    static func renderPlan(text: String, font: CTFont, color: NSColor, maxWidth: CGFloat) -> RenderPlan {
         var currentFont = font
         while true {
             let line = makeLine(text: text, font: currentFont, color: color)
@@ -130,14 +225,10 @@ enum PDFTextRenderer {
             let currentSize = CTFontGetSize(currentFont)
 
             if width <= maxWidth || width <= 0 {
-                return RenderPlan(line: line, scaleX: 1)
+                return RenderPlan(line: line, fontSize: currentSize, scale: 1)
             }
             if currentSize <= 6 {
-                let scaleX = max(maxWidth / width, 0.75)
-                return RenderPlan(line: line, scaleX: scaleX)
-            }
-            if width * 0.75 <= maxWidth {
-                return RenderPlan(line: line, scaleX: maxWidth / width)
+                return RenderPlan(line: line, fontSize: currentSize, scale: min(maxWidth / width, 1))
             }
             let newSize = max(currentSize - 0.5, 6)
             currentFont = CTFontCreateCopyWithAttributes(currentFont, newSize, nil, nil)
@@ -165,7 +256,7 @@ final class ReplacementTextAnnotation: PDFAnnotation {
 
     init(edit: ReplacementEdit) {
         self.edit = edit
-        super.init(bounds: edit.coverBounds, forType: .square, withProperties: nil)
+        super.init(bounds: edit.annotationBounds, forType: .square, withProperties: nil)
         color = .clear
         interiorColor = nil
         let border = PDFBorder()

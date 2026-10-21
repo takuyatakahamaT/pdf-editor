@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreText
 import Foundation
 import PDFKit
 import Testing
@@ -133,6 +134,81 @@ struct PDFEditEngineTests {
 
         #expect(font.pointSize < 18)
         #expect(font.pointSize >= 6)
+    }
+
+    @Test("unavailable MS Gothic keeps a Japanese Gothic fallback for numeric replacement")
+    func unavailableMSGothicKeepsJapaneseGothicFamily() {
+        PDFEmbeddedFontLoader.registerBundledFonts()
+        let fallbackNames = PDFEmbeddedFontLoader.fallbackFontNames(
+            for: "AAAAAA+MS-Gothic",
+            replacementText: "11"
+        )
+
+        #expect(fallbackNames.first == "Noto Sans JP")
+        #expect(CTFontCopyFamilyName(CTFontCreateWithName("Noto Sans JP" as CFString, 12, nil)) as String == "Noto Sans JP")
+    }
+
+    @Test("replacement does not distort glyphs horizontally when space is tight")
+    func replacementKeepsGlyphProportionsWhenShrinking() {
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let originalLine = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "8",
+            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        ))
+        let originalWidth = CGFloat(CTLineGetTypographicBounds(originalLine, nil, nil, nil))
+        let plan = PDFTextRenderer.renderPlan(
+            text: "88",
+            font: font,
+            color: .black,
+            maxWidth: originalWidth
+        )
+
+        #expect(plan.fontSize < 12)
+        #expect(plan.scale == 1)
+    }
+
+    @Test("replacement shrinks uniformly for text that does not fit")
+    func replacementShrinksForVeryLongText() {
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let originalLine = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "8",
+            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        ))
+        let originalWidth = CGFloat(CTLineGetTypographicBounds(originalLine, nil, nil, nil))
+        let plan = PDFTextRenderer.renderPlan(
+            text: "888888",
+            font: font,
+            color: .black,
+            maxWidth: originalWidth
+        )
+
+        #expect(plan.fontSize < 12)
+        #expect(plan.fontSize >= 6)
+    }
+
+    @Test("replacement expands the run by shifting following glyphs")
+    func replacementReflowsFollowingGlyphsIntoAvailableSpace() {
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let layout = TextRunLayout(
+            glyphs: [
+                .init(text: "9", offsetX: 0, advance: 6),
+                .init(text: "月", offsetX: 6, advance: 12),
+                .init(text: "3", offsetX: 18, advance: 6),
+                .init(text: "0", offsetX: 24, advance: 6),
+                .init(text: "日", offsetX: 30, advance: 12)
+            ],
+            selectedRange: 0..<1,
+            lineStartX: 100,
+            lineWidth: 42,
+            maxWidth: 120,
+            coverBounds: CGRect(x: 100, y: 0, width: 42, height: 14)
+        )
+
+        let plan = PDFTextRenderer.reflowPlan(text: "11", font: font, layout: layout)
+
+        #expect(plan.shift > 0)
+        #expect(plan.outputEnd > layout.lineWidth)
+        #expect(plan.scale == 1)
     }
 
     @Test("insertion creates one movable free-text annotation")
@@ -523,7 +599,7 @@ struct PageTextIndexGeometryTests {
         try? FileManager.default.removeItem(at: fixture.url)
     }
 
-    @Test("replacement render does not wrap, keeps baseline, and stays within the covered run")
+    @Test("replacement render reflows the same run without wrapping or crossing the next run")
     @MainActor
     func replacementRenderStaysOnOneLineWithSameBaseline() throws {
         let fixture = try makeLatinDigitFixture()
@@ -538,45 +614,55 @@ struct PageTextIndexGeometryTests {
         )
         let target = try #require(index.cluster(at: point, pageIndex: 0))
 
-        let result = PDFEditEngine.applyReplacement("99", to: page, target: target)
+        let fallbackFont = CTFontCreateWithName("HelveticaNeue" as CFString, target.fontSize, nil)
+        let edit = ReplacementEdit(
+            target: target,
+            replacement: "9999",
+            resolvedFont: fallbackFont,
+            fontIsExact: false
+        )
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-text-bench-fixture-out-\(UUID().uuidString).pdf")
-        try PDFExportEngine.export(sourceURL: fixture.url, edits: [result.edit], to: outputURL)
+        try PDFExportEngine.export(sourceURL: fixture.url, edits: [edit], to: outputURL)
 
         let outputDocument = try #require(PDFDocument(url: outputURL))
         let outputPage = try #require(outputDocument.page(at: 0))
         // `page.draw(with:to:)` は元ページを再レンダリングするため、PDFKit 自身が
-        // 追加するページ全面の背景塗りなどが混ざり得る。置換で描く白塗り・グリフ塗りは
-        // どちらも小さな領域に収まるはずなので、ページ全体を覆うような塗りは除外する。
+        // 追加するページ全面の背景塗りなどが混ざり得るので、ページ全面の塗りは除外する。
         let pageBounds = outputPage.bounds(for: .mediaBox)
         let fills = InkScanner.scan(page: outputPage).filter {
             $0.bounds.width < pageBounds.width * 0.5 && $0.bounds.height < pageBounds.height * 0.5
         }
-        #expect(fills.count == 2)
+        #expect(fills.count >= 2)
 
         let coverFill = try #require(fills.first(where: { $0.isPlainRect }))
-        let inkFill = try #require(fills.first(where: { !$0.isPlainRect }))
+        let inkFills = fills.filter { !$0.isPlainRect }
+        #expect(!inkFills.isEmpty)
+        let inkBounds = inkFills.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
 
         #expect(coverFill.isPlainRect)
-        #expect(abs(coverFill.bounds.minX - target.coverBounds.minX) < 0.01)
-        #expect(abs(coverFill.bounds.maxX - target.coverBounds.maxX) < 0.01)
+        let lineLayout = try #require(target.lineLayout)
+        #expect(abs(coverFill.bounds.minX - lineLayout.coverBounds.minX) < 0.01)
+        #expect(coverFill.bounds.maxX >= lineLayout.coverBounds.maxX - 0.01)
+        #expect(coverFill.bounds.maxX > lineLayout.coverBounds.maxX)
+        #expect(coverFill.bounds.maxX <= lineLayout.lineStartX + lineLayout.maxWidth + 0.5)
 
         // 折り返しなし: 描画されたグリフの高さが 1 行分（fontSize の 1.3 倍未満）に収まる。
-        #expect(inkFill.bounds.height < target.fontSize * 1.3)
+        #expect(inkBounds.height < target.fontSize * 1.3)
         // ベースラインはほぼ動かない(descender 分だけ下に出ることはある)。
-        #expect(inkFill.bounds.minY > target.baseline - target.fontSize)
-        #expect(inkFill.bounds.maxY < target.baseline + target.fontSize)
-        // 元 run の右端（隣接グリフ B の手前）を越えない。
-        #expect(inkFill.bounds.maxX <= target.bounds.minX + target.maxWidth + 0.5)
+        #expect(inkBounds.minY > target.baseline - target.fontSize)
+        #expect(inkBounds.maxY < target.baseline + target.fontSize)
+        // 拡張後の文字は行末の空きへ入り、ページ外へは出ない。
+        #expect(inkBounds.maxX <= lineLayout.lineStartX + lineLayout.maxWidth + 0.5)
 
-        // 元テキストの近傍グリフ (A, B) は白塗りで欠けていない。
+        // 同一 run の A は描き直し、後続の B は置換文字幅分だけ右へ移す。
         let originalIndex = PDFGlyphIndex.makeIndex(for: outputPage)
         let originalRun = try #require(originalIndex.runs.first { $0.text == "A04B" })
         let aGlyph = try #require(originalRun.glyphs.first { $0.text == "A" })
         let bGlyph = try #require(originalRun.glyphs.first { $0.text == "B" })
-        #expect(coverFill.bounds.minX >= aGlyph.advanceBox.maxX - 0.01)
-        #expect(coverFill.bounds.maxX <= bGlyph.advanceBox.minX + 0.01)
+        #expect(inkBounds.minX <= aGlyph.advanceBox.minX + 0.5)
+        #expect(inkBounds.maxX > bGlyph.advanceBox.maxX)
 
         try? FileManager.default.removeItem(at: fixture.url)
         try? FileManager.default.removeItem(at: outputURL)
