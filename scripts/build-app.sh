@@ -34,6 +34,10 @@ GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cm
     cd "$APP_DIR/Tools/pdf-compress"
     "$GO_COMMAND" build -trimpath -o "$APP_DIR/.build/tools/pdf-compress" .
 )
+(
+    cd "$APP_DIR/Tools/pdf-link-remap"
+    "$GO_COMMAND" build -trimpath -o "$APP_DIR/.build/tools/pdf-link-remap" .
+)
 /usr/bin/install -m 755 \
     "$APP_DIR/.build/release/PDFTextEditor" \
     "$CONTENTS_DIR/MacOS/PDFTextEditor"
@@ -43,6 +47,9 @@ GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cm
 /usr/bin/install -m 755 \
     "$APP_DIR/.build/tools/pdf-compress" \
     "$CONTENTS_DIR/Helpers/pdf-compress"
+/usr/bin/install -m 755 \
+    "$APP_DIR/.build/tools/pdf-link-remap" \
+    "$CONTENTS_DIR/Helpers/pdf-link-remap"
 /bin/cp "$APP_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 if [[ -n "${PDF_EDITOR_BUILD_VERSION:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $PDF_EDITOR_BUILD_VERSION" "$CONTENTS_DIR/Info.plist"

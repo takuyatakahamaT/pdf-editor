@@ -4,6 +4,7 @@ import PDFKit
 enum EditorMode: String, CaseIterable, Identifiable {
     case replacement
     case insertion
+    case markup
 
     var id: String { rawValue }
 
@@ -11,6 +12,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         switch self {
         case .replacement: return "既存文字を置換"
         case .insertion: return "テキストを追加"
+        case .markup: return "注釈・署名"
         }
     }
 }
