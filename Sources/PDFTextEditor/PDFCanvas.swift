@@ -7,6 +7,10 @@ struct PDFCanvas: NSViewRepresentable {
     let revision: Int
     let mode: EditorMode
     let selectedTarget: TextTarget?
+    let highlightedSearchSelections: [PDFSelection]
+    let focusedSearchSelection: PDFSelection?
+    let searchHighlightRevision: Int
+    let searchNavigationRevision: Int
     let isInlineEditing: Bool
     @ObservedObject var zoomState: PDFZoomState
     let onSelection: (TextTarget?) -> Void
@@ -84,6 +88,17 @@ struct PDFCanvas: NSViewRepresentable {
         if view.appliedZoomCommandRevision != zoomState.commandRevision {
             view.applyZoomCommand(zoomState.command)
             view.appliedZoomCommandRevision = zoomState.commandRevision
+        }
+        if view.searchHighlightRevision != searchHighlightRevision {
+            view.highlightedSelections = highlightedSearchSelections.isEmpty ? nil : highlightedSearchSelections
+            view.searchHighlightRevision = searchHighlightRevision
+        }
+        if view.searchNavigationRevision != searchNavigationRevision {
+            if let focusedSearchSelection {
+                view.go(to: focusedSearchSelection)
+                view.setCurrentSelection(focusedSearchSelection, animate: true)
+            }
+            view.searchNavigationRevision = searchNavigationRevision
         }
         view.selectedTextTarget = selectedTarget
         view.syncInlineEditor(isEditing: isInlineEditing)
@@ -192,6 +207,8 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private var magnifierPoint: CGPoint?
     private var fitsWidthOnResize = false
     private var fitsPageOnResize = false
+    var searchHighlightRevision = -1
+    var searchNavigationRevision = -1
     private let magnifierDiameter: CGFloat = 164
     private let magnifierFactor: CGFloat = 2.5
 

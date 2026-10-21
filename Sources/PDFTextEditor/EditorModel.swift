@@ -45,6 +45,14 @@ final class EditorModel: ObservableObject {
     @Published var isShowingMergeSheet = false
     @Published var isShowingResizeSheet = false
     @Published var isShowingCompressionSheet = false
+    @Published var isShowingSearchSheet = false
+    @Published private(set) var searchQuery = ""
+    @Published private(set) var searchResults: [PDFSearchHit] = []
+    @Published private(set) var highlightedSearchSelections: [PDFSelection] = []
+    @Published private(set) var focusedSearchSelection: PDFSelection?
+    @Published private(set) var focusedSearchResultID: UUID?
+    @Published private(set) var searchHighlightRevision = 0
+    @Published private(set) var searchNavigationRevision = 0
 
     init(initialURL: URL?) {
         importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
@@ -161,6 +169,71 @@ final class EditorModel: ObservableObject {
         isShowingCompressionSheet = true
     }
 
+    func showSearchSheet() {
+        guard document != nil else { return }
+        isShowingSearchSheet = true
+        if !searchResults.isEmpty {
+            highlightedSearchSelections = searchResults.map(\.selection)
+            searchHighlightRevision += 1
+        }
+    }
+
+    func closeSearchSheet() {
+        isShowingSearchSheet = false
+        guard !highlightedSearchSelections.isEmpty else { return }
+        highlightedSearchSelections = []
+        searchHighlightRevision += 1
+    }
+
+    func search(_ query: String) {
+        searchQuery = query
+        focusedSearchResultID = nil
+        focusedSearchSelection = nil
+        guard let document else {
+            searchResults = []
+            highlightedSearchSelections = []
+            searchHighlightRevision += 1
+            return
+        }
+
+        searchResults = PDFSearchEngine.search(document: document, query: query)
+        highlightedSearchSelections = searchResults.map(\.selection)
+        searchHighlightRevision += 1
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, searchResults.isEmpty {
+            statusMessage = "「\(query)」は見つかりません。画像だけのページはOCRが必要です。"
+        } else if !searchResults.isEmpty {
+            statusMessage = "\(searchResults.count)件見つかりました。結果を選ぶと該当ページへ移動します。"
+        }
+    }
+
+    func focusSearchResult(_ result: PDFSearchHit) {
+        guard searchResults.contains(where: { $0.id == result.id }) else { return }
+        guard !isInlineEditing else {
+            statusMessage = "編集中の文字を確定またはキャンセルしてから検索結果を選んでください。"
+            return
+        }
+
+        focusedSearchSelection = result.selection
+        focusedSearchResultID = result.id
+        searchNavigationRevision += 1
+        if mode == .replacement, let target = result.editTarget {
+            select(target)
+            statusMessage = "検索結果を編集対象にしました。置換する文字を入力してください。"
+        } else if result.editTarget == nil {
+            statusMessage = "\(result.pageIndex + 1)ページ目へ移動しました。文字情報を取得できないため、ページ上で対象を選択してください。"
+        } else {
+            statusMessage = "\(result.pageIndex + 1)ページ目の検索結果へ移動しました。"
+        }
+    }
+
+    func moveSearchResult(by offset: Int) {
+        guard !searchResults.isEmpty else { return }
+        let currentIndex = searchResults.firstIndex { $0.id == focusedSearchResultID }
+        let startIndex = currentIndex ?? (offset < 0 ? 0 : -1)
+        let nextIndex = (startIndex + offset + searchResults.count) % searchResults.count
+        focusSearchResult(searchResults[nextIndex])
+    }
+
     func reportCompressionStatus(_ message: String) {
         statusMessage = message
     }
@@ -187,6 +260,12 @@ final class EditorModel: ObservableObject {
         replacementFontChoice = .automatic
         replacementText = ""
         edits = []
+        searchResults = []
+        highlightedSearchSelections = []
+        focusedSearchSelection = nil
+        focusedSearchResultID = nil
+        searchHighlightRevision += 1
+        searchNavigationRevision += 1
         revision += 1
         statusMessage = mode == .replacement
             ? "変更したい文字をクリックしてください。"
