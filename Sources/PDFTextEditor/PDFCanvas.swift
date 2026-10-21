@@ -326,6 +326,15 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
+    override func copy(_ sender: Any?) {
+        if let text = selectedTextTarget?.originalText, !text.isEmpty {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        } else {
+            super.copy(sender)
+        }
+    }
+
     override func resetCursorRects() {
         super.resetCursorRects()
         if editorMode == .insertion { addCursorRect(bounds, cursor: .crosshair) }
