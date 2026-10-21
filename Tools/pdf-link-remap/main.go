@@ -20,8 +20,6 @@ type linkRemap struct {
 	LinkIndex            int        `json:"linkIndex"`
 	Bounds               [4]float64 `json:"bounds"`
 	DestinationPageIndex int        `json:"destinationPageIndex"`
-	DestinationPoint     [2]float64 `json:"destinationPoint"`
-	DestinationZoom      *float64   `json:"destinationZoom"`
 }
 
 func main() {
@@ -32,12 +30,12 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) != 3 {
-		return errors.New("usage: pdf-link-remap input.pdf output.pdf mappings.json")
+	if len(args) != 4 {
+		return errors.New("usage: pdf-link-remap source.pdf input.pdf output.pdf mappings.json")
 	}
-	input, output, mappingsPath := args[0], args[1], args[2]
-	if samePath(input, output) {
-		return errors.New("input and output must be different files")
+	sourcePath, inputPath, outputPath, mappingsPath := args[0], args[1], args[2], args[3]
+	if samePath(sourcePath, outputPath) || samePath(inputPath, outputPath) {
+		return errors.New("source and output files must be different")
 	}
 	mappingData, err := os.ReadFile(mappingsPath)
 	if err != nil {
@@ -50,16 +48,23 @@ func run(args []string) error {
 	if len(mappings) == 0 {
 		return errors.New("no internal link mappings provided")
 	}
-	ctx, err := api.ReadContextFile(context.Background(), input)
+	sourceContext, err := api.ReadContextFile(context.Background(), sourcePath)
 	if err != nil {
 		return err
 	}
-	if ctx.PageCount <= 0 {
+	outputContext, err := api.ReadContextFile(context.Background(), inputPath)
+	if err != nil {
+		return err
+	}
+	if sourceContext.PageCount <= 0 || outputContext.PageCount <= 0 {
 		return errors.New("PDF has no pages")
+	}
+	if sourceContext.PageCount != outputContext.PageCount {
+		return errors.New("output page count does not match source")
 	}
 	used := make(map[[2]int]bool, len(mappings))
 	for _, mapping := range mappings {
-		if err := validateMapping(mapping, ctx.PageCount); err != nil {
+		if err := validateMapping(mapping, sourceContext.PageCount); err != nil {
 			return err
 		}
 		key := [2]int{mapping.PageIndex, mapping.LinkIndex}
@@ -67,11 +72,11 @@ func run(args []string) error {
 			return fmt.Errorf("duplicate link mapping for page %d link %d", mapping.PageIndex, mapping.LinkIndex)
 		}
 		used[key] = true
-		if err := remapLink(ctx, mapping); err != nil {
+		if err := remapLink(sourceContext, outputContext, mapping); err != nil {
 			return err
 		}
 	}
-	if err := api.WriteContextFile(context.Background(), ctx, output); err != nil {
+	if err := api.WriteContextFile(context.Background(), outputContext, outputPath); err != nil {
 		return err
 	}
 	fmt.Printf("remapped=%d\n", len(mappings))
@@ -90,48 +95,157 @@ func validateMapping(mapping linkRemap, pageCount int) error {
 			return errors.New("link bounds contain a non-finite value")
 		}
 	}
-	for _, value := range mapping.DestinationPoint {
-		if !finite(value) {
-			return errors.New("destination point contains a non-finite value")
-		}
+	return nil
+}
+
+func remapLink(sourceContext, outputContext *model.Context, mapping linkRemap) error {
+	sourceAnnotation, err := linkAnnotation(sourceContext, mapping)
+	if err != nil {
+		return err
 	}
-	if mapping.DestinationZoom != nil && (!finite(*mapping.DestinationZoom) || *mapping.DestinationZoom <= 0) {
-		return errors.New("destination zoom must be finite and positive")
+	destination, fromAction, err := sourceDestinationArray(sourceContext, sourceAnnotation)
+	if err != nil {
+		return fmt.Errorf("resolve source link destination on page %d link %d: %w", mapping.PageIndex, mapping.LinkIndex, err)
+	}
+	destinationPageIndex, err := pageIndexForReference(sourceContext, destination[0])
+	if err != nil {
+		return fmt.Errorf("resolve source link page on page %d link %d: %w", mapping.PageIndex, mapping.LinkIndex, err)
+	}
+	if destinationPageIndex != mapping.DestinationPageIndex {
+		return fmt.Errorf("source link destination page mismatch: got %d, expected %d", destinationPageIndex, mapping.DestinationPageIndex)
+	}
+	outputAnnotation, err := linkAnnotation(outputContext, mapping)
+	if err != nil {
+		return err
+	}
+	_, destinationPageRef, _, err := outputContext.PageDict(context.Background(), destinationPageIndex, false)
+	if err != nil || destinationPageRef == nil {
+		return fmt.Errorf("resolve output destination page %d: %w", destinationPageIndex, err)
+	}
+	remappedDestination := make(types.Array, len(destination))
+	copy(remappedDestination, destination)
+	remappedDestination[0] = *destinationPageRef
+	if fromAction {
+		actionObject, found := outputAnnotation.Find("A")
+		if !found {
+			return fmt.Errorf("output link on page %d link %d has no go-to action", mapping.PageIndex, mapping.LinkIndex)
+		}
+		action, err := outputContext.XRefTable.DereferenceDict(actionObject)
+		if err != nil {
+			return err
+		}
+		action["D"] = remappedDestination
+		delete(outputAnnotation, "Dest")
+	} else {
+		delete(outputAnnotation, "A")
+		outputAnnotation["Dest"] = remappedDestination
 	}
 	return nil
 }
 
-func remapLink(ctx *model.Context, mapping linkRemap) error {
+func linkAnnotation(ctx *model.Context, mapping linkRemap) (types.Dict, error) {
 	pageDict, _, _, err := ctx.PageDict(context.Background(), mapping.PageIndex, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	annotsObject, found := pageDict.Find("Annots")
 	if !found {
-		return fmt.Errorf("page %d has no annotations", mapping.PageIndex)
+		return nil, fmt.Errorf("page %d has no annotations", mapping.PageIndex)
 	}
 	annots, err := ctx.XRefTable.DereferenceArray(annotsObject)
 	if err != nil {
-		return fmt.Errorf("read annotations on page %d: %w", mapping.PageIndex, err)
+		return nil, fmt.Errorf("read annotations on page %d: %w", mapping.PageIndex, err)
 	}
 	linkIndex := 0
 	for _, annotationObject := range annots {
 		annotationDict, err := ctx.XRefTable.DereferenceDict(annotationObject)
 		if err != nil {
-			return fmt.Errorf("read annotation on page %d: %w", mapping.PageIndex, err)
+			return nil, fmt.Errorf("read annotation on page %d: %w", mapping.PageIndex, err)
 		}
 		if nameValue(annotationDict["Subtype"]) != "Link" {
 			continue
 		}
 		if linkIndex == mapping.LinkIndex {
 			if err := validateBounds(ctx, annotationDict, mapping); err != nil {
-				return err
+				return nil, err
 			}
-			return setDestination(ctx, annotationDict, mapping)
+			return annotationDict, nil
 		}
 		linkIndex++
 	}
-	return fmt.Errorf("page %d has no link annotation at index %d", mapping.PageIndex, mapping.LinkIndex)
+	return nil, fmt.Errorf("page %d has no link annotation at index %d", mapping.PageIndex, mapping.LinkIndex)
+}
+
+func sourceDestinationArray(ctx *model.Context, annotation types.Dict) (types.Array, bool, error) {
+	object, found := annotation.Find("Dest")
+	fromAction := false
+	if !found {
+		actionObject, hasAction := annotation.Find("A")
+		if !hasAction {
+			return nil, false, errors.New("link has no destination")
+		}
+		action, err := ctx.XRefTable.DereferenceDict(actionObject)
+		if err != nil {
+			return nil, false, err
+		}
+		if nameValue(action["S"]) != "GoTo" {
+			return nil, false, errors.New("link action is not an internal go-to")
+		}
+		object, found = action.Find("D")
+		if !found {
+			return nil, false, errors.New("go-to action has no destination")
+		}
+		fromAction = true
+	}
+	object, err := ctx.XRefTable.Dereference(object)
+	if err != nil {
+		return nil, false, err
+	}
+	switch value := object.(type) {
+	case types.Array:
+		return value, fromAction, nil
+	case types.Name:
+		array, err := ctx.XRefTable.DereferenceDestArray(context.Background(), value.Value())
+		return array, fromAction, err
+	case types.StringLiteral:
+		name, err := types.StringLiteralToString(value)
+		if err != nil {
+			return nil, false, err
+		}
+		array, err := ctx.XRefTable.DereferenceDestArray(context.Background(), name)
+		return array, fromAction, err
+	case types.HexLiteral:
+		name, err := types.HexLiteralToString(value)
+		if err != nil {
+			return nil, false, err
+		}
+		array, err := ctx.XRefTable.DereferenceDestArray(context.Background(), name)
+		return array, fromAction, err
+	default:
+		return nil, false, fmt.Errorf("unsupported destination value %T", object)
+	}
+}
+
+func pageIndexForReference(ctx *model.Context, object types.Object) (int, error) {
+	pageRef, ok := object.(types.IndirectRef)
+	if !ok {
+		if pointer, pointerOK := object.(*types.IndirectRef); pointerOK && pointer != nil {
+			pageRef, ok = *pointer, true
+		}
+	}
+	if !ok {
+		return 0, fmt.Errorf("destination does not start with a page reference: %T", object)
+	}
+	for pageIndex := 1; pageIndex <= ctx.PageCount; pageIndex++ {
+		_, candidate, _, err := ctx.PageDict(context.Background(), pageIndex, false)
+		if err != nil {
+			return 0, err
+		}
+		if candidate != nil && *candidate == pageRef {
+			return pageIndex, nil
+		}
+	}
+	return 0, fmt.Errorf("destination page reference %s is not in the document", pageRef.PDFString())
 }
 
 func validateBounds(ctx *model.Context, annotation types.Dict, mapping linkRemap) error {
@@ -149,27 +263,6 @@ func validateBounds(ctx *model.Context, annotation types.Dict, mapping linkRemap
 			return fmt.Errorf("page %d link %d bounds do not match the source", mapping.PageIndex, mapping.LinkIndex)
 		}
 	}
-	return nil
-}
-
-func setDestination(ctx *model.Context, annotation types.Dict, mapping linkRemap) error {
-	_, destinationPageRef, _, err := ctx.PageDict(context.Background(), mapping.DestinationPageIndex, false)
-	if err != nil || destinationPageRef == nil {
-		return fmt.Errorf("resolve destination page %d: %w", mapping.DestinationPageIndex, err)
-	}
-	destination := types.Array{
-		*destinationPageRef,
-		types.Name("XYZ"),
-		types.Float(mapping.DestinationPoint[0]),
-		types.Float(mapping.DestinationPoint[1]),
-	}
-	if mapping.DestinationZoom == nil {
-		destination = append(destination, nil)
-	} else {
-		destination = append(destination, types.Float(*mapping.DestinationZoom))
-	}
-	delete(annotation, "A")
-	annotation["Dest"] = destination
 	return nil
 }
 

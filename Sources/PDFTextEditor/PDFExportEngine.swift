@@ -223,8 +223,6 @@ private struct PDFInternalLinkRemap: Encodable {
     let linkIndex: Int
     let bounds: [CGFloat]
     let destinationPageIndex: Int
-    let destinationPoint: [CGFloat]
-    let destinationZoom: CGFloat?
 }
 
 enum PDFExportEngine {
@@ -254,14 +252,11 @@ enum PDFExportEngine {
                 let destinationPageIndex = document.index(for: destinationPage)
                 if (0..<document.pageCount).contains(destinationPageIndex) {
                     let bounds = annotation.bounds
-                    let zoom = destination.zoom
                     internalLinkRemaps.append(PDFInternalLinkRemap(
                         pageIndex: sourcePageIndex + 1,
                         linkIndex: sourceLinkIndex,
                         bounds: [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY],
-                        destinationPageIndex: destinationPageIndex + 1,
-                        destinationPoint: [destination.point.x, destination.point.y],
-                        destinationZoom: zoom.isFinite && zoom > 0 && zoom != kPDFDestinationUnspecifiedValue ? zoom : nil
+                        destinationPageIndex: destinationPageIndex + 1
                     ))
                 }
             }
@@ -327,6 +322,7 @@ enum PDFExportEngine {
             throw PDFExportError.cannotCreateContext
         }
         let data = try remappedLinkData(
+            sourceURL,
             stagedURL,
             mappings: internalLinkRemaps,
             helperURL: linkRemapHelperURL,
@@ -337,6 +333,7 @@ enum PDFExportEngine {
     }
 
     private static func remappedLinkData(
+        _ sourceURL: URL,
         _ stagedURL: URL,
         mappings: [PDFInternalLinkRemap],
         helperURL: URL?,
@@ -372,7 +369,7 @@ enum PDFExportEngine {
         }
         let process = Process()
         process.executableURL = helper
-        process.arguments = [stagedURL.path, outputURL.path, mappingURL.path]
+        process.arguments = [sourceURL.path, stagedURL.path, outputURL.path, mappingURL.path]
         process.standardOutput = logHandle
         process.standardError = logHandle
         do {
@@ -398,13 +395,7 @@ enum PDFExportEngine {
             guard links.indices.contains(mapping.linkIndex),
                   let destination = links[mapping.linkIndex].destination,
                   let destinationPage = destination.page,
-                  output.index(for: destinationPage) == mapping.destinationPageIndex - 1,
-                  abs(destination.point.x - mapping.destinationPoint[0]) < 0.01,
-                  abs(destination.point.y - mapping.destinationPoint[1]) < 0.01 else {
-                throw PDFExportError.cannotCreateContext
-            }
-            if let expectedZoom = mapping.destinationZoom,
-               abs(destination.zoom - expectedZoom) >= 0.0001 {
+                  output.index(for: destinationPage) == mapping.destinationPageIndex - 1 else {
                 throw PDFExportError.cannotCreateContext
             }
         }
