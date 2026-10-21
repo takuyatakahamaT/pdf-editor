@@ -75,6 +75,8 @@ if [[ ! -s "$FONT_RESOURCE_DEST" ]]; then
     echo "アプリ同梱フォントを配置できません: $FONT_RESOURCE_DEST" >&2
     exit 1
 fi
+/bin/rm -rf "$APP_BUNDLE/PDFTextEditor_PDFTextEditor.bundle"
+/usr/bin/swift "$APP_DIR/scripts/verify-app-resources.swift" "$APP_BUNDLE"
 /bin/rm -f "$CONTENTS_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt"
 /usr/bin/install -m 644 \
     "$APP_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt" \
