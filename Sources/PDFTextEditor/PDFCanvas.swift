@@ -42,6 +42,9 @@ struct PDFCanvas: NSViewRepresentable {
     func makeNSView(context: Context) -> ClickablePDFView {
         let view = ClickablePDFView()
         configure(view, coordinator: context.coordinator)
+        let replacementOverlayProvider = ReplacementPreviewOverlayProvider()
+        view.replacementOverlayProvider = replacementOverlayProvider
+        view.pageOverlayViewProvider = replacementOverlayProvider
         if mode == .insertion { view.clearSelection() }
         view.document = document
         view.minScaleFactor = PDFZoomState.minimumScale
@@ -101,6 +104,7 @@ struct PDFCanvas: NSViewRepresentable {
             view.searchNavigationRevision = searchNavigationRevision
         }
         view.selectedTextTarget = selectedTarget
+        view.replacementOverlayProvider?.invalidate(revision: revision)
         view.syncInlineEditor(isEditing: isInlineEditing)
         if selectedTarget == nil {
             view.clearReplacementHighlight()
@@ -181,6 +185,7 @@ struct PDFCanvas: NSViewRepresentable {
 }
 
 final class ClickablePDFView: PDFView, NSTextFieldDelegate {
+    var replacementOverlayProvider: ReplacementPreviewOverlayProvider?
     var editorMode: EditorMode = .replacement
     var selectionHandler: ((TextTarget?) -> Void)?
     var insertionHandler: ((Int, CGPoint) -> Void)?

@@ -32,7 +32,7 @@ struct TextRunReplacement {
 /// 1 件の編集（置換 or 追加）。書き出し (`PDFExportEngine`) は元 PDF を再度開き直して
 /// 描画するため、置換に必要なフォント解決結果 (`resolvedFont`/`fontIsExact`) は
 /// 選択・置換確定時 (`PDFEditEngine.applyReplacement`) に一度だけ行い、ここへ焼き込む。
-/// プレビュー (`ReplacementTextAnnotation`) と書き出しは同じ `ReplacementEdit` を使うため、
+/// プレビューオーバーレイと書き出しは同じ `ReplacementEdit` を使うため、
 /// フォント解決がぶれることはない。
 struct ReplacementEdit {
     let id: UUID
