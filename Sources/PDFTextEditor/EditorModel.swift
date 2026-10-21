@@ -63,9 +63,22 @@ final class EditorModel: ObservableObject {
     var activeReplacements: [ReplacementEdit] {
         let latestIndexByID = Dictionary(edits.enumerated().map { ($0.element.replacement.id, $0.offset) },
                                          uniquingKeysWith: { _, latest in latest })
-        return edits.enumerated().compactMap { index, applied in
-            latestIndexByID[applied.replacement.id] == index ? applied.replacement : nil
+        let latestEdits = edits.enumerated().compactMap { index, applied -> (Int, ReplacementEdit)? in
+            latestIndexByID[applied.replacement.id] == index ? (index, applied.replacement) : nil
         }
+        var visible: [(Int, ReplacementEdit)] = []
+        for item in latestEdits {
+            if item.1.destinationOrigin == nil, let layout = item.1.lineLayout,
+               !item.1.lineReplacements.isEmpty {
+                visible.removeAll { previous in
+                    guard previous.1.destinationOrigin == nil,
+                          let previousLayout = previous.1.lineLayout else { return false }
+                    return layout.hasSameSourceLine(as: previousLayout)
+                }
+            }
+            visible.append(item)
+        }
+        return visible.map(\.1)
     }
     var canPrint: Bool { document != nil && sourceURL != nil }
     var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil }
@@ -394,10 +407,31 @@ final class EditorModel: ObservableObject {
         let result = PDFEditEngine.applyReplacement(
             normalized, to: page, target: target, preferredFontName: selectedFontChoiceName
         )
+        var replacement = result.edit
+        var annotation = result.annotation
+        if let layout = replacement.lineLayout,
+           let previous = activeReplacements.last(where: { existing in
+               existing.destinationOrigin == nil
+                   && existing.lineLayout.map { layout.hasSameSourceLine(as: $0) } == true
+           }) {
+            let incoming = replacement.lineReplacements
+            let incomingRanges = incoming.map(\.range)
+            let preserved = previous.lineReplacements.filter { old in
+                !incomingRanges.contains(where: { $0.overlaps(old.range) })
+            }
+            replacement.lineReplacements = preserved + incoming
+            replacement.lineFont = previous.lineFont
+            replacement.lineCompositionStart = min(previous.lineCompositionStart ?? layout.selectedRange.lowerBound,
+                                                  layout.selectedRange.lowerBound)
+            replacement.composesLineEdits = true
+            page.removeAnnotation(result.annotation)
+            annotation = ReplacementTextAnnotation(edit: replacement)
+            page.addAnnotation(annotation)
+        }
         edits.append(AppliedEdit(
             pageIndex: target.pageIndex,
-            annotations: [result.annotation],
-            replacement: result.edit
+            annotations: [annotation],
+            replacement: replacement
         ))
         selectedTarget = nil
         isInlineEditing = false

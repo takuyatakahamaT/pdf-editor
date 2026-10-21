@@ -83,6 +83,57 @@ struct PDFEditingAcceptanceTests {
         #expect(model.activeReplacements.isEmpty)
     }
 
+    @Test("同じ日付行の2箇所を置換しても先の幅変更と後続編集を合成する")
+    @MainActor
+    func multipleDateReplacementsComposeAndUndo() throws {
+        let fixture = try makeDateFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+
+        let model = EditorModel(initialURL: fixture.url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.glyphs.map(\.text).joined() == fixture.date })
+        let firstIndex = try #require(run.glyphs.firstIndex { $0.text == "9" })
+        let secondIndex = try #require(run.glyphs.firstIndex { $0.text == "3" })
+        let firstTarget = try #require(index.target(in: run, range: firstIndex..<(firstIndex + 1), pageIndex: 0))
+        let secondTarget = try #require(index.target(in: run, range: secondIndex..<(secondIndex + 1), pageIndex: 0))
+
+        model.select(firstTarget)
+        model.updateEditorText("10")
+        model.commitEditorText()
+        model.select(secondTarget)
+        model.updateEditorText("4")
+        model.commitEditorText()
+
+        let composed = try #require(model.activeReplacements.first)
+        let layout = try #require(composed.lineLayout)
+        let plan = try #require(PDFTextRenderer.composedReflowPlan(
+            layout: layout,
+            replacements: composed.lineReplacements,
+            startingAt: composed.lineCompositionStart
+        ))
+        let later = try #require(plan.replacements.first { $0.replacement.text == "4" })
+        #expect(model.activeReplacements.count == 1)
+        #expect(composed.composesLineEdits)
+        #expect(composed.lineReplacements.count == 2)
+        #expect(later.offsetX > layout.glyphs[secondIndex].offsetX)
+        #expect(plan.scale == 1)
+
+        let output = temporaryPDFURL(prefix: "multi-date-acceptance")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: fixture.url, edits: model.activeReplacements, to: output)
+        let exportedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        let raster = try rasterMetrics(page: exportedPage, focus: layout.coverBounds, scale: 4)
+        #expect(raster.darkPixels > 0)
+        #expect(raster.antialiasPixels > 0)
+
+        model.undoLastEdit()
+        let prior = try #require(model.activeReplacements.first)
+        #expect(model.activeReplacements.count == 1)
+        #expect(prior.lineReplacements.count == 1)
+        #expect(page.annotations.count == 1)
+    }
+
     @Test("日本語の日付で9を10に置換してもサイズとベクター描画を保つ")
     @MainActor
     func japaneseDateReplacementReflowsWithoutRasterizing() throws {

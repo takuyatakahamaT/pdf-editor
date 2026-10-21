@@ -17,12 +17,16 @@ enum PDFEditEngine {
     ) -> (annotation: PDFAnnotation, edit: ReplacementEdit, fontIsExact: Bool) {
         let resolution = resolveFont(for: target, on: page, replacement: replacement,
                                      preferredFontName: preferredFontName)
+        let lineFont = target.lineLayout == nil
+            ? resolution.font
+            : resolveFont(for: target, on: page, replacement: target.originalText).font
         let edit = ReplacementEdit(
             target: target,
             replacement: replacement,
             resolvedFont: resolution.font,
             fontIsExact: resolution.isExact,
-            exactGlyphs: resolution.exactGlyphs
+            exactGlyphs: resolution.exactGlyphs,
+            lineFont: lineFont
         )
         let annotation = ReplacementTextAnnotation(edit: edit)
         page.addAnnotation(annotation)
@@ -47,7 +51,8 @@ enum PDFEditEngine {
             replacement: target.originalText,
             resolvedFont: resolution.font,
             fontIsExact: resolution.isExact,
-            exactGlyphs: resolution.exactGlyphs
+            exactGlyphs: resolution.exactGlyphs,
+            lineFont: resolution.font
         ).movingSelection(to: destination)
         return (addMovementAnnotations(for: edit, to: page), edit)
     }

@@ -328,6 +328,36 @@ struct PDFEditEngineTests {
         #expect(embeddedPlan.outputEnd > layout.lineWidth)
     }
 
+    @Test("同じ行の複数置換は先の幅変更を後の文字へ累積する")
+    func composedReplacementsAccumulateEarlierWidthChanges() throws {
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let layout = TextRunLayout(
+            glyphs: [
+                .init(text: "A", offsetX: 0, advance: 8),
+                .init(text: "B", offsetX: 8, advance: 8),
+                .init(text: "C", offsetX: 16, advance: 8),
+                .init(text: "D", offsetX: 24, advance: 8)
+            ],
+            selectedRange: 0..<1,
+            lineStartX: 100,
+            lineWidth: 32,
+            maxWidth: 100,
+            coverBounds: CGRect(x: 100, y: 0, width: 32, height: 14)
+        )
+        let edits = [
+            TextRunReplacement(range: 0..<1, text: "LONG", font: font, color: .black, exactGlyphs: nil),
+            TextRunReplacement(range: 2..<3, text: "X", font: font, color: .black, exactGlyphs: nil)
+        ]
+
+        let plan = try #require(PDFTextRenderer.composedReflowPlan(layout: layout, replacements: edits))
+
+        #expect(plan.replacements.count == 2)
+        #expect(plan.replacements[0].offsetX == 0)
+        #expect(plan.replacements[1].offsetX > layout.glyphs[2].offsetX)
+        #expect(plan.glyphs.first?.offsetX ?? 0 > layout.glyphs[1].offsetX)
+        #expect(plan.scale == 1)
+    }
+
     @Test("line reflow stops at a different font resource")
     func replacementDoesNotReflowAcrossFontResources() throws {
         let baseline: CGFloat = 60
@@ -358,6 +388,31 @@ struct PDFEditEngineTests {
         #expect(plan.scale < 1)
     }
 
+    @Test("line reflow keeps later glyphs with a different fill color out of the selected run")
+    func replacementDoesNotReflowAcrossFillColorRuns() throws {
+        let baseline: CGFloat = 60
+        func makeRun(_ text: String, x: CGFloat, color: NSColor) -> ScannedRun {
+            let width: CGFloat = 8
+            let glyph = ScannedGlyph(text: text,
+                                     advanceBox: CGRect(x: x, y: 57, width: width, height: 13),
+                                     baseline: baseline, fontKey: "F1", fontSize: 12,
+                                     advance: width, fillColor: color)
+            return ScannedRun(glyphs: [glyph], text: text, box: glyph.advanceBox,
+                              baseline: baseline, fontKey: "F1", fontSize: 12)
+        }
+        let selected = makeRun("9", x: 100, color: .black)
+        let differentlyColored = makeRun("月", x: 108, color: .red)
+        let index = PageTextIndex(runs: [selected, differentlyColored],
+                                  pageBounds: CGRect(x: 0, y: 0, width: 260, height: 120))
+
+        let target = try #require(index.target(in: selected, range: 0..<1, pageIndex: 0))
+        let layout = try #require(target.lineLayout)
+
+        #expect(layout.glyphs.map(\.text).joined() == "9")
+        #expect(layout.lineStartX + layout.lineWidth == 108)
+        #expect(layout.lineStartX + layout.maxWidth == 108)
+    }
+
     @Test("moved replacement bounds include the full replacement width")
     func movedReplacementBoundsIncludeRenderedText() {
         let target = TextTarget(
@@ -375,10 +430,12 @@ struct PDFEditEngineTests {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
         let edit = ReplacementEdit(target: target, replacement: "11111111", resolvedFont: font,
                                    fontIsExact: false)
-            .movingSelection(to: CGPoint(x: 80, y: 70))
 
         #expect(edit.displayedTextBounds.width > target.bounds.width)
-        #expect(edit.annotationBounds.contains(edit.displayedTextBounds))
+        #expect(edit.displayedTextBounds.minX == target.bounds.minX)
+        let movedEdit = edit.movingSelection(to: CGPoint(x: 80, y: 70))
+        #expect(movedEdit.displayedTextBounds.width > target.bounds.width)
+        #expect(movedEdit.annotationBounds.contains(movedEdit.displayedTextBounds))
     }
 
     @Test("insertion creates one movable free-text annotation")

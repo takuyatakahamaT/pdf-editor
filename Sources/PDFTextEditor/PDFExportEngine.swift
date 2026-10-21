@@ -8,6 +8,27 @@ enum PDFTextEditKind {
     case insertion
 }
 
+/// 置換されたグリフ範囲。複数の編集が同じ PDF 行にあるとき、元の行に対して
+/// まとめて再配置するため、各置換のフォント情報も保持する。
+struct TextRunReplacement {
+    let range: Range<Int>
+    let text: String
+    let font: CTFont
+    let color: NSColor
+    let exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]?
+
+    var renderedWidth: CGFloat {
+        if let exactGlyphs, !exactGlyphs.isEmpty {
+            return exactGlyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
+        }
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        )
+        return CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(attributed), nil, nil, nil))
+    }
+}
+
 /// 1 件の編集（置換 or 追加）。書き出し (`PDFExportEngine`) は元 PDF を再度開き直して
 /// 描画するため、置換に必要なフォント解決結果 (`resolvedFont`/`fontIsExact`) は
 /// 選択・置換確定時 (`PDFEditEngine.applyReplacement`) に一度だけ行い、ここへ焼き込む。
@@ -30,6 +51,12 @@ struct ReplacementEdit {
     let resolvedFont: CTFont?
     let fontIsExact: Bool
     let lineLayout: TextRunLayout?
+    /// 置換対象行の元フォント。入力に選んだフォントとは分け、再配置される未編集文字に使う。
+    var lineFont: CTFont?
+    /// 同一行上の元グリフ範囲に対する累積置換。
+    var lineReplacements: [TextRunReplacement]
+    var lineCompositionStart: Int?
+    var composesLineEdits: Bool
     /// 既存文字を移動した場合の新しい描画原点（x、ベースライン y）。
     var destinationOrigin: CGPoint?
     /// 元 PDF の CID を GID として直接指定できる場合の (GID, 送り幅[em]) 列。
@@ -42,7 +69,8 @@ struct ReplacementEdit {
         replacement: String,
         resolvedFont: CTFont,
         fontIsExact: Bool,
-        exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]? = nil
+        exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]? = nil,
+        lineFont: CTFont? = nil
     ) {
         id = UUID()
         kind = .replacement
@@ -58,8 +86,24 @@ struct ReplacementEdit {
         self.resolvedFont = resolvedFont
         self.fontIsExact = fontIsExact
         lineLayout = target.lineLayout
+        self.lineFont = lineFont ?? resolvedFont
         destinationOrigin = nil
         self.exactGlyphs = exactGlyphs
+        if let lineLayout = target.lineLayout {
+            lineCompositionStart = lineLayout.selectedRange.lowerBound
+            composesLineEdits = false
+            lineReplacements = [TextRunReplacement(
+                range: lineLayout.selectedRange,
+                text: replacement,
+                font: resolvedFont,
+                color: target.fontColor,
+                exactGlyphs: exactGlyphs
+            )]
+        } else {
+            lineCompositionStart = nil
+            composesLineEdits = false
+            lineReplacements = []
+        }
     }
 
     init(deleting target: TextTarget) {
@@ -77,6 +121,10 @@ struct ReplacementEdit {
         resolvedFont = nil
         fontIsExact = true
         lineLayout = nil
+        lineFont = nil
+        lineReplacements = []
+        lineCompositionStart = nil
+        composesLineEdits = false
         destinationOrigin = nil
         exactGlyphs = nil
     }
@@ -104,6 +152,10 @@ struct ReplacementEdit {
         resolvedFont = nil
         fontIsExact = true
         lineLayout = nil
+        lineFont = nil
+        lineReplacements = []
+        lineCompositionStart = nil
+        composesLineEdits = false
         destinationOrigin = nil
         exactGlyphs = nil
     }
@@ -127,7 +179,6 @@ struct ReplacementEdit {
     }
 
     var displayedTextBounds: CGRect {
-        guard let destinationOrigin else { return bounds }
         let font = resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
         let renderedWidth: CGFloat
         if let exactGlyphs, !exactGlyphs.isEmpty {
@@ -141,8 +192,8 @@ struct ReplacementEdit {
             renderedWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         }
         return CGRect(
-            x: destinationOrigin.x,
-            y: destinationOrigin.y + bounds.minY - baseline,
+            x: destinationOrigin?.x ?? bounds.minX,
+            y: destinationOrigin.map { $0.y + bounds.minY - baseline } ?? bounds.minY,
             width: max(bounds.width, renderedWidth),
             height: bounds.height
         )
