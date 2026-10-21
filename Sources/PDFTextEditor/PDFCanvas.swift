@@ -396,7 +396,9 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
         if editorMode == .markup {
             if handleMarkupMouseDown(event) { return }
-            if markupTool.isTextMarkup { handleReplacementMouseDown(event) }
+            if markupTool.isTextMarkup {
+                handleReplacementMouseDown(event, allowMovingExistingContent: false)
+            }
             return
         }
         handleReplacementMouseDown(event)
@@ -774,7 +776,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         return bounds
     }
 
-    private func handleReplacementMouseDown(_ event: NSEvent) {
+    private func handleReplacementMouseDown(_ event: NSEvent, allowMovingExistingContent: Bool = true) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: false), let document else {
             clearReplacementHighlight()
@@ -782,14 +784,16 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             return
         }
         let pagePoint = convert(viewPoint, to: page)
-        if let existing = page.annotations.reversed().compactMap({ $0 as? ReplacementTextAnnotation })
+        if allowMovingExistingContent,
+           let existing = page.annotations.reversed().compactMap({ $0 as? ReplacementTextAnnotation })
             .first(where: { !$0.edit.replacement.isEmpty && $0.edit.displayedTextBounds.contains(pagePoint) }) {
             movingExistingEdit = existing.edit
             movementStartPoint = pagePoint
             movementDelta = .zero
             return
         }
-        if let selectedTextTarget,
+        if allowMovingExistingContent,
+           let selectedTextTarget,
            selectedTextTarget.pageIndex == document.index(for: page),
            selectedTextTarget.bounds.contains(pagePoint) {
             if event.clickCount >= 2 {

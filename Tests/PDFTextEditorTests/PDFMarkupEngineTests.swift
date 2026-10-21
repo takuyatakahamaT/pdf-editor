@@ -61,6 +61,41 @@ struct PDFMarkupEngineTests {
         #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 35), in: ink))
     }
 
+    @Test("text selection and markup selection are mutually exclusive")
+    @MainActor
+    func selectionTargetsAreExclusive() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.markup)
+        model.setMarkupTool(.highlight)
+        model.addMarkup(pageIndex: 0, bounds: CGRect(x: 20, y: 30, width: 60, height: 16))
+        let markupID = try #require(model.selectedMarkupID)
+        let target = TextTarget(
+            pageIndex: 0,
+            bounds: CGRect(x: 20, y: 110, width: 50, height: 14),
+            baseline: 120,
+            originalText: "SOURCE",
+            fontSize: 12,
+            fontColor: .black,
+            fontKey: "Helvetica",
+            fontIsExact: true,
+            coverBounds: CGRect(x: 20, y: 108, width: 50, height: 16),
+            maxWidth: 120
+        )
+
+        model.select(target)
+        #expect(model.selectedTarget == target)
+        #expect(model.selectedMarkupID == nil)
+
+        model.selectMarkup(markupID)
+        #expect(model.selectedMarkupID == markupID)
+        #expect(model.selectedTarget == nil)
+    }
+
     @Test("markup tools produce editable PDF annotations")
     func annotationTypesAndPayloads() {
         let bounds = CGRect(x: 12, y: 18, width: 80, height: 24)

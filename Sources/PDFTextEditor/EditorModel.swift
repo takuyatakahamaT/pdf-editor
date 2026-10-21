@@ -456,6 +456,8 @@ final class EditorModel: ObservableObject {
     }
 
     func selectMarkup(_ id: UUID?) {
+        selectedTarget = nil
+        isInlineEditing = false
         selectedMarkupID = id
         guard let id, let edit = activeMarkupEdits.first(where: { $0.id == id }) else { return }
         if edit.tool == .note { markupText = edit.text }
@@ -604,6 +606,7 @@ final class EditorModel: ObservableObject {
 
     func select(_ target: TextTarget?) {
         guard mode == .replacement || (mode == .markup && selectedMarkupTool.isTextMarkup) else { return }
+        selectedMarkupID = nil
         selectedTarget = target
         isInlineEditing = false
         if mode == .replacement {
