@@ -62,7 +62,10 @@ struct PDFCropEngineTests {
         #expect(abs(actual.height - expected.height) < 0.1)
         #expect(croppedPage.bounds(for: .mediaBox) == originalPage.bounds(for: .mediaBox))
         #expect(croppedPage.string?.contains("MIDDLE") == true)
-        #expect(croppedPage.annotations.count == 1)
+        let originalAnnotations = originalPage.annotations.map { $0.contents ?? "" }.sorted()
+        let croppedAnnotations = croppedPage.annotations.map { $0.contents ?? "" }.sorted()
+        #expect(originalAnnotations.contains("keep this note"))
+        #expect(croppedAnnotations == originalAnnotations)
         #expect(try Data(contentsOf: sourceURL) == originalBytes)
     }
 
