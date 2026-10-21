@@ -31,8 +31,11 @@ enum PDFEmbeddedFontLoader {
         var familyName: String { CTFontCopyFamilyName(font) as String }
     }
 
-    static func describe(fontDict: CGPDFDictionaryRef) -> FontDescription {
-        let pdfName = readBaseFontName(fontDict)
+    static func describe(
+        fontDict: CGPDFDictionaryRef,
+        postScriptNameOverride: String? = nil
+    ) -> FontDescription {
+        let pdfName = postScriptNameOverride ?? readBaseFontName(fontDict)
         let installed = pdfName.flatMap { installedFont(named: strippingSubsetPrefix($0), size: 12) }
         var subtypeName: UnsafePointer<Int8>?
         var descendantSubtypeName: UnsafePointer<Int8>?
@@ -408,6 +411,18 @@ enum PDFEmbeddedFontLoader {
 
     static func availableFont(named name: String, size: CGFloat) -> CTFont? {
         installedFont(named: name, size: size)
+    }
+
+    static func resolveSearchableFont(
+        named name: String,
+        size: CGFloat,
+        replacementText: String,
+        supportingText: String? = nil
+    ) -> Resolution? {
+        guard let font = availableFont(named: name, size: size) else { return nil }
+        let missing = missingCharacters(in: supportingText ?? replacementText, font: font)
+        guard missing.isEmpty else { return nil }
+        return Resolution(font: font, isExact: true, exactGlyphs: nil, reason: nil)
     }
 
     static func bundledFontURL(

@@ -278,8 +278,23 @@ struct PDFEditingAcceptanceTests {
         let resultPage = try #require(resultDocument.page(at: 0))
         #expect(resultPage.string?.contains("編集") == true)
         let index = PDFGlyphIndex.makeIndex(for: resultPage)
-        #expect(index.runs.contains { $0.text.contains("編集") })
+        let replacementRun = try #require(index.runs.first { $0.text.contains("編集") })
         #expect(index.cluster(at: CGPoint(x: bounds.midX, y: bounds.midY), pageIndex: 0)?.originalText == "編集")
+        let reopenedTarget = try #require(index.target(
+            in: replacementRun,
+            range: 0..<replacementRun.glyphs.count,
+            pageIndex: 0
+        ))
+        let savedFontName = CTFontCopyPostScriptName(font) as String
+        #expect(reopenedTarget.fontPostScriptNameOverride == savedFontName)
+        #expect(abs(reopenedTarget.fontSize - CTFontGetSize(font)) < 0.05)
+        let secondEditResolution = PDFEditEngine.resolveFont(
+            for: reopenedTarget,
+            on: resultPage,
+            replacement: "改訂"
+        )
+        #expect(secondEditResolution.isExact)
+        #expect(CTFontCopyPostScriptName(secondEditResolution.font) as String == savedFontName)
 
         let sourceRaster = try rasterMetrics(page: sourcePage, focus: bounds, scale: 4)
         let resultRaster = try rasterMetrics(page: resultPage, focus: bounds, scale: 4)

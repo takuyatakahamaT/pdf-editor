@@ -154,7 +154,10 @@ final class EditorModel: ObservableObject {
         guard let target = selectedTarget, let page = document?.page(at: target.pageIndex),
               let key = target.fontKey,
               let dictionary = PDFGlyphIndex.fontDictionary(for: key, page: page) else { return nil }
-        return PDFEmbeddedFontLoader.describe(fontDict: dictionary)
+        return PDFEmbeddedFontLoader.describe(
+            fontDict: dictionary,
+            postScriptNameOverride: target.fontPostScriptNameOverride
+        )
     }
     var selectedFontChoiceName: String? {
         let choice = mode == .replacement ? replacementFontChoice : insertionFontChoice

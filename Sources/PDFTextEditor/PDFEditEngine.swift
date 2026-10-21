@@ -18,7 +18,9 @@ enum PDFEditEngine {
         let resolution = resolveFont(for: target, on: page, replacement: replacement,
                                      preferredFontName: preferredFontName)
         let lineFont: CTFont
-        if let layout = target.lineLayout,
+        if target.fontPostScriptNameOverride != nil {
+            lineFont = resolution.font
+        } else if let layout = target.lineLayout,
            let fontKey = target.fontKey,
            let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) {
             // 選択した置換文字の描画には埋め込み subset の GID を使えるが、
@@ -83,6 +85,16 @@ enum PDFEditEngine {
         replacement: String,
         preferredFontName: String? = nil
     ) -> PDFEmbeddedFontLoader.Resolution {
+        if preferredFontName == nil,
+           let searchableFontName = target.fontPostScriptNameOverride,
+           let resolution = PDFEmbeddedFontLoader.resolveSearchableFont(
+               named: searchableFontName,
+               size: target.fontSize,
+               replacementText: replacement,
+               supportingText: target.lineLayout?.text(replacingWith: replacement)
+           ) {
+            return resolution
+        }
         guard let fontKey = target.fontKey,
               let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) else {
             PDFEmbeddedFontLoader.registerBundledFonts()
