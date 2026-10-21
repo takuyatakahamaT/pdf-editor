@@ -84,6 +84,26 @@ enum PDFMarkupEngine {
         }
     }
 
+    static func replaceManagedAnnotations(on page: PDFPage, with edits: [PDFMarkupEdit]) {
+        for annotation in page.annotations where annotation.userName?.hasPrefix(markerPrefix) == true {
+            page.removeAnnotation(annotation)
+        }
+        for edit in edits {
+            page.addAnnotation(makeAnnotation(for: edit))
+        }
+    }
+
+    static func duplicateAnnotation(_ annotation: PDFAnnotation) -> PDFAnnotation? {
+        guard let type = annotation.type else { return nil }
+        var properties = annotation.annotationKeyValues
+        properties.removeValue(forKey: PDFAnnotationKey.page)
+        return PDFAnnotation(
+            bounds: annotation.bounds,
+            forType: PDFAnnotationSubtype(rawValue: type),
+            withProperties: properties
+        )
+    }
+
     static func edit(from annotation: PDFAnnotation, pageIndex: Int) -> PDFMarkupEdit? {
         guard let marker = annotation.userName, marker.hasPrefix(markerPrefix),
               let id = UUID(uuidString: String(marker.dropFirst(markerPrefix.count))),

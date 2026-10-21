@@ -261,13 +261,27 @@ enum PDFExportEngine {
         }
 
         context.closePDF()
-        guard !markups.isEmpty else { return }
+        let sourceHasAnnotations = (0..<document.pageCount).contains {
+            document.page(at: $0)?.annotations.isEmpty == false
+        }
+        guard !markups.isEmpty || sourceHasAnnotations else { return }
         guard let annotatedDocument = PDFDocument(url: outputURL) else {
             throw PDFExportError.unreadableSource
         }
-        for markup in markups {
-            guard let page = annotatedDocument.page(at: markup.pageIndex) else { continue }
-            page.addAnnotation(PDFMarkupEngine.makeAnnotation(for: markup))
+        let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)
+        for pageIndex in 0..<document.pageCount {
+            guard let sourcePage = document.page(at: pageIndex),
+                  let outputPage = annotatedDocument.page(at: pageIndex) else {
+                throw PDFExportError.unreadableSource
+            }
+            for sourceAnnotation in sourcePage.annotations
+                where sourceAnnotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) != true {
+                guard let copiedAnnotation = PDFMarkupEngine.duplicateAnnotation(sourceAnnotation) else {
+                    throw PDFExportError.cannotCreateContext
+                }
+                outputPage.addAnnotation(copiedAnnotation)
+            }
+            PDFMarkupEngine.replaceManagedAnnotations(on: outputPage, with: markupsByPage[pageIndex] ?? [])
         }
         let stagedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-markup-export-\(UUID().uuidString).pdf")
@@ -309,9 +323,7 @@ enum PDFExportEngine {
                   let copiedPage = sourcePage.copy() as? PDFPage else {
                 throw PDFExportError.unreadableSource
             }
-            if let pageMarkups = markupsByPage[pageIndex] {
-                for markup in pageMarkups { copiedPage.addAnnotation(PDFMarkupEngine.makeAnnotation(for: markup)) }
-            }
+            PDFMarkupEngine.replaceManagedAnnotations(on: copiedPage, with: markupsByPage[pageIndex] ?? [])
             let pageEdits = editsByPage[pageIndex] ?? []
             if !pageEdits.isEmpty || !(markupsByPage[pageIndex] ?? []).isEmpty {
                 let renderedPage = try renderPrintPage(copiedPage, edits: pageEdits)

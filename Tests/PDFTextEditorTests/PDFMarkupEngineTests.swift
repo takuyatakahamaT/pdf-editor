@@ -39,15 +39,29 @@ struct PDFMarkupEngineTests {
             pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
             contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
         )
+        let sourceWithAnnotation = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-source-\(UUID().uuidString).pdf")
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-markup-export-\(UUID().uuidString).pdf")
         let printOutput = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-markup-print-\(UUID().uuidString).pdf")
         defer {
             try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: sourceWithAnnotation)
             try? FileManager.default.removeItem(at: output)
             try? FileManager.default.removeItem(at: printOutput)
         }
+
+        let sourceDocument = try #require(PDFDocument(url: source))
+        let sourcePage = try #require(sourceDocument.page(at: 0))
+        let externalNote = PDFAnnotation(bounds: CGRect(x: 24, y: 40, width: 20, height: 20), forType: .text, withProperties: nil)
+        externalNote.userName = "Another PDF app"
+        externalNote.contents = "Original review note"
+        sourcePage.addAnnotation(externalNote)
+        #expect(sourcePage.annotations.contains { $0.contents == "Original review note" })
+        #expect(sourceDocument.write(to: sourceWithAnnotation))
+        let reopenedSource = try #require(PDFDocument(url: sourceWithAnnotation))
+        #expect(reopenedSource.page(at: 0)?.annotations.contains { $0.contents == "Original review note" } == true)
 
         let markups = [
             PDFMarkupEdit(pageIndex: 0, tool: .highlight,
@@ -55,7 +69,7 @@ struct PDFMarkupEngineTests {
             PDFMarkupEdit(pageIndex: 0, tool: .note,
                           bounds: CGRect(x: 150, y: 80, width: 20, height: 20), text: "Review this")
         ]
-        try PDFExportEngine.export(sourceURL: source, edits: [], markups: markups, to: output)
+        try PDFExportEngine.export(sourceURL: sourceWithAnnotation, edits: [], markups: markups, to: output)
 
         let exported = try #require(PDFDocument(url: output))
         let page = try #require(exported.page(at: 0))
@@ -68,8 +82,22 @@ struct PDFMarkupEngineTests {
             $0.type == PDFAnnotationSubtype.highlight.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         })
         #expect(editorAnnotations.contains { $0.contents == "Review this" })
+        #expect(page.annotations.filter { $0.contents == "Original review note" }.count == 1)
 
-        try PDFExportEngine.exportForPrinting(sourceURL: source, edits: [], markups: markups, to: printOutput)
+        let printPageCopy = try #require(page.copy() as? PDFPage)
+        PDFMarkupEngine.replaceManagedAnnotations(on: printPageCopy, with: markups)
+        #expect(markedAnnotations(on: printPageCopy).count == 2)
+        #expect(printPageCopy.annotations.filter { $0.contents == "Original review note" }.count == 1)
+
+        let deletedMarkupCopy = try #require(page.copy() as? PDFPage)
+        PDFMarkupEngine.replaceManagedAnnotations(
+            on: deletedMarkupCopy,
+            with: markups.filter { $0.tool != .note }
+        )
+        #expect(markedAnnotations(on: deletedMarkupCopy).count == 1)
+        #expect(markedAnnotations(on: deletedMarkupCopy).allSatisfy { $0.contents != "Review this" })
+
+        try PDFExportEngine.exportForPrinting(sourceURL: output, edits: [], markups: markups, to: printOutput)
         let preparedForPrint = try #require(PDFDocument(url: printOutput))
         #expect(preparedForPrint.pageCount == 1)
         #expect(preparedForPrint.page(at: 0)?.annotations.isEmpty == true)
@@ -131,9 +159,12 @@ struct PDFMarkupEngineTests {
         )
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-markup-reopen-\(UUID().uuidString).pdf")
+        let editedOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-reopen-edited-\(UUID().uuidString).pdf")
         defer {
             try? FileManager.default.removeItem(at: source)
             try? FileManager.default.removeItem(at: output)
+            try? FileManager.default.removeItem(at: editedOutput)
         }
 
         let original = EditorModel(initialURL: source)
@@ -170,6 +201,14 @@ struct PDFMarkupEngineTests {
         let reopenedPage = try #require(reopened.document?.page(at: 0))
         #expect(markedAnnotations(on: reopenedPage).first(where: { $0.userName == PDFMarkupEngine.markerPrefix + noteID.uuidString })?.contents
             == "Updated after reopening")
+
+        try PDFExportEngine.export(sourceURL: output, edits: [], markups: reopened.activeMarkupEdits, to: editedOutput)
+        let savedAgain = try #require(PDFDocument(url: editedOutput))
+        let savedAgainPage = try #require(savedAgain.page(at: 0))
+        #expect(markedAnnotations(on: savedAgainPage).count == 3)
+        #expect(markedAnnotations(on: savedAgainPage).first(where: {
+            $0.userName == PDFMarkupEngine.markerPrefix + noteID.uuidString
+        })?.contents == "Updated after reopening")
     }
 
     @Test("moving and resizing ink and arrows updates their paths and undo restores the old geometry")
