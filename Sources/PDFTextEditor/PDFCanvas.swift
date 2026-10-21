@@ -233,6 +233,17 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         modifierFlags.contains(.command) || modifierFlags.contains(.control)
     }
 
+    static func shouldCaptureZoomScroll(
+        modifierFlags: NSEvent.ModifierFlags,
+        pointerInsidePDF: Bool
+    ) -> Bool {
+        pointerInsidePDF && shouldZoomOnScroll(modifierFlags: modifierFlags)
+    }
+
+    static func zoomMultiplier(forScrollDelta delta: CGFloat) -> CGFloat {
+        pow(1.1, -delta / 90)
+    }
+
     var replacementOverlayProvider: ReplacementPreviewOverlayProvider?
     var editorMode: EditorMode = .replacement
     var markupTool: PDFMarkupTool = .highlight
@@ -262,6 +273,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var appliedZoomCommandRevision = 0
 
     private var scaleObserver: NSObjectProtocol?
+    private var scrollWheelMonitor: Any?
     private var magnifierTrackingArea: NSTrackingArea?
     private var magnifierPoint: CGPoint?
     private var fitsWidthOnResize = false
@@ -307,6 +319,34 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     deinit {
         MainActor.assumeIsolated {
             if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
+            if let scrollWheelMonitor { NSEvent.removeMonitor(scrollWheelMonitor) }
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let scrollWheelMonitor {
+            NSEvent.removeMonitor(scrollWheelMonitor)
+            self.scrollWheelMonitor = nil
+        }
+        guard window != nil else { return }
+
+        // PDFKit routes wheel events through its internal PDFScrollView, bypassing
+        // PDFView.scrollWheel(with:). Monitor app events so modified wheel gestures
+        // can zoom while unmodified events continue through PDFKit's normal scroll path.
+        scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  event.window === window else { return event }
+            let point = self.convert(event.locationInWindow, from: nil)
+            let pointerInsidePDF = self.bounds.contains(point)
+            guard Self.shouldCaptureZoomScroll(
+                modifierFlags: event.modifierFlags,
+                pointerInsidePDF: pointerInsidePDF
+            ), self.zoom(forScrollWheel: event) else {
+                return event
+            }
+            return nil
         }
     }
 
@@ -374,14 +414,20 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard Self.shouldZoomOnScroll(modifierFlags: event.modifierFlags) else {
+        guard zoom(forScrollWheel: event) else {
             super.scrollWheel(with: event)
             return
         }
+    }
+
+    @discardableResult
+    private func zoom(forScrollWheel event: NSEvent) -> Bool {
+        guard Self.shouldZoomOnScroll(modifierFlags: event.modifierFlags) else { return false }
         let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 10
-        guard delta != 0 else { return }
+        guard delta != 0 else { return false }
         let point = convert(event.locationInWindow, from: nil)
-        setScale(scaleFactor * pow(1.1, -delta / 90), anchoredAt: point)
+        setScale(scaleFactor * Self.zoomMultiplier(forScrollDelta: delta), anchoredAt: point)
+        return true
     }
 
     override func keyDown(with event: NSEvent) {

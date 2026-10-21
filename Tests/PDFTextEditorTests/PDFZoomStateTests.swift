@@ -45,12 +45,24 @@ struct PDFZoomStateTests {
         #expect(state.scale == 1.75)
     }
 
-    @Test("command and control scroll gestures zoom while plain scrolling remains scrolling")
+    @Test("only command or control scroll gestures inside the PDF canvas are captured for zoom")
     @MainActor
-    func recognizesCommonZoomScrollModifiers() {
+    func scopesZoomScrollCaptureToModifiedGesturesOverThePDF() {
         #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .command))
         #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .control))
         #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: []))
         #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: .option))
+
+        #expect(ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .control, pointerInsidePDF: true))
+        #expect(ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .command, pointerInsidePDF: true))
+        #expect(!ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: [], pointerInsidePDF: true))
+        #expect(!ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .control, pointerInsidePDF: false))
+    }
+
+    @Test("scroll direction changes the zoom multiplier")
+    @MainActor
+    func scrollDeltaControlsZoomDirection() {
+        #expect(ClickablePDFView.zoomMultiplier(forScrollDelta: 90) < 1)
+        #expect(ClickablePDFView.zoomMultiplier(forScrollDelta: -90) > 1)
     }
 }
