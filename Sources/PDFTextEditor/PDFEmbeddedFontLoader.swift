@@ -410,26 +410,29 @@ enum PDFEmbeddedFontLoader {
         installedFont(named: name, size: size)
     }
 
+    static func bundledFontURL(
+        mainBundle: Bundle = .main,
+        packageBundle: () -> Bundle = { .module }
+    ) -> URL? {
+        mainBundle.url(
+            forResource: "NotoSansJP-Regular",
+            withExtension: "otf",
+            subdirectory: "Fonts"
+        ) ?? packageBundle().url(
+            forResource: "NotoSansJP-Regular",
+            withExtension: "otf",
+            subdirectory: "Fonts"
+        )
+    }
+
     private static func normalizedFontName(_ name: String) -> String {
         String(name.lowercased().filter { $0.isLetter || $0.isNumber })
     }
 
     private static let bundledFontsRegistered: Void = {
-        // Packaged app resources live in Contents/Resources. Bundle.module's generated
-        // accessor falls back to the build machine's absolute .build path when its
-        // SwiftPM resource bundle is absent, which makes an installed update machine-
-        // dependent. Prefer the self-contained app resource and use Bundle.module only
-        // for SwiftPM builds and tests.
-        let fontURL = Bundle.main.url(
-            forResource: "NotoSansJP-Regular",
-            withExtension: "otf",
-            subdirectory: "Fonts"
-        ) ?? Bundle.module.url(
-            forResource: "NotoSansJP-Regular",
-            withExtension: "otf",
-            subdirectory: "Fonts"
-        )
-        guard let fontURL else { return }
+        // 配布アプリでは通常の app Resources を使う。Bundle.module は SwiftPM 実行時の
+        // fallback として遅延評価し、生成コードが埋め込む開発機の build path に依存しない。
+        guard let fontURL = bundledFontURL() else { return }
         _ = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
     }()
 
