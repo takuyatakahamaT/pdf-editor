@@ -130,11 +130,10 @@ enum PDFMarkupEngine {
             return borderDistance <= tolerance
         case .ellipse:
             guard bounds.width > 0, bounds.height > 0 else { return false }
-            let center = CGPoint(x: bounds.midX, y: bounds.midY)
             let radiusX = bounds.width / 2
             let radiusY = bounds.height / 2
-            let normalizedDistance = hypot((point.x - center.x) / radiusX, (point.y - center.y) / radiusY)
-            return abs(normalizedDistance - 1) * min(radiusX, radiusY) <= tolerance
+            let hitTolerance = min(tolerance, min(radiusX, radiusY) * 0.5)
+            return distanceToEllipseOutline(point, bounds: bounds) <= hitTolerance
         case .arrow:
             guard let start = edit.points.first, let end = edit.points.last else { return bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(point) }
             return distance(from: point, toSegmentFrom: start, to: end) <= tolerance
@@ -173,6 +172,62 @@ enum PDFMarkupEngine {
         return point.x >= bounds.minX - strokeTolerance
             && point.x <= bounds.maxX + strokeTolerance
             && abs(point.y - y) <= strokeTolerance
+    }
+
+    private static func distanceToEllipseOutline(_ point: CGPoint, bounds: CGRect) -> CGFloat {
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let radiusX = bounds.width / 2
+        let radiusY = bounds.height / 2
+        let sampleCount = 180
+        let angleStep = 2 * CGFloat.pi / CGFloat(sampleCount)
+        func distanceSquared(at angle: CGFloat) -> CGFloat {
+            let dx = center.x + radiusX * cos(angle) - point.x
+            let dy = center.y + radiusY * sin(angle) - point.y
+            return dx * dx + dy * dy
+        }
+
+        var bestAngle: CGFloat = 0
+        var bestDistance = CGFloat.infinity
+        for sample in 0..<sampleCount {
+            let angle = CGFloat(sample) * angleStep
+            let distance = distanceSquared(at: angle)
+            if distance < bestDistance {
+                bestDistance = distance
+                bestAngle = angle
+            }
+        }
+
+        var lower = bestAngle - angleStep
+        var upper = bestAngle + angleStep
+        let ratio = (sqrt(5) - 1) / 2
+        var first = upper - ratio * (upper - lower)
+        var second = lower + ratio * (upper - lower)
+        var firstDistance = distanceSquared(at: first)
+        var secondDistance = distanceSquared(at: second)
+        for _ in 0..<24 {
+            if firstDistance < secondDistance {
+                upper = second
+                second = first
+                secondDistance = firstDistance
+                first = upper - ratio * (upper - lower)
+                firstDistance = distanceSquared(at: first)
+            } else {
+                lower = first
+                first = second
+                firstDistance = secondDistance
+                second = lower + ratio * (upper - lower)
+                secondDistance = distanceSquared(at: second)
+            }
+        }
+        return sqrt(min(bestDistance, min(firstDistance, secondDistance)))
+    }
+
+    static func hasVisibleLineLength(_ points: [CGPoint], minimumLength: CGFloat = 4) -> Bool {
+        guard points.count > 1 else { return false }
+        let length = zip(points, points.dropFirst()).reduce(CGFloat.zero) { total, pair in
+            total + hypot(pair.1.x - pair.0.x, pair.1.y - pair.0.y)
+        }
+        return length >= minimumLength
     }
 
     static func hitTestResizeHandle(_ point: CGPoint, bounds: CGRect, tolerance: CGFloat = 10) -> Bool {

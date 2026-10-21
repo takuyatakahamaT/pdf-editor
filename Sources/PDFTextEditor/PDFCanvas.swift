@@ -552,6 +552,16 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             )
             var points = markupTool == .ink ? markupDrawingPoints : [markupDrawingStart, endPoint]
             if markupTool == .ink, points.last != endPoint { points.append(endPoint) }
+            if (markupTool == .arrow || markupTool == .ink),
+               !PDFMarkupEngine.hasVisibleLineLength(points) {
+                if let markupPreviewAnnotation { page.removeAnnotation(markupPreviewAnnotation) }
+                markupPreviewAnnotation = nil
+                markupDrawingPage = nil
+                markupDrawingPageIndex = nil
+                markupDrawingPoints = []
+                needsDisplay = true
+                return
+            }
             let bounds = PDFMarkupEngine.clampedBounds(
                 markupBounds(for: points, tool: markupTool),
                 to: page.bounds(for: .mediaBox),

@@ -46,6 +46,12 @@ struct PDFMarkupEngineTests {
         #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 60), in: ellipse))
         #expect(PDFMarkupEngine.hitTest(CGPoint(x: 119, y: 60), in: ellipse))
 
+        let narrowEllipse = PDFMarkupEdit(
+            pageIndex: 0, tool: .ellipse, bounds: CGRect(x: 20, y: 30, width: 100, height: 8)
+        )
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 34), in: narrowEllipse))
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 30), in: narrowEllipse))
+
         let arrow = PDFMarkupEdit(
             pageIndex: 0, tool: .arrow, bounds: CGRect(x: 20, y: 30, width: 100, height: 60),
             points: [CGPoint(x: 20, y: 30), CGPoint(x: 120, y: 90)]
@@ -71,6 +77,19 @@ struct PDFMarkupEngineTests {
         )
         #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 40), in: strikeOut))
         #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 31), in: strikeOut))
+    }
+
+    @Test("arrow and ink markup require a visible drag distance")
+    func lineMarkupsRequireVisibleLength() {
+        let start = CGPoint(x: 10, y: 10)
+        #expect(!PDFMarkupEngine.hasVisibleLineLength([start]))
+        #expect(!PDFMarkupEngine.hasVisibleLineLength([start, CGPoint(x: 12, y: 10)]))
+        #expect(PDFMarkupEngine.hasVisibleLineLength([start, CGPoint(x: 14, y: 10)]))
+        #expect(PDFMarkupEngine.hasVisibleLineLength([
+            start,
+            CGPoint(x: 12, y: 10),
+            CGPoint(x: 12, y: 13)
+        ]))
     }
 
     @Test("selected line markup resize handle remains hittable outside the visible path")
