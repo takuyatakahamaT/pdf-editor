@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && vars.PDF_EDITOR_RELEASES_ENABLED == 'true'
     runs-on: macos-15
     timeout-minutes: 35
     environment: release

@@ -24,8 +24,9 @@ main にマージすると `Signed macOS release` が Apple Silicon 向けアプ
 | `APPLE_TEAM_ID` | Apple Developer Team ID |
 | `APPLE_APP_SPECIFIC_PASSWORD` | 公証用のアプリ用パスワード |
 
-4. main で `Signed macOS release` を実行し、ZIP・署名付き appcast・SHA256SUMS の公開を確認してください。秘密値不足では未署名版を公開しません。失敗したdraftは内容確認後に削除し、新しい workflow_dispatch で上位の版を作ってください。
-5. 初回は、この公開鍵と Sparkle.framework を含むビルドを `/Applications/PDF editor.app` へ手動で導入してください。既存の旧アプリは自動更新コードを持たないため、この1回の導入が必要です。以降はアプリ自身が更新を案内します。
+4. GitHub repository variable `PDF_EDITOR_RELEASES_ENABLED=true` を設定してください。これがない間は main へのpush後もRelease jobを開始しません。
+5. main で `Signed macOS release` を実行し、ZIP・署名付き appcast・SHA256SUMS の公開を確認してください。秘密値不足では未署名版を公開しません。失敗したdraftは内容確認後に削除し、新しい workflow_dispatch で上位の版を作ってください。
+6. 初回は、この公開鍵と Sparkle.framework を含むビルドを `/Applications/PDF editor.app` へ手動で導入してください。既存の旧アプリは自動更新コードを持たないため、この1回の導入が必要です。以降はアプリ自身が更新を案内します。
 
 ## ビルドと同梱物
 
