@@ -8,11 +8,10 @@ main にマージすると `Signed macOS release` が Apple Silicon 向けアプ
 
 ## 初回にオーナーが設定するもの
 
-現時点の `SUPublicEDKey` はプレースホルダーです。**このままでは更新を検知・適用せず、リリースも停止します。** 秘密鍵を生成・参照する作業は、この実装には含めていません。
+`SUPublicEDKey` は登録済みです。対応するSparkle秘密鍵はオーナーのMacのログインKeychainに生成・保存され、GitHub の `release` Environment に `SPARKLE_PRIVATE_KEY` が登録されています。Environmentの配布対象は `main` に限定しています。**秘密鍵を再生成すると公開鍵が変わり、すでに配布したアプリへ更新を届けられなくなるため、再生成しないでください。** Developer ID署名証明書とApple公証情報が未設定のため、Release workflowはまだ有効化していません。
 
-1. オーナーの信頼できる Mac で、Sparkle 公式の `generate_keys` を使用して鍵を用意してください。秘密鍵は Keychain と安全なバックアップに保管してください。エージェントやIssue・PRへ秘密鍵を貼らないでください。
-2. **公開鍵だけ**を `Resources/Info.plist` の `SUPublicEDKey` に設定してPRを作成してください。SparkleとTauriの鍵形式は異なるため、NIHO docsの鍵をコピーしません。
-3. GitHub の `release` Environment を作成し、配布対象を main に限定してください。以下のSecretを設定してください。
+1. 秘密鍵の安全なバックアップを用意してください。秘密鍵をIssue・PR・チャットへ貼らないでください。
+2. GitHub の `release` Environment に残りのSecretを設定してください。
 
 | Secret | 内容 |
 | --- | --- |
@@ -24,9 +23,9 @@ main にマージすると `Signed macOS release` が Apple Silicon 向けアプ
 | `APPLE_TEAM_ID` | Apple Developer Team ID |
 | `APPLE_APP_SPECIFIC_PASSWORD` | 公証用のアプリ用パスワード |
 
-4. GitHub repository variable `PDF_EDITOR_RELEASES_ENABLED=true` を設定してください。これがない間は main へのpush後もRelease jobを開始しません。
-5. main で `Signed macOS release` を実行し、ZIP・署名付き appcast・SHA256SUMS の公開を確認してください。秘密値不足では未署名版を公開しません。失敗したdraftは内容確認後に削除し、新しい workflow_dispatch で上位の版を作ってください。
-6. 初回は、この公開鍵と Sparkle.framework を含むビルドを `/Applications/PDF editor.app` へ手動で導入してください。既存の旧アプリは自動更新コードを持たないため、この1回の導入が必要です。以降はアプリ自身が更新を案内します。
+3. GitHub repository variable `PDF_EDITOR_RELEASES_ENABLED=true` を設定してください。これは全Secretと証明書を登録し、初回受入の準備ができてから行ってください。これがない間はmainへのpush後もRelease jobを開始しません。
+4. main で `Signed macOS release` を実行し、ZIP・署名付き appcast・SHA256SUMS の公開を確認してください。秘密値不足では未署名版を公開しません。失敗したdraftは内容確認後に削除し、新しい workflow_dispatch で上位の版を作ってください。
+5. 初回は、登録済みの公開鍵と Sparkle.framework を含むビルドを `/Applications/PDF editor.app` へ手動で導入してください。既存の旧アプリは自動更新コードを持たないため、この1回の導入が必要です。以降はアプリ自身が更新を案内します。
 
 ## ビルドと同梱物
 
@@ -41,4 +40,4 @@ SwiftPMで固定した Sparkle 2.10.0 の universal framework を `Contents/Fram
 - [Sparkle公式更新動作・セキュリティ設定](https://sparkle-project.org/documentation/customization/)
 - [NIHO docs updaterの公開鍵未設定時の停止と再起動UX](https://github.com/niho-coliving/niho-docs/blob/main/apps/docs/src-tauri/src/updater.rs)
 
-署名鍵と公開環境が揃うまで、実際のRelease取得・インストール・再起動の一連の受入は未完了です。鍵を持つオーナーの環境で、旧版から上位版への更新、署名不正の拒否、PDF書き出しキャンセル時の継続、書き出し後のPDF再表示を確認してください。
+Developer ID証明書、公証情報、GitHub EnvironmentのSecretと安全な鍵バックアップが揃うまで、実際のRelease取得・インストール・再起動の受入は未完了です。鍵を持つオーナーの環境で、旧版から上位版への更新、署名不正の拒否、PDF書き出しキャンセル時の継続、書き出し後のPDF再表示を確認してください。

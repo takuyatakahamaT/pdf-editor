@@ -17,9 +17,20 @@ enum PDFEditEngine {
     ) -> (annotation: PDFAnnotation, edit: ReplacementEdit, fontIsExact: Bool) {
         let resolution = resolveFont(for: target, on: page, replacement: replacement,
                                      preferredFontName: preferredFontName)
-        let lineFont = target.lineLayout == nil
-            ? resolution.font
-            : resolveFont(for: target, on: page, replacement: target.originalText).font
+        let lineFont: CTFont
+        if let layout = target.lineLayout,
+           let fontKey = target.fontKey,
+           let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) {
+            // 選択した置換文字の描画には埋め込み subset の GID を使えるが、
+            // 行末の未編集文字は Unicode で描くため、全行を描けるローカル書体を選ぶ。
+            lineFont = PDFEmbeddedFontLoader.unicodeFontForLine(
+                fontDict: fontDict,
+                size: target.fontSize,
+                text: layout.text(replacingWith: target.originalText)
+            )
+        } else {
+            lineFont = resolution.font
+        }
         let edit = ReplacementEdit(
             target: target,
             replacement: replacement,

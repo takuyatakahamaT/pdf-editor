@@ -202,6 +202,16 @@ struct PDFEditingAcceptanceTests {
 
         let edit = try #require(model.activeReplacements.first)
         let resolvedFont = try #require(edit.resolvedFont)
+        let lineFont = try #require(edit.lineFont)
+        #expect(PDFEmbeddedFontLoader.missingCharacters(in: date, font: lineFont).isEmpty)
+        let suffix = "30日" as CFString
+        let suffixFont = CTFontCreateForString(
+            lineFont,
+            suffix,
+            CFRange(location: 0, length: CFStringGetLength(suffix))
+        )
+        // 置換で押し出された「30日」を一部だけ別書体へフォールバックさせない。
+        #expect(CTFontCopyPostScriptName(suffixFont) as String == CTFontCopyPostScriptName(lineFont) as String)
         let plan = PDFTextRenderer.reflowPlan(text: "10", font: resolvedFont, layout: lineLayout)
         #expect(edit.replacement == "10")
         #expect(CTFontGetSize(resolvedFont) == digit.fontSize)
