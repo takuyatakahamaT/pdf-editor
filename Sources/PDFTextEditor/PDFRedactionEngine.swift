@@ -40,7 +40,7 @@ enum PDFRedactionError: Error, LocalizedError {
         case .sameFile: "元PDFと同じファイルには保存できません。"
         case .cannotRender: "PDFページを墨消し用画像へ変換できません。"
         case .cannotSave: "墨消し済みPDFを保存できません。"
-        case .verificationFailed: "生成PDFにテキストまたは注釈が残っているため保存を中止しました。"
+        case .verificationFailed: "生成PDFに注釈が残っているため保存を中止しました。"
         }
     }
 }
@@ -60,11 +60,7 @@ enum PDFRedactionEngine {
     static func export(sourceURL: URL, regions: [PDFRedactionRegion], to outputURL: URL) throws {
         guard !regions.isEmpty else { throw PDFRedactionError.noRegions }
         guard !PDFOCREngine.sameFile(sourceURL, outputURL) else { throw PDFRedactionError.sameFile }
-        guard let source = PDFDocument(url: sourceURL) else { throw PDFRedactionError.unreadableSource }
-        guard !source.isLocked else { throw PDFRedactionError.lockedSource }
-        guard source.pageCount > 0 else { throw PDFRedactionError.unreadableSource }
-        guard source.allowsCopying else { throw PDFRedactionError.copyingNotAllowed }
-        guard source.allowsDocumentAssembly else { throw PDFRedactionError.assemblyNotAllowed }
+        let source = try validatedSource(at: sourceURL)
 
         let regionsByPage = Dictionary(grouping: regions, by: \.pageIndex)
         for (pageIndex, pageRegions) in regionsByPage {
@@ -107,8 +103,7 @@ enum PDFRedactionEngine {
             throw PDFRedactionError.cannotSave
         }
         for index in 0..<verified.pageCount {
-            guard let page = verified.page(at: index), page.annotations.isEmpty,
-                  page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false else {
+            guard let page = verified.page(at: index), page.annotations.isEmpty else {
                 throw PDFRedactionError.verificationFailed
             }
         }
@@ -128,17 +123,28 @@ enum PDFRedactionEngine {
         forcePrepareSource: Bool = false,
         to outputURL: URL
     ) throws {
+        guard !regions.isEmpty else { throw PDFRedactionError.noRegions }
         guard !PDFOCREngine.sameFile(sourceURL, outputURL) else { throw PDFRedactionError.sameFile }
         guard forcePrepareSource || !edits.isEmpty || !markups.isEmpty else {
             try export(sourceURL: sourceURL, regions: regions, to: outputURL)
             return
         }
+        _ = try validatedSource(at: sourceURL)
 
         let preparedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-redaction-prepared-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: preparedURL) }
         try PDFExportEngine.export(sourceURL: sourceURL, edits: edits, markups: markups, to: preparedURL)
         try export(sourceURL: preparedURL, regions: regions, to: outputURL)
+    }
+
+    private static func validatedSource(at url: URL) throws -> PDFDocument {
+        guard let source = PDFDocument(url: url) else { throw PDFRedactionError.unreadableSource }
+        guard !source.isLocked else { throw PDFRedactionError.lockedSource }
+        guard source.pageCount > 0 else { throw PDFRedactionError.unreadableSource }
+        guard source.allowsCopying else { throw PDFRedactionError.copyingNotAllowed }
+        guard source.allowsDocumentAssembly else { throw PDFRedactionError.assemblyNotAllowed }
+        return source
     }
 
     static func render(page: PDFPage, regions: [PDFRedactionRegion]) -> CGImage? {

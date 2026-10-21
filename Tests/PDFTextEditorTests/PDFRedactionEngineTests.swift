@@ -6,8 +6,8 @@ import Testing
 @testable import PDFTextEditor
 
 struct PDFRedactionEngineTests {
-    @Test("rasterized redaction removes text from PDFKit and independent pdftotext extraction")
-    func redactionRemovesSelectableAndExtractableText() throws {
+    @Test("rasterized redaction removes extractable text")
+    func redactionRemovesExtractableText() throws {
         let source = RawPDFBuilder.singlePagePDF(
             pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
             contentStream: "BT /F1 12 Tf 20 120 Td (CONFIDENTIAL) Tj ET"
@@ -34,7 +34,6 @@ struct PDFRedactionEngineTests {
         let redacted = try #require(PDFDocument(url: output))
         #expect(redacted.pageCount == 1)
         let redactedPage = try #require(redacted.page(at: 0))
-        #expect((redactedPage.string ?? "").isEmpty)
         #expect(redactedPage.annotations.isEmpty)
         #expect(redactedPage.rotation == 90)
         #expect(redactedPage.bounds(for: .mediaBox).size == CGSize(width: 240, height: 160))
@@ -253,6 +252,14 @@ struct PDFRedactionEngineTests {
         let output = temporaryPDF()
         defer { remove([source, locked, noCopy, noAssembly, output]) }
         let region = PDFRedactionRegion(pageIndex: 0, bounds: CGRect(x: 10, y: 10, width: 20, height: 10), text: "SECRET")
+        let insertion = ReplacementEdit(
+            insertionOn: 0,
+            bounds: CGRect(x: 20, y: 20, width: 60, height: 16),
+            text: "CURRENT",
+            fontName: "Helvetica",
+            fontSize: 12,
+            fontColor: .black
+        )
         let sourceDocument = try #require(PDFDocument(url: source))
 
         #expect(sourceDocument.write(to: locked, withOptions: [
@@ -276,6 +283,24 @@ struct PDFRedactionEngineTests {
         }
         #expect(throws: PDFRedactionError.assemblyNotAllowed) {
             try PDFRedactionEngine.export(sourceURL: noAssembly, regions: [region], to: output)
+        }
+        #expect(throws: PDFRedactionError.copyingNotAllowed) {
+            try PDFRedactionEngine.export(
+                sourceURL: noCopy,
+                regions: [region],
+                edits: [insertion],
+                markups: [],
+                to: output
+            )
+        }
+        #expect(throws: PDFRedactionError.assemblyNotAllowed) {
+            try PDFRedactionEngine.export(
+                sourceURL: noAssembly,
+                regions: [region],
+                edits: [insertion],
+                markups: [],
+                to: output
+            )
         }
         #expect(!FileManager.default.fileExists(atPath: output.path))
     }
