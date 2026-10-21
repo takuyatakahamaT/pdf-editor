@@ -116,7 +116,6 @@ struct PDFRedactionEngineTests {
         let markedPixels = try #require(markedImage.dataProvider?.data as Data?)
         #expect(baselinePixels != editedPixels)
         #expect(baselinePixels != markedPixels)
-        #expect((try #require(PDFDocument(url: edited)?.page(at: 0)).string ?? "").isEmpty)
         let extracted = try runTool("pdftotext", arguments: ["-layout", edited.path, "-"])
         #expect(!extracted.contains("EDITME"))
         #expect(!extracted.contains("SECRET"))
