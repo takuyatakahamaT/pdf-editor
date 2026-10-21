@@ -6,6 +6,42 @@ import Testing
 
 @Suite(.serialized)
 struct PDFOCREngineTests {
+    private func xrefStreamFixture() -> URL {
+        var data = Data("%PDF-1.5\n".utf8)
+        var offsets: [Int] = [0]
+        func appendObject(_ number: Int, _ body: Data) {
+            offsets.append(data.count)
+            data.append(Data("\(number) 0 obj\n".utf8))
+            data.append(body)
+            data.append(Data("\nendobj\n".utf8))
+        }
+        appendObject(1, Data("<< /Type /Catalog /Pages 2 0 R >>".utf8))
+        appendObject(2, Data("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".utf8))
+        appendObject(3, Data("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Resources << /ProcSet [/PDF] >> /Contents 4 0 R >>".utf8))
+        appendObject(4, Data("<< /Length 3 >>\nstream\nq Q\nendstream".utf8))
+
+        let xrefOffset = data.count
+        var entries = Data()
+        func appendEntry(_ type: UInt8, _ field2: UInt32, _ field3: UInt16) {
+            entries.append(type)
+            for shift in stride(from: 24, through: 0, by: -8) { entries.append(UInt8((field2 >> shift) & 0xFF)) }
+            entries.append(UInt8((field3 >> 8) & 0xFF))
+            entries.append(UInt8(field3 & 0xFF))
+        }
+        appendEntry(0, 0, 65_535)
+        for offset in offsets.dropFirst() { appendEntry(1, UInt32(offset), 0) }
+        appendEntry(1, UInt32(xrefOffset), 0)
+        let xrefDictionary = Data("<< /Type /XRef /Size 6 /Root 1 0 R /W [1 4 2] /Index [0 6] /Length \(entries.count) >>\nstream\n".utf8)
+        data.append(Data("5 0 obj\n".utf8))
+        data.append(xrefDictionary)
+        data.append(entries)
+        data.append(Data("\nendstream\nendobj\nstartxref\n\(xrefOffset)\n%%EOF\n".utf8))
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("pdf-ocr-xref-stream-\(UUID().uuidString).pdf")
+        try? data.write(to: url)
+        return url
+    }
+
     @Test("separate OCR stream is searchable and removable without source embedding")
     func separateLayerRoundTrip() throws {
         let source = try makeImagePDF()
@@ -46,6 +82,104 @@ struct PDFOCREngineTests {
         #expect(cleanDoc.findString("日本語", withOptions: []).isEmpty)
         #expect(raster(try #require(cleanDoc.page(at: 0))) ==
                 raster(try #require(layeredDoc.page(at: 0))))
+    }
+
+    @Test("Contents配列を持つPDFへOCR層を追加し、元の配列へ復元できる")
+    func contentsArrayRoundTrip() throws {
+        let source = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Resources 6 0 R /Contents [4 0 R 5 0 R] >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q Q"),
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q Q"),
+            "<< /ProcSet [/PDF] >>"
+        ])
+        defer { try? FileManager.default.removeItem(at: source) }
+        let original = try Data(contentsOf: source)
+        let line = PDFOCRLine(pageIndex: 0, text: "ARRAY OCR",
+                              confidence: 0.96,
+                              bounds: CGRect(x: 0.1, y: 0.3, width: 0.8, height: 0.3))
+        let layered = try PDFOCRLayerWriter.add(linesByPage: [0: [line]], to: original)
+        #expect(PDFOCRLayerWriter.hasLayer(in: layered))
+        let layeredDocument = try #require(PDFDocument(data: layered))
+        #expect(layeredDocument.findString("ARRAY OCR", withOptions: []).count == 1)
+
+        let restored = try PDFOCRLayerWriter.removingLayer(from: layered)
+        #expect(!PDFOCRLayerWriter.hasLayer(in: restored))
+        let restoredDocument = try #require(PDFDocument(data: restored))
+        #expect(restoredDocument.pageCount == 1)
+        #expect(restoredDocument.findString("ARRAY OCR", withOptions: []).isEmpty)
+    }
+
+    @Test("直接・継承されたResourcesと間接Font辞書へOCR層を追加し、解除時に復元できる")
+    func directAndInheritedResourcesRoundTrip() throws {
+        let source = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R 9 0 R] /Count 3 /Resources << /ProcSet [/PDF] >> >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Resources << /ProcSet [/PDF] /Font << /Focr 8 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Resources << /ProcSet [/PDF] /Font 7 0 R >> /Contents 6 0 R >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q Q"),
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q Q"),
+            "<< /Existing 8 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Contents 10 0 R >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q Q")
+        ])
+        defer { try? FileManager.default.removeItem(at: source) }
+        let original = try Data(contentsOf: source)
+        let layered = try PDFOCRLayerWriter.add(linesByPage: [
+            0: [PDFOCRLine(pageIndex: 0, text: "DIRECT DICTIONARY", confidence: 0.96,
+                           bounds: CGRect(x: 0.1, y: 0.3, width: 0.8, height: 0.3))],
+            1: [PDFOCRLine(pageIndex: 1, text: "INDIRECT FONT", confidence: 0.96,
+                           bounds: CGRect(x: 0.1, y: 0.3, width: 0.8, height: 0.3))],
+            2: [PDFOCRLine(pageIndex: 2, text: "INHERITED RESOURCE", confidence: 0.96,
+                           bounds: CGRect(x: 0.1, y: 0.3, width: 0.8, height: 0.3))]
+        ], to: original)
+        let layeredDocument = try #require(PDFDocument(data: layered))
+        #expect(layeredDocument.pageCount == 3)
+        for (pageIndex, expectedText) in [(0, "DIRECT DICTIONARY"), (1, "INDIRECT FONT"), (2, "INHERITED RESOURCE")] {
+            let page = try #require(layeredDocument.page(at: pageIndex))
+            #expect(page.string?.contains(expectedText) == true)
+        }
+
+        let restored = try PDFOCRLayerWriter.removingLayer(from: layered)
+        #expect(!PDFOCRLayerWriter.hasLayer(in: restored))
+        let originalDocument = try #require(PDFDocument(data: original))
+        let restoredDocument = try #require(PDFDocument(data: restored))
+        #expect(restoredDocument.pageCount == originalDocument.pageCount)
+        for pageIndex in 0..<originalDocument.pageCount {
+            let originalPage = try #require(originalDocument.page(at: pageIndex))
+            let restoredPage = try #require(restoredDocument.page(at: pageIndex))
+            #expect((restoredPage.string ?? "").isEmpty)
+            #expect(raster(restoredPage) == raster(originalPage))
+        }
+    }
+
+    @Test("xref stream形式のPDFを画質を保って正規化し、OCR層を追加・解除できる")
+    func xrefStreamNormalizationRoundTrip() throws {
+        let source = xrefStreamFixture()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let original = try Data(contentsOf: source)
+        let originalDocument = try #require(PDFDocument(data: original))
+        let originalPage = try #require(originalDocument.page(at: 0))
+        let originalRaster = raster(originalPage)
+        let line = PDFOCRLine(pageIndex: 0, text: "XREF STREAM OCR", confidence: 0.96,
+                              bounds: CGRect(x: 0.1, y: 0.3, width: 0.8, height: 0.3))
+
+        let layered = try PDFOCRLayerWriter.add(linesByPage: [0: [line]], to: original)
+        #expect(try Data(contentsOf: source) == original)
+        #expect(PDFOCRLayerWriter.hasLayer(in: layered))
+        let layeredDocument = try #require(PDFDocument(data: layered))
+        let layeredPage = try #require(layeredDocument.page(at: 0))
+        #expect(layeredDocument.findString("XREF STREAM OCR", withOptions: []).count == 1)
+        #expect(raster(layeredPage) == originalRaster)
+
+        let restored = try PDFOCRLayerWriter.removingLayer(from: layered)
+        #expect(!PDFOCRLayerWriter.hasLayer(in: restored))
+        let restoredDocument = try #require(PDFDocument(data: restored))
+        let restoredPage = try #require(restoredDocument.page(at: 0))
+        #expect(restoredDocument.findString("XREF STREAM OCR", withOptions: []).isEmpty)
+        #expect(raster(restoredPage) == originalRaster)
     }
 
     @Test("OCR adds searchable selectable text, preserves page image and source bytes")

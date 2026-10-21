@@ -342,8 +342,50 @@ enum PDFExportEngine {
             helperURL: linkRemapHelperURL,
             expectedPageCount: document.pageCount
         )
-        do { try data.write(to: outputURL, options: .atomic) }
+        let searchableData = try addingSearchableTextForMissingReplacements(in: data, edits: edits)
+        do { try searchableData.write(to: outputURL, options: .atomic) }
         catch { throw PDFExportError.cannotCreateContext }
+    }
+
+    /// Some PDF fonts (notably custom Type 3 fonts) are rendered correctly by Quartz but
+    /// lose their Unicode mapping when a page is re-encoded. Add only the replacement
+    /// strings that are missing from the exported page's selectable text index. This keeps
+    /// saved edits searchable and editable without duplicating normal text output.
+    static func addingSearchableTextForMissingReplacements(
+        in data: Data,
+        edits: [ReplacementEdit]
+    ) throws -> Data {
+        guard let document = PDFDocument(data: data) else { throw PDFExportError.unreadableSource }
+        var linesByPage: [Int: [PDFOCRLine]] = [:]
+        for edit in edits where !edit.replacement.isEmpty {
+            guard document.pageCount > edit.pageIndex,
+                  let page = document.page(at: edit.pageIndex) else { throw PDFExportError.unreadableSource }
+            let expectedBounds = edit.displayedTextBounds
+                .insetBy(dx: -max(2, edit.fontSize), dy: -max(2, edit.fontSize))
+            let alreadySelectable = PDFGlyphIndex.makeIndex(for: page).runs.contains { run in
+                run.text.contains(edit.replacement) && run.box.intersects(expectedBounds)
+            }
+            guard !alreadySelectable else { continue }
+
+            let mediaBox = page.bounds(for: .mediaBox)
+            let visibleBounds = edit.displayedTextBounds.intersection(mediaBox)
+            guard mediaBox.width > 0, mediaBox.height > 0,
+                  !visibleBounds.isNull, visibleBounds.width > 0, visibleBounds.height > 0 else { continue }
+            let normalizedBounds = CGRect(
+                x: (visibleBounds.minX - mediaBox.minX) / mediaBox.width,
+                y: (visibleBounds.minY - mediaBox.minY) / mediaBox.height,
+                width: visibleBounds.width / mediaBox.width,
+                height: visibleBounds.height / mediaBox.height
+            )
+            linesByPage[edit.pageIndex, default: []].append(PDFOCRLine(
+                pageIndex: edit.pageIndex,
+                text: edit.replacement,
+                confidence: 1,
+                bounds: normalizedBounds
+            ))
+        }
+        guard !linesByPage.isEmpty else { return data }
+        return try PDFOCRLayerWriter.add(linesByPage: linesByPage, to: data)
     }
 
     private static func restorePageGeometry(from sourcePage: PDFPage, to outputPage: PDFPage) {

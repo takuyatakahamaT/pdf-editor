@@ -14,6 +14,7 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "q", opPushGState)
     CGPDFOperatorTableSetCallback(table, "Q", opPopGState)
     CGPDFOperatorTableSetCallback(table, "cm", opConcatCTM)
+    CGPDFOperatorTableSetCallback(table, "Do", opInvokeXObject)
     CGPDFOperatorTableSetCallback(table, "BT", opBeginText)
     CGPDFOperatorTableSetCallback(table, "Tf", opSetFont)
     CGPDFOperatorTableSetCallback(table, "Tm", opSetTextMatrix)
@@ -25,6 +26,7 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "Tw", opSetWordSpacing)
     CGPDFOperatorTableSetCallback(table, "Tz", opSetHorizontalScale)
     CGPDFOperatorTableSetCallback(table, "Ts", opSetTextRise)
+    CGPDFOperatorTableSetCallback(table, "Tr", opSetTextRenderingMode)
     CGPDFOperatorTableSetCallback(table, "Tj", opShowText)
     CGPDFOperatorTableSetCallback(table, "TJ", opShowTextArray)
     CGPDFOperatorTableSetCallback(table, "'", opNextLineShowText)
@@ -62,6 +64,74 @@ private func opConcatCTM(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPoi
           CGPDFScannerPopNumber(scanner, &b), CGPDFScannerPopNumber(scanner, &a) else { return }
     let m = CGAffineTransform(a: a, b: b, c: c, d: d, tx: e, ty: f)
     state.ctmStack[state.ctmStack.count - 1] = m.concatenating(state.ctm)
+}
+
+/// Form XObjectの本文も同じグリフ索引へ追加する。画像XObjectは編集対象の文字を
+/// 持たないため無視し、Formだけを有限の深さで再帰走査する。
+private func opInvokeXObject(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = state(from: info) else { return }
+    var resourceNamePtr: UnsafePointer<Int8>?
+    guard CGPDFScannerPopName(scanner, &resourceNamePtr), let resourceNamePtr else { return }
+    let resourceName = String(cString: resourceNamePtr)
+    let parentStream = CGPDFScannerGetContentStream(scanner)
+    let object = resourceName.withCString {
+        CGPDFContentStreamGetResource(parentStream, "XObject", $0)
+    }
+    guard let object, CGPDFObjectGetType(object) == .stream else { return }
+    var formStream: CGPDFStreamRef?
+    guard CGPDFObjectGetValue(object, .stream, &formStream), let formStream,
+          let formDictionary = CGPDFStreamGetDictionary(formStream) else { return }
+
+    var subtypePtr: UnsafePointer<Int8>?
+    guard CGPDFDictionaryGetName(formDictionary, "Subtype", &subtypePtr),
+          subtypePtr.map({ String(cString: $0) }) == "Form" else { return }
+    var formResources: CGPDFDictionaryRef?
+    _ = CGPDFDictionaryGetDictionary(formDictionary, "Resources", &formResources)
+    guard state.enterForm(named: resourceName, resources: formResources) else { return }
+    defer { state.leaveForm() }
+
+    let savedTextMatrix = state.tm
+    let savedTextLineMatrix = state.tlm
+    let savedMarkedContentStack = state.markedContentStack
+    let savedSkippingMarkedContentCount = state.skippingMarkedContentCount
+    state.pushGraphicsState()
+    defer {
+        state.popGraphicsState()
+        state.tm = savedTextMatrix
+        state.tlm = savedTextLineMatrix
+        state.markedContentStack = savedMarkedContentStack
+        state.skippingMarkedContentCount = savedSkippingMarkedContentCount
+    }
+
+    let formMatrix = formTransformationMatrix(formDictionary)
+    state.ctmStack[state.ctmStack.count - 1] = formMatrix.concatenating(state.ctm)
+
+    guard let formResources = state.activeResources else { return }
+    let contentStream = CGPDFContentStreamCreateWithStream(formStream, formResources, parentStream)
+    defer { CGPDFContentStreamRelease(contentStream) }
+    guard let operatorTable = makeOperatorTable() else { return }
+    defer { CGPDFOperatorTableRelease(operatorTable) }
+    guard let formScanner = CGPDFScannerCreate(
+        contentStream,
+        operatorTable,
+        Unmanaged.passUnretained(state).toOpaque()
+    ) as CGPDFScannerRef? else { return }
+    defer { CGPDFScannerRelease(formScanner) }
+    _ = CGPDFScannerScan(formScanner)
+}
+
+private func formTransformationMatrix(_ dictionary: CGPDFDictionaryRef) -> CGAffineTransform {
+    var matrixArray: CGPDFArrayRef?
+    guard CGPDFDictionaryGetArray(dictionary, "Matrix", &matrixArray), let matrixArray,
+          CGPDFArrayGetCount(matrixArray) == 6 else { return .identity }
+    var values = [CGPDFReal](repeating: 0, count: 6)
+    for index in values.indices {
+        guard CGPDFArrayGetNumber(matrixArray, index, &values[index]) else { return .identity }
+    }
+    return CGAffineTransform(
+        a: values[0], b: values[1], c: values[2], d: values[3],
+        tx: values[4], ty: values[5]
+    )
 }
 
 /// `BDC`: `tag properties BDC`。オペランドはタグ→プロパティの順で積まれるため、
@@ -123,7 +193,18 @@ private func opSetFont(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPoint
     var namePtr: UnsafePointer<Int8>?
     guard CGPDFScannerPopNumber(scanner, &size), CGPDFScannerPopName(scanner, &namePtr), let namePtr else { return }
     state.fontSize = size
-    state.fontKey = String(cString: namePtr)
+    let resourceName = String(cString: namePtr)
+    state.fontKey = state.fontResourceKey(for: resourceName)
+    let contentStream = CGPDFScannerGetContentStream(scanner)
+    let object = resourceName.withCString {
+        CGPDFContentStreamGetResource(contentStream, "Font", $0)
+    }
+    if let object, CGPDFObjectGetType(object) == .dictionary {
+        var dictionary: CGPDFDictionaryRef?
+        if CGPDFObjectGetValue(object, .dictionary, &dictionary), let dictionary {
+            state.fontDictionaries[state.fontKey] = dictionary
+        }
+    }
 }
 
 private func opSetTextMatrix(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -202,6 +283,13 @@ private func opSetTextRise(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawP
     state.textRise = value
 }
 
+private func opSetTextRenderingMode(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = state(from: info) else { return }
+    var mode: CGPDFReal = 0
+    guard CGPDFScannerPopNumber(scanner, &mode), mode.isFinite else { return }
+    state.textRenderingMode = min(max(Int(mode), 0), 7)
+}
+
 private func opShowText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = state(from: info) else { return }
     var stringRef: CGPDFStringRef?
@@ -263,6 +351,9 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
         }
         offset += bytesPerCode
 
+        let paintOrder = state.nextPaintOrder
+        state.nextPaintOrder += 1
+
         let w0 = info.width(for: code)
         let unicode = info.toUnicode[code] ?? ""
 
@@ -310,7 +401,9 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
                 fontSize: effectiveSize,
                 advance: advance,
                 fillColor: state.fillColorStack.last ?? .black,
-                hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code)
+                hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code),
+                textRenderingMode: state.textRenderingMode,
+                paintOrder: paintOrder
             ))
         }
     }

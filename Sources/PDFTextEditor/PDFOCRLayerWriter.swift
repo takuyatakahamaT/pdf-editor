@@ -1,9 +1,9 @@
 import Foundation
 import PDFKit
 
-/// Adds OCR as a separate page content stream. The original Contents and Resources
-/// references are recorded on each changed page, so the layer can be removed without
-/// retaining a copy of the source document inside the PDF.
+/// Adds OCR as a separate page content stream. The original Contents value (a stream
+/// reference or an array of references) and page-level Resources value are recorded on
+/// each changed page, so the layer can be removed without retaining a copy of the source PDF.
 enum PDFOCRLayerWriter {
     private static let marker = "/PDFTextEditorOCRLayer 1"
 
@@ -18,7 +18,28 @@ enum PDFOCRLayerWriter {
     }
 
     static func add(linesByPage: [Int: [PDFOCRLine]], to data: Data) throws -> Data {
-        let pdf = try PDFObjectEditor(data: data)
+        try add(linesByPage: linesByPage, to: data, allowPDFKitNormalization: true)
+    }
+
+    private static func add(
+        linesByPage: [Int: [PDFOCRLine]],
+        to data: Data,
+        allowPDFKitNormalization: Bool
+    ) throws -> Data {
+        let pdf: PDFObjectEditor
+        do {
+            pdf = try PDFObjectEditor(data: data)
+        } catch {
+            // Incremental edits require a classic xref table. PDF 1.5+ cross-reference
+            // streams cannot be patched by the small append-only writer below, so ask
+            // PDFKit to rewrite the separate output copy into a classic-xref PDF first.
+            guard allowPDFKitNormalization,
+                  let document = PDFDocument(data: data), !document.isLocked,
+                  let normalized = document.dataRepresentation(), normalized != data else {
+                throw PDFOCRError.cannotSave
+            }
+            return try add(linesByPage: linesByPage, to: normalized, allowPDFKitNormalization: false)
+        }
         let pages = pdf.pageObjects()
         let allCharacters = Array(Set(linesByPage.values.flatMap { $0.flatMap { $0.text.unicodeScalars } }))
             .sorted { $0.value < $1.value }
@@ -38,14 +59,46 @@ enum PDFOCRLayerWriter {
         for (pageIndex, lines) in linesByPage.sorted(by: { $0.key < $1.key }) {
             guard pages.indices.contains(pageIndex), !lines.isEmpty else { continue }
             let page = pages[pageIndex]
-            guard let contents = pdf.reference(named: "Contents", in: page.dictionary),
-                  let resources = pdf.reference(named: "Resources", in: page.dictionary),
-                  var resourcesDictionary = pdf.dictionary(for: resources) else {
+            guard let contents = pdf.value(named: "Contents", in: page.dictionary) else {
                 throw PDFOCRError.cannotSave
             }
+            let resourcesDictionaryValue = pdf.value(named: "Resources", in: page.dictionary)
+                ?? pdf.inheritedValue(named: "Resources", in: page.dictionary) ?? "<< >>"
+            guard var resourcesDictionary = pdf.dictionaryValue(resourcesDictionaryValue) else {
+                throw PDFOCRError.cannotSave
+            }
+
+            let originalResourcesValue = pdf.value(named: "Resources", in: page.dictionary)
+            let originalResourcesMarker: String
+            let originalResourcesWereDirect: Bool
+            if let originalResourcesValue {
+                if originalResourcesValue.hasPrefix("<<") {
+                    let baseResourcesNumber = next; next += 1
+                    objects[baseResourcesNumber] = originalResourcesValue
+                    originalResourcesMarker = "\(baseResourcesNumber) 0 R"
+                    originalResourcesWereDirect = true
+                } else {
+                    originalResourcesMarker = originalResourcesValue
+                    originalResourcesWereDirect = false
+                }
+            } else {
+                // A missing page-level key means Resources is inherited from /Pages, or
+                // defaults to an empty dictionary. Removing OCR must restore that state.
+                originalResourcesMarker = "null"
+                originalResourcesWereDirect = false
+            }
+
+            var fontResourceName = "Focr"
+            resourcesDictionary = try addFontReference(
+                fontNumber,
+                to: resourcesDictionary,
+                using: pdf,
+                objects: &objects,
+                nextObjectNumber: &next,
+                fontResourceName: &fontResourceName
+            )
             let resourceNumber = next; next += 1
             let streamNumber = next; next += 1
-            resourcesDictionary = try addFontReference(fontNumber, to: resourcesDictionary)
             objects[resourceNumber] = resourcesDictionary
             let mediaBox = page.mediaBox
             let commands = lines.map { line -> String in
@@ -56,16 +109,23 @@ enum PDFOCRLayerWriter {
                 let characters = Array(line.text.unicodeScalars)
                 let encoded = characters.map { String(format: "%04X", codes[$0.value]!) }.joined()
                 let advance = max(0.1, rect.width / CGFloat(max(1, characters.count)))
-                return "BT /Focr 1 Tf 3 Tr \(number(advance)) 0 0 \(number(max(1, rect.height * 0.8))) \(number(rect.minX)) \(number(rect.minY + rect.height * 0.12)) Tm <\(encoded)> Tj ET"
+                return "BT /\(fontResourceName) 1 Tf 3 Tr \(number(advance)) 0 0 \(number(max(1, rect.height * 0.8))) \(number(rect.minX)) \(number(rect.minY + rect.height * 0.12)) Tm <\(encoded)> Tj ET"
             }.joined(separator: "\n")
             objects[streamNumber] = stream("q\n\(commands)\nQ\n")
             var replacement = page.dictionary
-            replacement = pdf.replacingReference(named: "Contents", in: replacement,
-                with: "[\(contents) 0 R \(streamNumber) 0 R]")
-            replacement = pdf.replacingReference(named: "Resources", in: replacement,
+            let existingContentStreams: String
+            if contents.hasPrefix("["), contents.hasSuffix("]") {
+                existingContentStreams = String(contents.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                existingContentStreams = contents
+            }
+            replacement = pdf.settingValue(named: "Contents", in: replacement,
+                with: "[\(existingContentStreams) \(streamNumber) 0 R]")
+            replacement = pdf.settingValue(named: "Resources", in: replacement,
                 with: "\(resourceNumber) 0 R")
             replacement = replacement.replacingOccurrences(of: ">>", with:
-                "\(marker) /PDFTextEditorOCRBaseContents \(contents) 0 R /PDFTextEditorOCRBaseResources \(resources) 0 R >>",
+                "\(marker) /PDFTextEditorOCRBaseContents \(contents) /PDFTextEditorOCRBaseResources \(originalResourcesMarker) "
+                    + (originalResourcesWereDirect ? "/PDFTextEditorOCRBaseResourcesWasDirect true " : "") + ">>",
                 options: [], range: replacement.range(of: ">>", options: .backwards))
             objects[page.number] = replacement
         }
@@ -76,18 +136,24 @@ enum PDFOCRLayerWriter {
         let pdf = try PDFObjectEditor(data: data)
         var objects: [Int: String] = [:]
         for page in pdf.pageObjects() where page.dictionary.contains(marker) {
-            guard let contents = pdf.reference(named: "PDFTextEditorOCRBaseContents", in: page.dictionary),
-                  let resources = pdf.reference(named: "PDFTextEditorOCRBaseResources", in: page.dictionary) else {
+            guard let contents = pdf.value(named: "PDFTextEditorOCRBaseContents", in: page.dictionary),
+                  let resources = pdf.value(named: "PDFTextEditorOCRBaseResources", in: page.dictionary) else {
                 throw PDFOCRError.cannotSave
             }
             var replacement = page.dictionary
-            replacement = pdf.replacingArrayOrReference(named: "Contents", in: replacement,
-                                                         with: "\(contents) 0 R")
-            replacement = pdf.replacingReference(named: "Resources", in: replacement,
-                                                 with: "\(resources) 0 R")
-            for key in ["PDFTextEditorOCRLayer", "PDFTextEditorOCRBaseContents", "PDFTextEditorOCRBaseResources"] {
+            replacement = pdf.replacingValue(named: "Contents", in: replacement, with: contents)
+            if resources == "null" {
+                replacement = pdf.removingValue(named: "Resources", in: replacement)
+            } else if pdf.value(named: "PDFTextEditorOCRBaseResourcesWasDirect", in: page.dictionary) == "true" {
+                guard let resourceNumber = pdf.referenceNumber(in: resources),
+                      let directResources = pdf.dictionary(for: resourceNumber) else { throw PDFOCRError.cannotSave }
+                replacement = pdf.settingValue(named: "Resources", in: replacement, with: directResources)
+            } else {
+                replacement = pdf.settingValue(named: "Resources", in: replacement, with: resources)
+            }
+            for key in ["PDFTextEditorOCRLayer", "PDFTextEditorOCRBaseContents", "PDFTextEditorOCRBaseResources", "PDFTextEditorOCRBaseResourcesWasDirect"] {
                 replacement = replacement.replacingOccurrences(
-                    of: "/\(key)\\s+(?:\\d+\\s+0\\s+R|\\d+)", with: "",
+                    of: "/\(key)\\s+(?:\\[[^]]*\\]|\\d+\\s+0\\s+R|\\d+|true|false|null)", with: "",
                     options: .regularExpression)
             }
             objects[page.number] = replacement
@@ -96,22 +162,49 @@ enum PDFOCRLayerWriter {
         return try pdf.appending(objects: objects)
     }
 
-    private static func addFontReference(_ fontNumber: Int, to dictionary: String) throws -> String {
-        guard dictionary.range(of: "/Font\\s+\\d+\\s+0\\s+R", options: .regularExpression) == nil else {
-            // Do not shadow an existing indirect font dictionary and alter page appearance.
-            throw PDFOCRError.cannotSave
+    private static func addFontReference(
+        _ fontNumber: Int,
+        to dictionary: String,
+        using pdf: PDFObjectEditor,
+        objects: inout [Int: String],
+        nextObjectNumber: inout Int,
+        fontResourceName: inout String
+    ) throws -> String {
+        let fontDictionary: String
+        let originalFontReference: Int?
+        if let fontValue = pdf.value(named: "Font", in: dictionary) {
+            if fontValue.hasPrefix("<<") {
+                fontDictionary = fontValue
+                originalFontReference = nil
+            } else if let reference = pdf.referenceNumber(in: fontValue),
+                      let referencedDictionary = pdf.dictionary(for: reference) {
+                fontDictionary = referencedDictionary
+                originalFontReference = reference
+            } else {
+                throw PDFOCRError.cannotSave
+            }
+        } else {
+            fontDictionary = "<< >>"
+            originalFontReference = nil
         }
-        guard let range = dictionary.range(of: "/Font\\s*<<", options: .regularExpression),
-              let close = dictionary.range(of: ">>", range: range.upperBound..<dictionary.endIndex) else {
-            // Quartz commonly omits Font for image-only pages.
-            guard let close = dictionary.range(of: ">>", options: .backwards) else { throw PDFOCRError.cannotSave }
-            var result = dictionary
-            result.insert(contentsOf: " /Font << /Focr \(fontNumber) 0 R >> ", at: close.lowerBound)
-            return result
+
+        var suffix = 0
+        repeat {
+            fontResourceName = suffix == 0 ? "Focr" : "Focr\(suffix)"
+            suffix += 1
+        } while pdf.value(named: fontResourceName, in: fontDictionary) != nil
+
+        let updatedFontDictionary = pdf.settingValue(
+            named: fontResourceName,
+            in: fontDictionary,
+            with: "\(fontNumber) 0 R"
+        )
+        if originalFontReference != nil {
+            let copiedFontNumber = nextObjectNumber; nextObjectNumber += 1
+            objects[copiedFontNumber] = updatedFontDictionary
+            return pdf.settingValue(named: "Font", in: dictionary, with: "\(copiedFontNumber) 0 R")
         }
-        var result = dictionary
-        result.insert(contentsOf: " /Focr \(fontNumber) 0 R ", at: close.lowerBound)
-        return result
+        return pdf.settingValue(named: "Font", in: dictionary, with: updatedFontDictionary)
     }
 
     private static func makeToUnicode(characters: [Unicode.Scalar]) -> String {
@@ -244,13 +337,101 @@ private struct PDFObjectEditor {
         Self.firstCapture("/\(key)\\s+(\\d+)\\s+0\\s+R", in: dictionary)
     }
 
-    func replacingReference(named key: String, in dictionary: String, with value: String) -> String {
-        dictionary.replacingOccurrences(of: "/\(key)\\s+\\d+\\s+0\\s+R", with: "/\(key) \(value)", options: .regularExpression)
+    func value(named key: String, in dictionary: String) -> String? {
+        guard let range = valueRange(named: key, in: dictionary) else { return nil }
+        return (dictionary as NSString).substring(with: range)
     }
 
-    func replacingArrayOrReference(named key: String, in dictionary: String, with value: String) -> String {
-        dictionary.replacingOccurrences(of: "/\(key)\\s+(?:\\[[^]]+\\]|\\d+\\s+0\\s+R)",
-                                        with: "/\(key) \(value)", options: .regularExpression)
+    func inheritedValue(named key: String, in dictionary: String, depth: Int = 0) -> String? {
+        guard depth < 16 else { return nil }
+        if let value = value(named: key, in: dictionary) { return value }
+        guard let parent = reference(named: "Parent", in: dictionary),
+              let parentDictionary = self.dictionary(for: parent) else { return nil }
+        return inheritedValue(named: key, in: parentDictionary, depth: depth + 1)
+    }
+
+    func dictionaryValue(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("<<"), value.hasSuffix(">>") { return value }
+        guard let number = referenceNumber(in: value) else { return nil }
+        return dictionary(for: number)
+    }
+
+    func referenceNumber(in value: String) -> Int? {
+        Self.firstCapture("^(\\d+)\\s+0\\s+R$", in: value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func replacingValue(named key: String, in dictionary: String, with value: String) -> String {
+        guard let range = valueRange(named: key, in: dictionary) else { return dictionary }
+        let source = dictionary as NSString
+        return source.substring(to: range.location) + value
+            + source.substring(from: NSMaxRange(range))
+    }
+
+    func settingValue(named key: String, in dictionary: String, with value: String) -> String {
+        if valueRange(named: key, in: dictionary) != nil {
+            return replacingValue(named: key, in: dictionary, with: value)
+        }
+        guard let closingRange = dictionary.range(of: ">>", options: .backwards) else { return dictionary }
+        var result = dictionary
+        result.insert(contentsOf: " /\(key) \(value) ", at: closingRange.lowerBound)
+        return result
+    }
+
+    func removingValue(named key: String, in dictionary: String) -> String {
+        let source = dictionary as NSString
+        guard let keyMatch = Self.matches("/\(key)\\s+", in: source).first,
+              let valueRange = valueRange(named: key, in: dictionary) else { return dictionary }
+        let propertyRange = NSRange(location: keyMatch.range.location,
+                                    length: NSMaxRange(valueRange) - keyMatch.range.location)
+        return source.replacingCharacters(in: propertyRange, with: "")
+    }
+
+    private func valueRange(named key: String, in dictionary: String) -> NSRange? {
+        let source = dictionary as NSString
+        let pattern = "/\(key)\\s+"
+        guard let keyMatch = Self.matches(pattern, in: source).first else { return nil }
+        var start = NSMaxRange(keyMatch.range)
+        while start < source.length, CharacterSet.whitespacesAndNewlines.contains(UnicodeScalar(source.character(at: start))!) {
+            start += 1
+        }
+        guard start < source.length else { return nil }
+        let first = source.character(at: start)
+        if first == 0x5B { // [ ... ]
+            var depth = 0
+            var index = start
+            while index < source.length {
+                let character = source.character(at: index)
+                if character == 0x5B { depth += 1 }
+                if character == 0x5D {
+                    depth -= 1
+                    if depth == 0 { return NSRange(location: start, length: index - start + 1) }
+                }
+                index += 1
+            }
+            return nil
+        }
+        if first == 0x3C, start + 1 < source.length, source.character(at: start + 1) == 0x3C { // << ... >>
+            var depth = 0
+            var index = start
+            while index + 1 < source.length {
+                let left = source.character(at: index)
+                let right = source.character(at: index + 1)
+                if left == 0x3C, right == 0x3C { depth += 1; index += 2; continue }
+                if left == 0x3E, right == 0x3E {
+                    depth -= 1
+                    index += 2
+                    if depth == 0 { return NSRange(location: start, length: index - start) }
+                    continue
+                }
+                index += 1
+            }
+            return nil
+        }
+        let tail = source.substring(from: start) as NSString
+        let tokenPattern = "^(?:\\d+\\s+\\d+\\s+R|/[^\\s<>\\[\\]()]+|null|true|false|[-+]?(?:\\d+\\.?\\d*|\\.\\d+))"
+        guard let token = Self.matches(tokenPattern, in: tail).first else { return nil }
+        return NSRange(location: start, length: token.range.length)
     }
 
     func appending(objects: [Int: String]) throws -> Data {
