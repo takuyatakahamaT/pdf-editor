@@ -1,4 +1,4 @@
-name: Signed macOS release
+name: Sparkle署名付き更新
 on:
   push:
     branches: [main]
@@ -26,14 +26,8 @@ jobs:
           swift build -c release
           swift test
           python3 scripts/check-update-security.py
-      - name: Build, notarize, sign updates, and publish
+      - name: Build, sign updates, and publish
         run: scripts/publish-release.sh
         env:
           GH_TOKEN: ${{ github.token }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          DEVELOPER_ID_CERTIFICATE_P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
-          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-          PDF_EDITOR_CODESIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_CODESIGN_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
