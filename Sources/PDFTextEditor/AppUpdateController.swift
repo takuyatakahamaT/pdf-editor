@@ -83,7 +83,12 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             guard panel.runModal() == .OK, let outputURL = panel.url,
                   outputURL.standardizedFileURL != sourceURL.standardizedFileURL else { return }
             do {
-                try PDFExportEngine.export(sourceURL: sourceURL, edits: model.activeReplacements, to: outputURL)
+                try PDFExportEngine.export(
+                    sourceURL: sourceURL,
+                    edits: model.activeReplacements,
+                    markups: model.activeMarkupEdits,
+                    to: outputURL
+                )
                 reopenURL = outputURL
             } catch {
                 let failure = NSAlert(error: error)

@@ -11,6 +11,16 @@ struct PDFCompressionEngineTests {
             pageBounds: CGRect(x: 0, y: 0, width: 200, height: 300),
             contentStream: ""
         )
+        let sourceDocument = try #require(PDFDocument(url: sourceURL))
+        let sourcePage = try #require(sourceDocument.page(at: 0))
+        let managedMarkup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .note,
+            bounds: CGRect(x: 20, y: 30, width: 80, height: 24),
+            text: "editable note"
+        )
+        sourcePage.addAnnotation(PDFMarkupEngine.makeAnnotation(for: managedMarkup))
+        #expect(sourceDocument.write(to: sourceURL))
         let destination = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-compress-test-destination-\(UUID().uuidString).pdf")
         defer {
@@ -27,7 +37,13 @@ struct PDFCompressionEngineTests {
         defer { try? FileManager.default.removeItem(at: estimate.temporaryURL) }
         #expect(estimate.sourceBytes == original.count)
         #expect(estimate.outputBytes == (try Data(contentsOf: estimate.temporaryURL)).count)
-        #expect(PDFDocument(url: estimate.temporaryURL)?.pageCount == 1)
+        let compressed = try #require(PDFDocument(url: estimate.temporaryURL))
+        #expect(compressed.pageCount == 1)
+        let compressedPage = try #require(compressed.page(at: 0))
+        let compressedMarkup = try #require(PDFMarkupEngine.edits(in: compressed).first)
+        #expect(compressedMarkup.id == managedMarkup.id)
+        #expect(compressedMarkup.text == "editable note")
+        #expect(compressedPage.annotations.count == 1)
         try PDFCompressionEngine.save(estimate, to: destination, protecting: sourceURL)
         #expect(try Data(contentsOf: destination) == Data(contentsOf: estimate.temporaryURL))
         #expect(try Data(contentsOf: sourceURL) == original)

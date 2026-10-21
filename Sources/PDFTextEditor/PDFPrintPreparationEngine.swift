@@ -49,6 +49,7 @@ enum PDFPrintPreparationEngine {
     static func prepare(
         sourceURL: URL,
         edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit] = [],
         temporaryDirectory: URL = FileManager.default.temporaryDirectory
     ) throws -> PreparedPrintDocument {
         guard let sourceDocument = PDFDocument(url: sourceURL) else {
@@ -65,7 +66,12 @@ enum PDFPrintPreparationEngine {
             .appendingPathComponent("pdf-editor-print-\(UUID().uuidString)")
             .appendingPathExtension("pdf")
         do {
-            try PDFExportEngine.exportForPrinting(sourceURL: sourceURL, edits: edits, to: outputURL)
+            try PDFExportEngine.exportForPrinting(
+                sourceURL: sourceURL,
+                edits: edits,
+                markups: markups,
+                to: outputURL
+            )
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw PDFPrintPreparationError.exportFailed

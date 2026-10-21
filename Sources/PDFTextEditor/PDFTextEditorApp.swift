@@ -68,6 +68,12 @@ struct PDFTextEditorApp: App {
                 }
                 .keyboardShortcut("z")
                 .disabled(!model.canUndo)
+
+                Button("やり直す") {
+                    model.redoLastEdit()
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!model.canRedo)
             }
 
             CommandGroup(replacing: .printItem) {
