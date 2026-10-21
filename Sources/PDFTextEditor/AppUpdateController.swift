@@ -3,14 +3,38 @@ import Sparkle
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct AppUpdateNoticeState: Equatable {
+    private(set) var availableVersion: String?
+    private(set) var dismissedVersion: String?
+
+    var isVisible: Bool {
+        guard let availableVersion else { return false }
+        return dismissedVersion != availableVersion
+    }
+
+    mutating func stage(version: String) {
+        let version = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !version.isEmpty else { return }
+        if availableVersion != version {
+            dismissedVersion = nil
+        }
+        availableVersion = version
+    }
+
+    mutating func dismiss() {
+        dismissedVersion = availableVersion
+    }
+}
+
 /// Sparkle owns download verification, atomic installation and relaunch. The app
 /// owns the document-save gate: installing an update must never discard edits.
 @MainActor
-final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
+final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     static let publicKeyPlaceholder = "REPLACE_WITH_PDF_EDITOR_SPARKLE_PUBLIC_KEY"
     private static let reopenKey = "PDFEditor.reopenAfterUpdate"
     @Published private(set) var isConfigured = false
     @Published private(set) var isRestartPending = false
+    @Published private(set) var updateNotice = AppUpdateNoticeState()
     private let model: EditorModel
     private var controller: SPUStandardUpdaterController?
     private var installHandler: (() -> Void)?
@@ -34,7 +58,39 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
               let decoded = Data(base64Encoded: key), decoded.count == 32,
               decoded.contains(where: { $0 != 0 }) else { return }
         isConfigured = true
-        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
+        controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: self)
+    }
+
+    /// Let the app show a low-disruption notice for scheduled checks. User-initiated
+    /// checks still use Sparkle's signed update and confirmation UI.
+    nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(
+        _ update: SUAppcastItem,
+        andInImmediateFocus immediateFocus: Bool
+    ) -> Bool {
+        false
+    }
+
+    nonisolated func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        guard !handleShowingUpdate else { return }
+        let version = update.displayVersionString
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var notice = updateNotice
+            notice.stage(version: version)
+            updateNotice = notice
+        }
+    }
+
+    func dismissUpdateNotice() {
+        var notice = updateNotice
+        notice.dismiss()
+        updateNotice = notice
     }
 
     func checkForUpdates() {
