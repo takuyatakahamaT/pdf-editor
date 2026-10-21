@@ -74,21 +74,17 @@ enum PDFOCREngine {
         let targets = candidatePages(in: base, selected: Array(Set(selectedPages).union(previousPages)).sorted())
         guard !targets.isEmpty else { throw PDFOCRError.noImagePages }
 
-        let output = PDFDocument()
         var lowConfidence: [PDFOCRLine] = []
         var processed: [Int] = []
         var linesByPage: [Int: [PDFOCRLine]] = [:]
         for index in 0..<base.pageCount {
-            guard let sourcePage = base.page(at: index), let copy = sourcePage.copy() as? PDFPage else {
-                throw PDFOCRError.unreadableSource
-            }
-            output.insert(copy, at: index)
+            guard let page = base.page(at: index) else { throw PDFOCRError.unreadableSource }
             if targets.contains(index) {
                 let lines: [PDFOCRLine]
                 if let recognizePage {
-                    lines = try recognizePage(copy, index, languages)
+                    lines = try recognizePage(page, index, languages)
                 } else {
-                    lines = try recognize(page: copy, pageIndex: index, languages: languages)
+                    lines = try recognize(page: page, pageIndex: index, languages: languages)
                 }
                 if !lines.isEmpty {
                     linesByPage[index] = lines
@@ -99,14 +95,10 @@ enum PDFOCREngine {
             }
         }
         guard !processed.isEmpty else { throw PDFOCRError.noImagePages }
-        let stagedURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pdf-editor-ocr-stage-\(UUID().uuidString).pdf")
-        defer { try? FileManager.default.removeItem(at: stagedURL) }
-        guard output.write(to: stagedURL) else { throw PDFOCRError.cannotSave }
-        let stageData: Data
-        do { stageData = try Data(contentsOf: stagedURL) }
-        catch { throw PDFOCRError.cannotSave }
-        let layeredData = try PDFOCRLayerWriter.add(linesByPage: linesByPage, to: stageData)
+        // PDFKitで空のPDFへページを挿し直すと、しおり・添付・フォーム・文書情報など
+        // ページ外のカタログ構造が失われる。元PDFのバイト列へOCRオブジェクトだけを
+        // 増分追記し、既存のカタログとページオブジェクトをそのまま維持する。
+        let layeredData = try PDFOCRLayerWriter.add(linesByPage: linesByPage, to: baseData)
         do { try layeredData.write(to: outputURL, options: .atomic) }
         catch { throw PDFOCRError.cannotSave }
         return PDFOCRResult(outputURL: outputURL, processedPages: processed, lowConfidenceLines: lowConfidence)

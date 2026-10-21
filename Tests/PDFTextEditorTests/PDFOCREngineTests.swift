@@ -70,6 +70,8 @@ struct PDFOCREngineTests {
         let after = try #require(PDFDocument(url: output))
         let page = try #require(after.page(at: 0))
         #expect(PDFOCREngine.hasLayer(url: output))
+        let outputBytes = try Data(contentsOf: output)
+        #expect(outputBytes.starts(with: originalBytes))
         #expect(page.bounds(for: .mediaBox) == beforePage.bounds(for: .mediaBox))
         #expect(page.rotation == beforePage.rotation)
         #expect(raster(page) == beforeImage)
