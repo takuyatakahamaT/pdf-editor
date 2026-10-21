@@ -28,6 +28,7 @@ struct EditorScreen: View {
                             revision: model.revision,
                             mode: model.mode,
                             selectedTarget: model.selectedTarget,
+                            redactionRegions: model.redactionRegions,
                             highlightedSearchSelections: model.highlightedSearchSelections,
                             focusedSearchSelection: model.focusedSearchSelection,
                             searchHighlightRevision: model.searchHighlightRevision,
@@ -254,12 +255,10 @@ struct EditorScreen: View {
                 .labelsHidden()
                 .padding(.vertical, 8)
 
-                Text(model.mode == .replacement ? "既存の文字を選択して編集" : "PDF上をクリックして配置")
+                Text(modeHeading)
                     .font(.custom("Hiragino Sans", size: 21).weight(.semibold))
                     .foregroundStyle(NihoPalette.heading)
-                Text(model.mode == .replacement
-                    ? "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
-                    : "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。")
+                Text(modeInstructions)
                     .font(.custom("Hiragino Sans", size: 12))
                     .foregroundStyle(NihoPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -281,7 +280,7 @@ struct EditorScreen: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(NihoPalette.line, lineWidth: 1)
                         }
-                } else {
+                } else if model.mode == .insertion {
                     HStack(spacing: 9) {
                         Image(systemName: model.hasInsertionLocation ? "mappin.and.ellipse" : "cursorarrow.click")
                             .foregroundStyle(accentColor)
@@ -292,6 +291,10 @@ struct EditorScreen: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                     .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if model.mode == .redaction {
+                    redactionControls
                 }
 
                 if model.mode == .insertion {
@@ -384,7 +387,9 @@ struct EditorScreen: View {
                     .foregroundStyle(accentColor)
                 Text(model.mode == .replacement
                     ? "白い背景の帳票向けMVPです。白塗りは元の文字を見えなくするだけで、書き出したPDFのテキスト抽出では元の文字列が残ります。元ファイルは上書きせず、編集済みPDFを別名保存します。"
-                    : "文字は1行で追加され、書き出し時にベクター化されます。回転・縦書き・複数行は未対応です。")
+                    : model.mode == .insertion
+                    ? "文字は1行で追加され、書き出し時にベクター化されます。回転・縦書き・複数行は未対応です。"
+                    : "墨消しは全ページを高解像度画像に変換します。元PDFの文書メタデータは引き継ぎません。生成日時やProducer情報は新しいPDFに付く場合があります。")
                     .font(.custom("Hiragino Sans", size: 11))
                     .foregroundStyle(NihoPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -397,6 +402,79 @@ struct EditorScreen: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(NihoPalette.line).frame(width: 1)
         }
+    }
+
+    private var modeHeading: String {
+        switch model.mode {
+        case .replacement: "既存の文字を選択して編集"
+        case .insertion: "PDF上をクリックして配置"
+        case .redaction: "選択した文字を安全に墨消し"
+        }
+    }
+
+    private var modeInstructions: String {
+        switch model.mode {
+        case .replacement: "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
+        case .insertion: "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。"
+        case .redaction: "墨消しする文字をクリックして対象へ追加。適用前に黒塗り範囲を確認できます。"
+        }
+    }
+
+    @ViewBuilder
+    private var redactionControls: some View {
+        fieldLabel("選択した文字")
+        Text(model.selectedTarget?.originalText ?? "PDF上の文字をクリックしてください")
+            .font(.custom("Hiragino Sans", size: 13))
+            .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+
+        Button("選択文字を墨消し対象に追加", action: model.addSelectedRedactionRegion)
+            .disabled(!model.hasSelection)
+            .buttonStyle(.borderedProminent)
+
+        fieldLabel("墨消しプレビュー（\(model.redactionRegions.count)か所）")
+        if model.redactionRegions.isEmpty {
+            Text("対象を追加すると、ページ上に黒いプレビューが表示されます。")
+                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
+        } else {
+            ForEach(model.redactionRegions) { region in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("\(region.pageIndex + 1)ページ · \(region.text)")
+                        .font(.custom("Hiragino Sans", size: 11))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        model.removeRedactionRegion(id: region.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("この墨消し範囲を外す")
+                }
+                .padding(8)
+                .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 6))
+            }
+            Button("すべての範囲を外す", action: model.clearRedactionRegions)
+                .buttonStyle(.plain).foregroundStyle(NihoPalette.muted)
+        }
+
+        Button(action: model.applyRedactionsFromPanel) {
+            HStack {
+                Text("墨消しを適用して別名保存")
+                Spacer()
+                Image(systemName: "lock.doc")
+            }
+            .font(.custom("Hiragino Sans", size: 13).weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .frame(height: 44)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.redactionRegions.isEmpty)
+        .opacity(model.redactionRegions.isEmpty ? 0.42 : 1)
     }
 
     private var landing: some View {

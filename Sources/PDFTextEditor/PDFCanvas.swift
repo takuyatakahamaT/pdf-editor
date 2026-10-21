@@ -7,6 +7,7 @@ struct PDFCanvas: NSViewRepresentable {
     let revision: Int
     let mode: EditorMode
     let selectedTarget: TextTarget?
+    let redactionRegions: [PDFRedactionRegion]
     let highlightedSearchSelections: [PDFSelection]
     let focusedSearchSelection: PDFSelection?
     let searchHighlightRevision: Int
@@ -57,6 +58,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.startObservingScaleChanges()
         view.applyZoomCommand(.fitPage)
         view.appliedZoomCommandRevision = zoomState.commandRevision
+        view.syncRedactionPreviews(regions: redactionRegions, mode: mode)
         view.scaleChangeHandler?(view.scaleFactor)
         return view
     }
@@ -101,6 +103,7 @@ struct PDFCanvas: NSViewRepresentable {
             view.searchNavigationRevision = searchNavigationRevision
         }
         view.selectedTextTarget = selectedTarget
+        view.syncRedactionPreviews(regions: redactionRegions, mode: mode)
         view.syncInlineEditor(isEditing: isInlineEditing)
         if selectedTarget == nil {
             view.clearReplacementHighlight()
@@ -216,6 +219,9 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private weak var draggedPage: PDFPage?
     private var dragStartPoint = CGPoint.zero
     private var dragStartBounds = CGRect.zero
+    private var redactionPreviewRegions: [PDFRedactionRegion] = []
+    private var redactionPreviewMode: EditorMode?
+    private var redactionPreviewAnnotations: [PDFAnnotation] = []
 
     // 置換モードのグリフ単位ドラッグ選択に使う状態。
     // PDFKit のテキスト選択 (`PDFSelection`) はこの PDF の表領域で破綻するため使わない。
@@ -349,6 +355,10 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if editorMode == .redaction {
+            handleReplacementMouseDragged(event)
+            return
+        }
         if editorMode == .replacement {
             if let edit = movingExistingEdit,
                let page = document?.page(at: edit.pageIndex) {
@@ -389,6 +399,20 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if editorMode == .redaction {
+            if movingSelectionTarget != nil {
+                movingSelectionTarget = nil
+                movementDelta = .zero
+                return
+            }
+            if inlineField != nil { return }
+            selectionHandler?(replacementDragTarget)
+            replacementDragTarget = nil
+            replacementDragRun = nil
+            replacementDragAnchorIndex = nil
+            replacementDragPage = nil
+            return
+        }
         if editorMode == .replacement {
             if let edit = movingExistingEdit {
                 if hypot(movementDelta.x, movementDelta.y) > 0.5 {
@@ -430,6 +454,33 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
         highlightAnnotation = nil
         highlightPage = nil
+    }
+
+    func syncRedactionPreviews(regions: [PDFRedactionRegion], mode: EditorMode) {
+        guard redactionPreviewMode != mode || redactionPreviewRegions != regions else { return }
+        for annotation in redactionPreviewAnnotations {
+            annotation.page?.removeAnnotation(annotation)
+        }
+        redactionPreviewAnnotations = []
+        redactionPreviewMode = mode
+        redactionPreviewRegions = regions
+        guard mode == .redaction else { return }
+
+        for region in regions {
+            guard let page = document?.page(at: region.pageIndex),
+                  let bounds = PDFRedactionEngine.redactionBounds(for: region, in: page.bounds(for: .cropBox)) else { continue }
+            let annotation = PDFAnnotation(bounds: bounds, forType: .square, withProperties: nil)
+            annotation.userName = "PDFEditorRedactionPreview:\(region.id.uuidString)"
+            annotation.shouldPrint = false
+            annotation.color = NSColor.systemRed.withAlphaComponent(0.9)
+            annotation.interiorColor = NSColor.black.withAlphaComponent(0.55)
+            let border = PDFBorder()
+            border.lineWidth = 1.5
+            annotation.border = border
+            page.addAnnotation(annotation)
+            redactionPreviewAnnotations.append(annotation)
+        }
+        needsDisplay = true
     }
 
     func syncInlineEditor(isEditing: Bool) {

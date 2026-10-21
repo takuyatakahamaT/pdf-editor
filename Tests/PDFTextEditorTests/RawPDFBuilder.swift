@@ -40,12 +40,16 @@ enum RawPDFBuilder {
 
     /// 1 ページだけの最小 PDF（Helvetica 単純フォント 1 個、`/Widths` は宣言しない）を、
     /// 呼び出し側が渡した content stream 本文で作る。
-    static func singlePagePDF(pageBounds: CGRect, contentStream: String) -> URL {
+    static func singlePagePDF(pageBounds: CGRect, cropBox: CGRect? = nil, contentStream: String) -> URL {
+        let cropBoxEntry = cropBox.map {
+            "/CropBox [\($0.minX) \($0.minY) \($0.maxX) \($0.maxY)] "
+        } ?? ""
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R "
                 + "/MediaBox [\(pageBounds.minX) \(pageBounds.minY) \(pageBounds.maxX) \(pageBounds.maxY)] "
+                + cropBoxEntry
                 + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
             streamObject(dict: "", streamContent: contentStream)

@@ -40,6 +40,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var insertionFontColor: NSColor = .black
     @Published private(set) var importedFontFamilies: [String] = []
     @Published private(set) var edits: [AppliedEdit] = []
+    @Published private(set) var redactionRegions: [PDFRedactionRegion] = []
     @Published private(set) var revision = 0
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
     @Published var isShowingMergeSheet = false
@@ -90,10 +91,16 @@ final class EditorModel: ObservableObject {
     var canPrint: Bool { document != nil && sourceURL != nil }
     var hasOCRLayer: Bool { ocrLayerPresent }
     var canStartOCR: Bool { document != nil && !ocrIsRunning && !canUndo && !hasPendingEditorInput }
-    var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil }
+    var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil || !redactionRegions.isEmpty }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
-    var canEditText: Bool { mode == .replacement ? hasSelection : hasInsertionLocation }
+    var canEditText: Bool {
+        switch mode {
+        case .replacement: hasSelection
+        case .insertion: hasInsertionLocation
+        case .redaction: false
+        }
+    }
     var canCommit: Bool {
         canEditText && !replacementText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -296,6 +303,7 @@ final class EditorModel: ObservableObject {
         replacementFontChoice = .automatic
         replacementText = ""
         edits = []
+        redactionRegions = []
         ocrLowConfidenceLines = []
         ocrProcessedPages = []
         ocrProgress = ""
@@ -306,9 +314,7 @@ final class EditorModel: ObservableObject {
         searchHighlightRevision += 1
         searchNavigationRevision += 1
         revision += 1
-        statusMessage = mode == .replacement
-            ? "変更したい文字をクリックしてください。"
-            : "PDF上の追加したい位置をクリックしてください。"
+        statusMessage = statusForMode(mode)
     }
 
     func runOCR(pageSpecification: String, languages: [String]) {
@@ -394,21 +400,100 @@ final class EditorModel: ObservableObject {
         replacementFontChoice = .automatic
         replacementText = ""
         revision += 1
-        statusMessage = newMode == .replacement
-            ? "変更したい文字をクリックしてください。"
-            : "PDF上の追加したい位置をクリックしてください。"
+        statusMessage = statusForMode(newMode)
     }
 
     func select(_ target: TextTarget?) {
-        guard mode == .replacement else { return }
+        guard mode == .replacement || mode == .redaction else { return }
         selectedTarget = target
         isInlineEditing = false
-        replacementFontChoice = .automatic
-        replacementText = target?.originalText ?? ""
+        if mode == .replacement {
+            replacementFontChoice = .automatic
+            replacementText = target?.originalText ?? ""
+        }
         if let target {
-            statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
+            statusMessage = mode == .replacement
+                ? "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
+                : "\(target.pageIndex + 1)ページ目の文字を選択しました。墨消し対象に追加できます。"
         } else {
-            statusMessage = "文字のない場所です。既存の文字をクリックしてください。"
+            statusMessage = mode == .replacement
+                ? "文字のない場所です。既存の文字をクリックしてください。"
+                : "文字のない場所です。墨消しする文字をクリックしてください。"
+        }
+    }
+
+    func addSelectedRedactionRegion() {
+        guard mode == .redaction, let target = selectedTarget else {
+            statusMessage = "先に墨消しする文字をPDF上で選択してください。"
+            return
+        }
+        guard !redactionRegions.contains(where: {
+            $0.pageIndex == target.pageIndex && $0.bounds == target.bounds
+        }) else {
+            statusMessage = "この文字はすでに墨消し対象へ追加されています。"
+            return
+        }
+        redactionRegions.append(PDFRedactionRegion(
+            pageIndex: target.pageIndex,
+            bounds: target.bounds,
+            text: target.originalText
+        ))
+        selectedTarget = nil
+        revision += 1
+        statusMessage = "墨消し対象を\(redactionRegions.count)か所プレビューしています。"
+    }
+
+    func removeRedactionRegion(id: UUID) {
+        redactionRegions.removeAll { $0.id == id }
+        revision += 1
+        statusMessage = redactionRegions.isEmpty
+            ? "墨消し対象をすべて外しました。"
+            : "墨消し対象を\(redactionRegions.count)か所プレビューしています。"
+    }
+
+    func clearRedactionRegions() {
+        redactionRegions = []
+        selectedTarget = nil
+        revision += 1
+        statusMessage = "墨消し対象をすべて外しました。"
+    }
+
+    func applyRedactionsFromPanel() {
+        guard let sourceURL, !redactionRegions.isEmpty else {
+            statusMessage = "先に墨消し対象を追加してください。"
+            return
+        }
+
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .critical
+        confirmation.messageText = "墨消しを適用しますか？"
+        confirmation.informativeText = "適用後は元に戻せません。元PDFは変更せず別ファイルを作ります。全ページを高解像度画像に変換するため、テキスト選択・検索、注釈、リンク、フォームは出力に残りません。元PDFのタイトル・作者などの文書メタデータも引き継ぎません。PDF生成ライブラリが新しい作成日時やProducer情報を付ける場合があります。画像内の文字も選択範囲に重なる部分は黒くなります。"
+        confirmation.addButton(withTitle: "墨消し済みPDFを作成")
+        confirmation.addButton(withTitle: "キャンセル")
+        guard confirmation.runModal() == .alertFirstButtonReturn else {
+            statusMessage = "墨消しをキャンセルしました。"
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-redacted.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "元PDFを保持し、画像化した墨消し済みPDFを別名保存します"
+        guard panel.runModal() == .OK, let outputURL = panel.url else {
+            statusMessage = "墨消し済みPDFの保存をキャンセルしました。"
+            return
+        }
+        do {
+            try PDFRedactionEngine.export(sourceURL: sourceURL, regions: redactionRegions, to: outputURL)
+            statusMessage = "墨消し済みPDFを保存しました。ページ本文を画像化し、元PDFの文書メタデータは引き継いでいません: \(outputURL.lastPathComponent)"
+            redactionRegions = []
+            selectedTarget = nil
+            revision += 1
+        } catch {
+            statusMessage = "安全な墨消しを完了できませんでした: \(error.localizedDescription)"
         }
     }
 
@@ -491,7 +576,11 @@ final class EditorModel: ObservableObject {
     }
 
     func commitEditorText() {
-        if mode == .replacement { applyReplacement() } else { applyInsertion() }
+        switch mode {
+        case .replacement: applyReplacement()
+        case .insertion: applyInsertion()
+        case .redaction: addSelectedRedactionRegion()
+        }
     }
 
     func applyReplacement() {
@@ -902,5 +991,13 @@ final class EditorModel: ObservableObject {
         isInlineEditing = false
         replacementText = ""
         revision += 1
+    }
+
+    private func statusForMode(_ mode: EditorMode) -> String {
+        switch mode {
+        case .replacement: "変更したい文字をクリックしてください。"
+        case .insertion: "PDF上の追加したい位置をクリックしてください。"
+        case .redaction: "墨消し対象の文字を選択して、範囲をプレビューしてください。"
+        }
     }
 }
