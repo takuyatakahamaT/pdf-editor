@@ -136,6 +136,14 @@ struct TextRunLayout: Equatable {
         glyphs[selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
     }
 
+    func hasSameSourceLine(as other: TextRunLayout) -> Bool {
+        glyphs == other.glyphs
+            && lineStartX == other.lineStartX
+            && lineWidth == other.lineWidth
+            && maxWidth == other.maxWidth
+            && coverBounds == other.coverBounds
+    }
+
     func text(replacingWith replacement: String) -> String {
         let prefix = glyphs[..<selectedRange.lowerBound].map(\.text).joined()
         let suffix = glyphs[selectedRange.upperBound...].map(\.text).joined()

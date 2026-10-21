@@ -21,6 +21,10 @@ enum PDFTextRenderer {
         if let lineLayout = edit.lineLayout,
            !edit.replacement.isEmpty {
             let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+            if edit.composesLineEdits {
+                drawComposedReflow(edit, layout: lineLayout, in: context)
+                return
+            }
             drawReflow(edit, layout: lineLayout, font: font, in: context)
             return
         }
@@ -166,10 +170,130 @@ enum PDFTextRenderer {
         } else {
             drawLine(plan.line, at: 0, in: context)
         }
+        let lineFont = edit.lineFont ?? font
         for glyph in layout.glyphs[layout.selectedRange.upperBound...] {
             let glyphText = glyph.text as CFString
-            let drawableFont = CTFontCreateForString(font, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText)))
+            let drawableFont = CTFontCreateForString(lineFont, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText)))
             drawText(glyph.text, font: drawableFont, color: edit.fontColor, at: glyph.offsetX - layout.selectedStartX + plan.shift, in: context)
+        }
+        context.restoreGState()
+    }
+
+    struct ComposedReplacementPlacement {
+        let replacement: TextRunReplacement
+        let offsetX: CGFloat
+    }
+
+    struct ComposedGlyphPlacement {
+        let glyph: TextRunLayout.Glyph
+        let offsetX: CGFloat
+    }
+
+    struct ComposedReflowPlan {
+        let replacements: [ComposedReplacementPlacement]
+        let glyphs: [ComposedGlyphPlacement]
+        let startX: CGFloat
+        let outputEnd: CGFloat
+        let scale: CGFloat
+    }
+
+    static func composedReflowPlan(
+        layout: TextRunLayout,
+        replacements: [TextRunReplacement],
+        startingAt requestedStartIndex: Int? = nil
+    ) -> ComposedReflowPlan? {
+        let ordered = replacements.sorted { $0.range.lowerBound < $1.range.lowerBound }
+        guard !ordered.isEmpty,
+              ordered.allSatisfy({ !$0.range.isEmpty && $0.range.upperBound <= layout.glyphs.count }),
+              zip(ordered, ordered.dropFirst()).allSatisfy({ $0.range.upperBound <= $1.range.lowerBound }) else {
+            return nil
+        }
+
+        let startIndex = requestedStartIndex ?? ordered[0].range.lowerBound
+        guard startIndex >= 0, startIndex <= ordered[0].range.lowerBound,
+              startIndex < layout.glyphs.count else { return nil }
+        let startX = layout.glyphs[startIndex].offsetX
+        var replacementPlacements: [ComposedReplacementPlacement] = []
+        var glyphPlacements: [ComposedGlyphPlacement] = []
+        var outputEnd = startX
+        var shift: CGFloat = 0
+        var replacementIndex = 0
+        var glyphIndex = startIndex
+
+        while glyphIndex < layout.glyphs.count {
+            if replacementIndex < ordered.count,
+               ordered[replacementIndex].range.lowerBound == glyphIndex {
+                let replacement = ordered[replacementIndex]
+                let originalWidth = layout.glyphs[replacement.range].reduce(CGFloat.zero) { $0 + $1.advance }
+                let offsetX = layout.glyphs[glyphIndex].offsetX + shift
+                replacementPlacements.append(ComposedReplacementPlacement(replacement: replacement, offsetX: offsetX))
+                outputEnd = max(outputEnd, offsetX + replacement.renderedWidth)
+                shift += replacement.renderedWidth - originalWidth
+                glyphIndex = replacement.range.upperBound
+                replacementIndex += 1
+            } else {
+                let glyph = layout.glyphs[glyphIndex]
+                let offsetX = glyph.offsetX + shift
+                glyphPlacements.append(ComposedGlyphPlacement(glyph: glyph, offsetX: offsetX))
+                outputEnd = max(outputEnd, offsetX + glyph.advance)
+                glyphIndex += 1
+            }
+        }
+
+        let availableWidth = max(layout.maxWidth - startX, 0)
+        let contentWidth = outputEnd - startX
+        let scale = contentWidth > availableWidth && contentWidth > 0 ? availableWidth / contentWidth : 1
+        return ComposedReflowPlan(replacements: replacementPlacements, glyphs: glyphPlacements,
+                                  startX: startX, outputEnd: outputEnd, scale: scale)
+    }
+
+    private static func drawComposedReflow(
+        _ edit: ReplacementEdit,
+        layout: TextRunLayout,
+        in context: CGContext
+    ) {
+        guard let plan = composedReflowPlan(layout: layout, replacements: edit.lineReplacements,
+                                            startingAt: edit.lineCompositionStart),
+              plan.outputEnd > plan.startX else {
+            let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+            drawReflow(edit, layout: layout, font: font, in: context)
+            return
+        }
+
+        let coverEnd = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
+        var cover = layout.coverBounds
+        cover.origin.x = layout.lineStartX + plan.startX
+        cover.size.width = max(coverEnd - plan.startX, 0)
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(cover)
+
+        context.saveGState()
+        context.translateBy(x: layout.lineStartX + plan.startX, y: edit.baseline)
+        context.scaleBy(x: plan.scale, y: plan.scale)
+
+        for placement in plan.replacements {
+            context.saveGState()
+            context.translateBy(x: placement.offsetX - plan.startX, y: 0)
+            if let exactGlyphs = placement.replacement.exactGlyphs, !exactGlyphs.isEmpty {
+                drawUnscaledExactGlyphs(exactGlyphs, font: placement.replacement.font,
+                                        color: placement.replacement.color, in: context)
+            } else {
+                let line = makeLine(text: placement.replacement.text, font: placement.replacement.font,
+                                    color: placement.replacement.color)
+                drawGlyphOutlines(for: line, in: context)
+            }
+            context.restoreGState()
+        }
+
+        let sourceFont = edit.lineFont ?? edit.resolvedFont
+            ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        for placement in plan.glyphs {
+            let glyphText = placement.glyph.text as CFString
+            let drawableFont = CTFontCreateForString(
+                sourceFont, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText))
+            )
+            drawText(placement.glyph.text, font: drawableFont, color: edit.fontColor,
+                     at: placement.offsetX - plan.startX, in: context)
         }
         context.restoreGState()
     }

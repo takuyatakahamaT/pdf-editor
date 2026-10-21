@@ -3,13 +3,17 @@ import SwiftUI
 @main
 struct PDFTextEditorApp: App {
     @StateObject private var model: EditorModel
+    @StateObject private var updater: AppUpdateController
 
     init() {
         let initialURL = CommandLine.arguments
             .dropFirst()
             .first
             .map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath) }
-        _model = StateObject(wrappedValue: EditorModel(initialURL: initialURL))
+            ?? AppUpdateController.takeReopenURL()
+        let model = EditorModel(initialURL: initialURL)
+        _model = StateObject(wrappedValue: model)
+        _updater = StateObject(wrappedValue: AppUpdateController(model: model))
     }
 
     var body: some Scene {
@@ -17,6 +21,7 @@ struct PDFTextEditorApp: App {
             EditorScreen()
                 .environmentObject(model)
                 .frame(minWidth: 1_080, minHeight: 720)
+                .task { updater.start() }
         }
         .defaultSize(width: 1_280, height: 840)
         .commands {

@@ -17,7 +17,8 @@ enum PDFEmbeddedFontLoader {
 
     struct Resolution {
         let font: CTFont
-        /// 元の埋め込みフォントで置換文字列の全グリフを表現できた場合のみ true。
+        /// 元PDFと同じフォント名の端末フォント、またはPDFのCID→GID対応で
+        /// 置換文字列の全グリフを描けた場合のみ true。
         let isExact: Bool
         /// 元 PDF の CID をそのまま GID として直接指定できる場合のみ非 nil。
         /// `replacement` の各文字に対応する (GID, 送り幅[em]) の並び。
@@ -86,30 +87,38 @@ enum PDFEmbeddedFontLoader {
         }
 
         if let embedded = loadEmbeddedFont(fontDict: fontDict, size: size) {
-            let requiresLineReflow: Bool
-            if info.isIdentityCIDToGID,
-               let exact = exactGlyphs(for: replacementText, using: info, font: embedded) {
-                let replacementWidth = exact.reduce(CGFloat.zero) { $0 + $1.emWidth * size }
-                requiresLineReflow = replacementNeedsLineReflow(
-                    replacementWidth: replacementWidth,
-                    selectedWidth: selectedWidth
-                )
-                if !requiresLineReflow {
-                    return Resolution(font: embedded, isExact: true, exactGlyphs: exact, reason: nil)
+            if info.isIdentityCIDToGID {
+                // Identity-H でも埋め込みフォントの cmap が PDF の CID と
+                // 食い違うことがある。ToUnicode→CID→GID を確定できる場合だけ使う。
+                if let exact = embeddedFontResolution(
+                    font: embedded,
+                    info: info,
+                    replacementText: replacementText
+                ) {
+                    let replacementWidth = exact.exactGlyphs?.reduce(CGFloat.zero) {
+                        $0 + $1.emWidth * size
+                    } ?? typographicWidth(of: replacementText, font: embedded)
+                    if !replacementNeedsLineReflow(
+                        replacementWidth: replacementWidth,
+                        selectedWidth: selectedWidth
+                    ) {
+                        return exact
+                    }
+                    return fallbackResolution(
+                        fontDict: fontDict,
+                        size: size,
+                        requiredText: requiredText,
+                        reason: "置換文字が元の選択幅を超えるため、後続文字を移動できるローカルフォントで同じ行を描き直します。"
+                    )
                 }
             } else if coversAllCharacters(of: requiredText, font: embedded) {
                 let replacementWidth = typographicWidth(of: replacementText, font: embedded)
-                requiresLineReflow = replacementNeedsLineReflow(
+                if !replacementNeedsLineReflow(
                     replacementWidth: replacementWidth,
                     selectedWidth: selectedWidth
-                )
-                if !requiresLineReflow {
+                ) {
                     return Resolution(font: embedded, isExact: true, exactGlyphs: nil, reason: nil)
                 }
-            } else {
-                requiresLineReflow = false
-            }
-            if requiresLineReflow {
                 return fallbackResolution(
                     fontDict: fontDict,
                     size: size,
@@ -151,7 +160,7 @@ enum PDFEmbeddedFontLoader {
             let cleaned = strippingSubsetPrefix(baseFontName)
             if let installed = installedFont(named: cleaned, size: size),
                coversAllCharacters(of: requiredText, font: installed) {
-                return Resolution(font: installed, isExact: false, exactGlyphs: nil, reason: reason)
+                return Resolution(font: installed, isExact: true, exactGlyphs: nil, reason: nil)
             }
         }
 
@@ -269,7 +278,7 @@ enum PDFEmbeddedFontLoader {
 
     /// 置換文字列の全文字が、元 PDF の ToUnicode から反転した Unicode→CID マップに
     /// 載っているかを確認し、載っていれば (GID, 送り幅) の並びを返す。
-    /// 1 文字でも載っていなければ nil（通常の cmap 経由の経路へフォールバックする）。
+    /// 1 文字でも載っていなければ nil（埋め込み cmap を使わず端末の同名フォントへ進む）。
     private static func exactGlyphs(
         for text: String,
         using info: PDFFontInfo,
@@ -288,6 +297,18 @@ enum PDFEmbeddedFontLoader {
 
     static func isValidGlyphID(_ code: Int, in font: CTFont) -> Bool {
         code > 0 && code < CTFontGetGlyphCount(font)
+    }
+
+    /// Embedded cmap tables can disagree with the PDF character-to-glyph mapping.
+    /// Only trust a subset when Identity CID→GID and ToUnicode resolve every replacement character.
+    static func embeddedFontResolution(
+        font: CTFont,
+        info: PDFFontInfo,
+        replacementText: String
+    ) -> Resolution? {
+        guard info.isIdentityCIDToGID,
+              let glyphs = exactGlyphs(for: replacementText, using: info, font: font) else { return nil }
+        return Resolution(font: font, isExact: true, exactGlyphs: glyphs, reason: nil)
     }
 
     /// 元の FontDescriptor に埋め込みフォントプログラムが存在するかどうかだけを判定する

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 APP_DIR="${0:A:h:h}"
-APP_BUNDLE="$APP_DIR/dist/PDF editor.app"
+APP_BUNDLE="${PDF_EDITOR_APP_BUNDLE:-$APP_DIR/dist/PDF editor.app}"
+if /usr/bin/pgrep -f "^$APP_BUNDLE/Contents/MacOS/PDFTextEditor([[:space:]]|$)" >/dev/null; then
+    echo "実行中のアプリは上書きできません。PDF_EDITOR_APP_BUNDLE で別の出力先を指定してください。" >&2
+    exit 1
+fi
 CONTENTS_DIR="$APP_BUNDLE/Contents"
 GO_COMMAND="$(command -v go || true)"
 
@@ -18,7 +22,13 @@ if [[ -z "$PDFCPU_VERSION" ]]; then
 fi
 
 /usr/bin/swift build -c release --package-path "$APP_DIR"
-/bin/mkdir -p "$APP_DIR/.build/tools" "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Helpers" "$CONTENTS_DIR/Resources/ThirdParty"
+SPARKLE_DIR="$APP_DIR/.build/artifacts/sparkle/Sparkle"
+SPARKLE_FRAMEWORK="$SPARKLE_DIR/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+    echo "Sparkle.framework がありません。swift package resolve を実行してください。" >&2
+    exit 1
+fi
+/bin/mkdir -p "$APP_DIR/.build/tools" "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Helpers" "$CONTENTS_DIR/Resources/ThirdParty" "$CONTENTS_DIR/Frameworks"
 GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cmd/pdfcpu@$PDFCPU_VERSION"
 (
     cd "$APP_DIR/Tools/pdf-compress"
@@ -34,6 +44,15 @@ GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cm
     "$APP_DIR/.build/tools/pdf-compress" \
     "$CONTENTS_DIR/Helpers/pdf-compress"
 /bin/cp "$APP_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+if [[ -n "${PDF_EDITOR_BUILD_VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $PDF_EDITOR_BUILD_VERSION" "$CONTENTS_DIR/Info.plist"
+fi
+if [[ -n "${PDF_EDITOR_MARKETING_VERSION:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $PDF_EDITOR_MARKETING_VERSION" "$CONTENTS_DIR/Info.plist"
+fi
+/bin/rm -rf "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+/usr/bin/ditto "$SPARKLE_FRAMEWORK" "$CONTENTS_DIR/Frameworks/Sparkle.framework"
+/usr/bin/install -m 644 "$SPARKLE_DIR/LICENSE" "$CONTENTS_DIR/Resources/ThirdParty/Sparkle-LICENSE.txt"
 /bin/cp "$APP_DIR/Resources/AppIcon.icns" "$CONTENTS_DIR/Resources/AppIcon.icns"
 RESOURCE_BUNDLE="$APP_DIR/.build/release/PDFTextEditor_PDFTextEditor.bundle"
 if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
@@ -53,28 +72,7 @@ fi
     "$APP_DIR/Resources/ThirdParty/NotoSansJP-OFL.txt" \
     "$CONTENTS_DIR/Resources/ThirdParty/NotoSansJP-OFL.txt"
 
-# Developer ID identity is supplied only in the release environment. Local
-# development builds keep an ad-hoc signature.
-if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
-    for executable in \
-        "$CONTENTS_DIR/MacOS/PDFTextEditor" \
-        "$CONTENTS_DIR/Helpers/pdfcpu" \
-        "$CONTENTS_DIR/Helpers/pdf-compress"; do
-        /usr/bin/codesign --force --options runtime --timestamp \
-            --sign "$DEVELOPER_ID_APPLICATION" "$executable"
-    done
-    /usr/bin/codesign --force --options runtime --timestamp \
-        --sign "$DEVELOPER_ID_APPLICATION" "$APP_BUNDLE"
-else
-    for executable in \
-        "$CONTENTS_DIR/MacOS/PDFTextEditor" \
-        "$CONTENTS_DIR/Helpers/pdfcpu" \
-        "$CONTENTS_DIR/Helpers/pdf-compress"; do
-        /usr/bin/codesign --force --sign - --timestamp=none "$executable"
-    done
-    /usr/bin/codesign --force --sign - --timestamp=none "$APP_BUNDLE"
-fi
-
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+# Re-sign the complete app bundle, including Sparkle helpers, after packaging.
+"$APP_DIR/scripts/sign-app.sh" "$APP_BUNDLE"
 
 echo "$APP_BUNDLE"
