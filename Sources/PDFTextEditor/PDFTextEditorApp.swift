@@ -77,6 +77,19 @@ struct PDFTextEditorApp: App {
                 .keyboardShortcut("p")
                 .disabled(!model.canPrint)
             }
+
+            CommandGroup(after: .appInfo) {
+                Button("アップデートを確認…") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.isConfigured)
+
+                if updater.isRestartPending {
+                    Button("更新して再起動…") {
+                        updater.restartToUpdate()
+                    }
+                }
+            }
         }
     }
 }

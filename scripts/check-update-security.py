@@ -45,6 +45,14 @@ with tempfile.TemporaryDirectory(prefix="pdf-editor-update-check-") as directory
     verify(plist, appcast, archive, False)
 
 # Publishing must stop before build/network/keychain work if signing is unset.
+release_plist = plistlib.loads((ROOT / "Resources/Info.plist").read_bytes())
+if release_plist.get("SUAutomaticallyUpdate") is not False:
+    raise SystemExit("更新の無断インストールを許可しています。")
+if release_plist.get("SUAllowsAutomaticUpdates") is not False:
+    raise SystemExit("利用者の承認なしで更新できる設定です。")
+if release_plist.get("SUEnableAutomaticChecks") is not True:
+    raise SystemExit("起動時の更新確認が無効です。")
+
 environment = dict(os.environ)
 environment.pop("SPARKLE_PRIVATE_KEY", None)
 environment.update(GITHUB_REF="refs/heads/main", GITHUB_REPOSITORY="takuyatakahamaT/pdf-editor")
