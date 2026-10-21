@@ -2,6 +2,9 @@ import SwiftUI
 
 struct EditorScreen: View {
     @EnvironmentObject private var model: EditorModel
+    @StateObject private var zoomState = PDFZoomState()
+    @State private var zoomInput = "100"
+    @FocusState private var zoomInputIsFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,18 +13,30 @@ struct EditorScreen: View {
 
             if let document = model.document {
                 HStack(spacing: 0) {
-                    PDFCanvas(
-                        document: document,
-                        revision: model.revision,
-                        mode: model.mode,
-                        hasSelection: model.hasSelection,
-                        onSelection: { target in model.select(target) },
-                        onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
-                        onMoveInsertion: { marker, pageIndex, bounds in
-                            model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            zoomToolbar
+                            Spacer()
                         }
-                    )
-                    .background(NihoPalette.pdfStage)
+                        .frame(height: 44)
+                        .background(NihoPalette.pdfStage)
+                        NihoDivider()
+
+                        PDFCanvas(
+                            document: document,
+                            revision: model.revision,
+                            mode: model.mode,
+                            hasSelection: model.hasSelection,
+                            zoomState: zoomState,
+                            onSelection: { target in model.select(target) },
+                            onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
+                            onMoveInsertion: { marker, pageIndex, bounds in
+                                model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
+                            }
+                        )
+                        .background(NihoPalette.pdfStage)
+                    }
 
                     inspector
                         .frame(width: 370)
@@ -36,6 +51,10 @@ struct EditorScreen: View {
         .foregroundStyle(NihoPalette.ink)
         .tint(NihoPalette.green)
         .preferredColorScheme(.light)
+        .onChange(of: zoomState.scale) { _, newScale in
+            guard !zoomInputIsFocused else { return }
+            zoomInput = String(Int((newScale * 100).rounded()))
+        }
         .sheet(isPresented: $model.isShowingMergeSheet) {
             PDFMergeSheet()
         }
@@ -108,6 +127,68 @@ struct EditorScreen: View {
         .padding(.horizontal, 20)
         .frame(height: 62)
         .background(NihoPalette.canvas)
+    }
+
+    private var zoomToolbar: some View {
+        HStack(spacing: 8) {
+            zoomButton("minus.magnifyingglass", help: "縮小") { zoomState.zoomOut() }
+            TextField("倍率", text: $zoomInput)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 48)
+                .multilineTextAlignment(.trailing)
+                .focused($zoomInputIsFocused)
+                .onSubmit {
+                    zoomState.setPercent(Double(zoomInput) ?? Double(zoomState.scale * 100))
+                    zoomInputIsFocused = false
+                }
+            Text("%")
+                .font(.custom("Avenir Next", size: 11).weight(.medium))
+                .foregroundStyle(NihoPalette.muted)
+            zoomButton("plus.magnifyingglass", help: "拡大") { zoomState.zoomIn() }
+
+            Menu {
+                Button("ページ全体に合わせる") { zoomState.fitPage() }
+                Button("ページ幅に合わせる") { zoomState.fitWidth() }
+                Button("実寸（100%）") { zoomState.actualSize() }
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .frame(width: 30, height: 28)
+            }
+            .menuStyle(.borderlessButton)
+            .help("ページの表示倍率")
+
+            NihoDivider()
+                .frame(height: 20)
+
+            Button {
+                zoomState.toggleMagnifier()
+            } label: {
+                Image(systemName: zoomState.magnifierIsActive ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
+                    .frame(width: 30, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(zoomState.magnifierIsActive ? NihoPalette.green : NihoPalette.ink)
+            .help(zoomState.magnifierIsActive ? "虫眼鏡を終了（Esc）" : "ポインター付近を拡大")
+            .accessibilityLabel(zoomState.magnifierIsActive ? "虫眼鏡を終了" : "虫眼鏡")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8).stroke(NihoPalette.line, lineWidth: 1)
+        }
+        .padding(.top, 10)
+        .zIndex(1)
+    }
+
+    private func zoomButton(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .frame(width: 30, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private var inspector: some View {
