@@ -82,6 +82,52 @@ struct PDFWorkflowTests {
         #expect(try Data(contentsOf: source) == originalBytes)
     }
 
+    @Test("duplicating a page gives copied managed annotations unique identifiers")
+    @MainActor
+    func duplicatedPageMarkupIdentifiersAreUnique() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        let marked = temporaryPDFURL(prefix: "marked-source")
+        let organized = temporaryPDFURL(prefix: "organized-duplicate")
+        defer { remove([source, marked, organized]) }
+
+        let originalMarkup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .note,
+            bounds: CGRect(x: 20, y: 30, width: 60, height: 24),
+            text: "Original page note"
+        )
+        try PDFExportEngine.export(sourceURL: source, edits: [], markups: [originalMarkup], to: marked)
+        let markedDocument = try #require(PDFDocument(url: marked))
+        let organizer = PDFPageOrganizerModel(document: markedDocument, sourceURL: marked)
+        let pageID = try #require(organizer.pages.first?.id)
+        organizer.select(id: pageID)
+        organizer.duplicateSelected()
+        try organizer.save(to: organized)
+
+        let editor = EditorModel(initialURL: organized)
+        #expect(editor.activeMarkupEdits.count == 2)
+        let original = try #require(editor.activeMarkupEdits.first)
+        let duplicated = try #require(editor.activeMarkupEdits.last)
+        #expect(original.id == originalMarkup.id)
+        #expect(duplicated.id != original.id)
+
+        editor.setMode(.markup)
+        let movedBounds = CGRect(x: 120, y: 80, width: 60, height: 24)
+        editor.moveMarkup(id: duplicated.id, to: movedBounds)
+        let resultDocument = try #require(editor.document)
+        let originalPage = try #require(resultDocument.page(at: 0))
+        let duplicatedPage = try #require(resultDocument.page(at: 1))
+        #expect(originalPage.annotations.first(where: {
+            $0.userName == PDFMarkupEngine.markerPrefix + original.id.uuidString
+        })?.bounds == original.bounds)
+        #expect(duplicatedPage.annotations.first(where: {
+            $0.userName == PDFMarkupEngine.markerPrefix + duplicated.id.uuidString
+        })?.bounds == movedBounds)
+    }
+
     @Test("page organizer inserts and extracts selected pages while protecting all inputs")
     @MainActor
     func pageOrganizerInsertExtractAndProtectSources() throws {

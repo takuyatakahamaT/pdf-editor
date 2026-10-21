@@ -191,11 +191,30 @@ enum PDFMarkupEngine {
     }
 
     static func edits(in document: PDFDocument) -> [PDFMarkupEdit] {
-        (0..<document.pageCount).flatMap { pageIndex in
-            document.page(at: pageIndex)?.annotations.compactMap {
-                edit(from: $0, pageIndex: pageIndex)
-            } ?? []
+        var seenIDs = Set<UUID>()
+        var edits: [PDFMarkupEdit] = []
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                guard var markup = edit(from: annotation, pageIndex: pageIndex) else { continue }
+                if !seenIDs.insert(markup.id).inserted {
+                    let uniqueID = UUID()
+                    annotation.userName = markerPrefix + uniqueID.uuidString
+                    markup = PDFMarkupEdit(
+                        id: uniqueID,
+                        pageIndex: markup.pageIndex,
+                        tool: markup.tool,
+                        bounds: markup.bounds,
+                        points: markup.points,
+                        text: markup.text,
+                        color: markup.color
+                    )
+                    seenIDs.insert(uniqueID)
+                }
+                edits.append(markup)
+            }
         }
+        return edits
     }
 
     static func hasManagedAnnotations(in document: PDFDocument) -> Bool {
