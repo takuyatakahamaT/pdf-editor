@@ -13,8 +13,12 @@ enum PDFTextRenderer {
         context.saveGState()
         defer { context.restoreGState() }
 
-        if !edit.fontIsExact,
-           let lineLayout = edit.lineLayout,
+        if let destination = edit.destinationOrigin {
+            drawMoved(edit, at: destination, in: context)
+            return
+        }
+
+        if let lineLayout = edit.lineLayout,
            !edit.replacement.isEmpty {
             let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
             drawReflow(edit, layout: lineLayout, font: font, in: context)
@@ -43,6 +47,22 @@ enum PDFTextRenderer {
         }
         context.setFillColor(edit.fontColor.cgColor)
         drawGlyphOutlines(for: plan.line, in: context)
+    }
+
+    private static func drawMoved(_ edit: ReplacementEdit, at destination: CGPoint, in context: CGContext) {
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(edit.coverBounds)
+        guard !edit.replacement.isEmpty else { return }
+        let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        let line = makeLine(text: edit.replacement, font: font, color: edit.fontColor)
+        context.saveGState()
+        context.translateBy(x: destination.x, y: destination.y)
+        if let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
+            drawUnscaledExactGlyphs(exactGlyphs, font: font, color: edit.fontColor, in: context)
+        } else {
+            drawGlyphOutlines(for: line, in: context)
+        }
+        context.restoreGState()
     }
 
     /// GID を直接指定して描く経路。幅は元 PDF の `/Widths`/`/W` 由来の値
@@ -83,16 +103,16 @@ enum PDFTextRenderer {
         context.setFillColor(edit.fontColor.cgColor)
 
         var x: CGFloat = 0
+        var glyphIDs: [CGGlyph] = []
+        var positions: [CGPoint] = []
         for (glyph, emWidth) in glyphs {
-            if let path = CTFontCreatePathForGlyph(currentFont, glyph, nil) {
-                var transform = CGAffineTransform(translationX: x, y: 0)
-                if let positioned = path.copy(using: &transform) {
-                    context.addPath(positioned)
-                }
-            }
+            glyphIDs.append(glyph)
+            positions.append(CGPoint(x: x, y: 0))
             x += emWidth * fontSize
         }
-        context.fillPath()
+        context.textMatrix = .identity
+        context.setTextDrawingMode(.fill)
+        CTFontDrawGlyphs(currentFont, glyphIDs, positions, glyphIDs.count, context)
     }
 
     private static func drawReflow(
@@ -101,7 +121,16 @@ enum PDFTextRenderer {
         font: CTFont,
         in context: CGContext
     ) {
-        let plan = reflowPlan(text: edit.replacement, font: font, layout: layout, color: edit.fontColor)
+        let exactWidth = edit.exactGlyphs.map { glyphs in
+            glyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
+        }
+        let plan = reflowPlan(
+            text: edit.replacement,
+            font: font,
+            layout: layout,
+            color: edit.fontColor,
+            replacementWidth: exactWidth
+        )
         guard plan.outputEnd > 0, layout.maxWidth > 0 else {
             context.setFillColor(NSColor.white.cgColor)
             context.fill(edit.coverBounds)
@@ -110,22 +139,28 @@ enum PDFTextRenderer {
 
         // 後続の文字を右へ送って幅を確保する。ページ上の次の文字に当たる場合だけ
         // 縦横比を保ったまま全体を縮め、横方向だけを押しつぶさない。
-        let coverWidth = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
+        let coverEnd = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
         var cover = layout.coverBounds
-        cover.size.width = coverWidth
+        cover.origin.x = layout.lineStartX + layout.selectedStartX
+        cover.size.width = max(coverEnd - layout.selectedStartX, 0)
         context.setFillColor(NSColor.white.cgColor)
         context.fill(cover)
 
         context.saveGState()
-        context.translateBy(x: layout.lineStartX, y: edit.baseline)
+        context.translateBy(x: layout.lineStartX + layout.selectedStartX, y: edit.baseline)
         context.scaleBy(x: plan.scale, y: plan.scale)
 
-        for glyph in layout.glyphs[..<layout.selectedRange.lowerBound] {
-            drawText(glyph.text, font: font, color: edit.fontColor, at: glyph.offsetX, in: context)
+        if let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
+            context.saveGState()
+            drawUnscaledExactGlyphs(exactGlyphs, font: font, color: edit.fontColor, in: context)
+            context.restoreGState()
+        } else {
+            drawLine(plan.line, at: 0, in: context)
         }
-        drawLine(plan.line, at: layout.selectedStartX, in: context)
         for glyph in layout.glyphs[layout.selectedRange.upperBound...] {
-            drawText(glyph.text, font: font, color: edit.fontColor, at: glyph.offsetX + plan.shift, in: context)
+            let glyphText = glyph.text as CFString
+            let drawableFont = CTFontCreateForString(font, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText)))
+            drawText(glyph.text, font: drawableFont, color: edit.fontColor, at: glyph.offsetX - layout.selectedStartX + plan.shift, in: context)
         }
         context.restoreGState()
     }
@@ -163,10 +198,11 @@ enum PDFTextRenderer {
         text: String,
         font: CTFont,
         layout: TextRunLayout,
-        color: NSColor = .black
+        color: NSColor = .black,
+        replacementWidth: CGFloat? = nil
     ) -> ReflowPlan {
         let line = makeLine(text: text, font: font, color: color)
-        let replacementWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        let replacementWidth = replacementWidth ?? CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         let selectedAdvance = layout.glyphs[layout.selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
         let shift = replacementWidth - selectedAdvance
         let prefixEnd = layout.glyphs[..<layout.selectedRange.lowerBound]
@@ -179,36 +215,40 @@ enum PDFTextRenderer {
             prefixEnd,
             max(layout.selectedStartX + replacementWidth, (suffixEnd ?? 0) + shift)
         )
-        let scale = outputEnd > layout.maxWidth && outputEnd > 0
-            ? layout.maxWidth / outputEnd
+        let outputContentWidth = outputEnd - layout.selectedStartX
+        let availableWidth = layout.maxWidth - layout.selectedStartX
+        let scale = outputContentWidth > availableWidth && outputContentWidth > 0
+            ? availableWidth / outputContentWidth
             : 1
         return ReflowPlan(line: line, shift: shift, outputEnd: outputEnd, scale: scale)
     }
 
-    /// テキスト追加モードなど、置換以外の用途で単純に 1 行を描く場合に使う共通の輪郭描画。
-    static func drawGlyphOutlines(for line: CTLine, in context: CGContext) {
-        guard let runs = CTLineGetGlyphRuns(line) as? [CTRun] else { return }
-        for run in runs {
-            let attributes = CTRunGetAttributes(run) as NSDictionary
-            guard let fontValue = attributes[kCTFontAttributeName as String] else { continue }
-            let runFont = fontValue as! CTFont
-
-            let count = CTRunGetGlyphCount(run)
-            guard count > 0 else { continue }
-            var glyphs = Array(repeating: CGGlyph(), count: count)
-            var positions = Array(repeating: CGPoint.zero, count: count)
-            CTRunGetGlyphs(run, CFRange(location: 0, length: 0), &glyphs)
-            CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
-
-            for index in 0..<count {
-                guard let path = CTFontCreatePathForGlyph(runFont, glyphs[index], nil) else { continue }
-                var transform = CGAffineTransform(translationX: positions[index].x, y: positions[index].y)
-                if let positionedPath = path.copy(using: &transform) {
-                    context.addPath(positionedPath)
-                }
-            }
+    private static func drawUnscaledExactGlyphs(
+        _ glyphs: [(glyph: CGGlyph, emWidth: CGFloat)],
+        font: CTFont,
+        color: NSColor,
+        in context: CGContext
+    ) {
+        var x: CGFloat = 0
+        var glyphIDs: [CGGlyph] = []
+        var positions: [CGPoint] = []
+        for (glyph, emWidth) in glyphs {
+            glyphIDs.append(glyph)
+            positions.append(CGPoint(x: x, y: 0))
+            x += emWidth * CTFontGetSize(font)
         }
-        context.fillPath()
+        context.setFillColor(color.cgColor)
+        context.textMatrix = .identity
+        context.setTextDrawingMode(.fill)
+        CTFontDrawGlyphs(font, glyphIDs, positions, glyphIDs.count, context)
+    }
+
+    /// CoreText の通常のグリフ描画を使う。PDF context では文字をベクターとして残し、
+    /// PDFView のプレビューでは小さい文字のヒンティングを保つ。
+    static func drawGlyphOutlines(for line: CTLine, in context: CGContext) {
+        context.textMatrix = .identity
+        context.setTextDrawingMode(.fill)
+        CTLineDraw(line, context)
     }
 
     struct RenderPlan {

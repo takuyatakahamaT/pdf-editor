@@ -14,12 +14,19 @@ struct EditorScreen: View {
                         document: document,
                         revision: model.revision,
                         mode: model.mode,
-                        hasSelection: model.hasSelection,
+                        selectedTarget: model.selectedTarget,
+                        isInlineEditing: model.isInlineEditing,
                         onSelection: { target in model.select(target) },
                         onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
                         onMoveInsertion: { marker, pageIndex, bounds in
                             model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
-                        }
+                        },
+                        onMoveSelection: { delta in model.moveSelection(by: delta) },
+                        onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
+                        onBeginInlineEditing: { model.beginInlineEditing() },
+                        onChangeInlineText: { value in model.updateEditorText(value) },
+                        onCommitInlineEditing: { model.commitEditorText() },
+                        onCancelInlineEditing: { model.cancelInlineEditing() }
                     )
                     .background(NihoPalette.pdfStage)
 
@@ -129,11 +136,11 @@ struct EditorScreen: View {
                 .labelsHidden()
                 .padding(.vertical, 8)
 
-                Text(model.mode == .replacement ? "既存の文字をクリック・ドラッグ" : "PDF上をクリックして配置")
+                Text(model.mode == .replacement ? "既存の文字を選択して編集" : "PDF上をクリックして配置")
                     .font(.custom("Hiragino Sans", size: 21).weight(.semibold))
                     .foregroundStyle(NihoPalette.heading)
                 Text(model.mode == .replacement
-                    ? "括弧を含む範囲は先頭から末尾までドラッグして選べます。"
+                    ? "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
                     : "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。")
                     .font(.custom("Hiragino Sans", size: 12))
                     .foregroundStyle(NihoPalette.muted)
@@ -169,23 +176,25 @@ struct EditorScreen: View {
                     .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                 }
 
-                fieldLabel(model.mode == .replacement ? "置換後の文字" : "追加する文字")
-                ReplacementTextField(
-                    text: Binding(
-                        get: { model.replacementText },
-                        set: { newText in model.updateEditorText(newText) }
-                    ),
-                    isEnabled: model.canEditText,
-                    focusRequest: model.replacementFocusRequest,
-                    onSubmit: { model.commitEditorText() }
-                )
-                    .frame(minHeight: 20)
-                    .padding(14)
-                    .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
-                    }
+                if model.mode == .insertion {
+                    fieldLabel("追加する文字")
+                    ReplacementTextField(
+                        text: Binding(
+                            get: { model.replacementText },
+                            set: { newText in model.updateEditorText(newText) }
+                        ),
+                        isEnabled: model.canEditText,
+                        focusRequest: model.replacementFocusRequest,
+                        onSubmit: { model.commitEditorText() }
+                    )
+                        .frame(minHeight: 20)
+                        .padding(14)
+                        .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
+                        }
+                }
 
                 if model.mode == .replacement {
                     VStack(alignment: .leading, spacing: 5) {
@@ -213,21 +222,23 @@ struct EditorScreen: View {
                     InsertionStylePanel(model: model)
                 }
 
-                Button(action: model.commitEditorText) {
-                    HStack {
-                        Text(model.mode == .replacement ? "この位置で置換" : "この文字を追加")
-                        Spacer()
-                        Image(systemName: "arrow.right")
+                if model.mode == .insertion {
+                    Button(action: model.commitEditorText) {
+                        HStack {
+                            Text("この文字を追加")
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 46)
+                        .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 16)
-                    .frame(height: 46)
-                    .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
+                    .buttonStyle(.plain)
+                    .disabled(!model.canCommit)
+                    .opacity(model.canCommit ? 1 : 0.42)
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.canCommit)
-                .opacity(model.canCommit ? 1 : 0.42)
 
                 if model.mode == .replacement {
                     Button("選択文字を表示から削除", action: model.deleteSelection)

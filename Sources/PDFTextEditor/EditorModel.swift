@@ -7,6 +7,7 @@ struct AppliedEdit {
     let pageIndex: Int
     let annotations: [PDFAnnotation]
     var replacement: ReplacementEdit
+    var restoredAnnotations: [PDFAnnotation] = []
 }
 
 struct InsertionDraft {
@@ -28,6 +29,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var sourceURL: URL?
     @Published private(set) var mode: EditorMode = .replacement
     @Published var selectedTarget: TextTarget?
+    @Published private(set) var isInlineEditing = false
     @Published private(set) var insertionDraft: InsertionDraft?
     @Published var replacementText = ""
     @Published private(set) var replacementFocusRequest = 0
@@ -47,8 +49,15 @@ final class EditorModel: ObservableObject {
     }
 
     var canUndo: Bool { !edits.isEmpty }
+    var activeReplacements: [ReplacementEdit] {
+        let latestIndexByID = Dictionary(edits.enumerated().map { ($0.element.replacement.id, $0.offset) },
+                                         uniquingKeysWith: { _, latest in latest })
+        return edits.enumerated().compactMap { index, applied in
+            latestIndexByID[applied.replacement.id] == index ? applied.replacement : nil
+        }
+    }
     var canPrint: Bool { document != nil && sourceURL != nil }
-    var hasPendingEditorInput: Bool { selectedTarget != nil || insertionDraft != nil }
+    var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
     var canEditText: Bool { mode == .replacement ? hasSelection : hasInsertionLocation }
@@ -139,6 +148,7 @@ final class EditorModel: ObservableObject {
         document = loadedDocument
         sourceURL = url
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         edits = []
         revision += 1
@@ -152,6 +162,7 @@ final class EditorModel: ObservableObject {
         discardInsertionDraft()
         mode = newMode
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         revision += 1
         statusMessage = newMode == .replacement
@@ -162,13 +173,26 @@ final class EditorModel: ObservableObject {
     func select(_ target: TextTarget?) {
         guard mode == .replacement else { return }
         selectedTarget = target
+        isInlineEditing = false
         replacementText = target?.originalText ?? ""
         if let target {
-            replacementFocusRequest += 1
-            statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。"
+            statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
         } else {
             statusMessage = "文字のない場所です。既存の文字をクリックしてください。"
         }
+    }
+
+    func beginInlineEditing() {
+        guard mode == .replacement, selectedTarget != nil else { return }
+        isInlineEditing = true
+        replacementText = selectedTarget?.originalText ?? ""
+        revision += 1
+    }
+
+    func cancelInlineEditing() {
+        isInlineEditing = false
+        replacementText = selectedTarget?.originalText ?? ""
+        revision += 1
     }
 
     func beginInsertion(pageIndex: Int, point: CGPoint) {
@@ -245,11 +269,60 @@ final class EditorModel: ObservableObject {
             replacement: result.edit
         ))
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         revision += 1
         statusMessage = result.fontIsExact
             ? "文字を置換しました。確認後に編集済みPDFを書き出してください。"
             : "文字を置換しました(元フォントを再現できないため代替フォントで描画します)。確認後に編集済みPDFを書き出してください。"
+    }
+
+    func moveSelection(by delta: CGPoint) {
+        guard mode == .replacement, let document, let target = selectedTarget,
+              let page = document.page(at: target.pageIndex) else { return }
+        let pageBounds = page.bounds(for: .mediaBox)
+        let x = min(max(target.bounds.minX + delta.x, pageBounds.minX), pageBounds.maxX - target.bounds.width)
+        let y = min(max(target.baseline + delta.y, pageBounds.minY + target.baseline - target.bounds.minY),
+                    pageBounds.maxY - (target.bounds.maxY - target.baseline))
+        let result = PDFEditEngine.applyMovement(
+            to: page,
+            target: target,
+            destination: CGPoint(x: x, y: y)
+        )
+        edits.append(AppliedEdit(pageIndex: target.pageIndex, annotations: [result.annotation], replacement: result.edit))
+        selectedTarget = nil
+        isInlineEditing = false
+        replacementText = ""
+        revision += 1
+        statusMessage = "選択した文字を移動しました。"
+    }
+
+    func moveExistingEdit(id: UUID, by delta: CGPoint) {
+        guard let document,
+              let previous = edits.last(where: { $0.replacement.id == id }),
+              let page = document.page(at: previous.pageIndex),
+              previous.replacement.kind == .replacement,
+              !previous.replacement.replacement.isEmpty,
+              let oldAnnotation = previous.annotations.first else { return }
+        let edit = previous.replacement
+        let currentOrigin = edit.destinationOrigin ?? CGPoint(x: edit.bounds.minX, y: edit.baseline)
+        let displayedBounds = edit.displayedTextBounds
+        let pageBounds = page.bounds(for: .mediaBox)
+        let x = min(max(currentOrigin.x + delta.x, pageBounds.minX),
+                    max(pageBounds.maxX - displayedBounds.width, pageBounds.minX))
+        let y = min(max(currentOrigin.y + delta.y, pageBounds.minY + edit.baseline - edit.bounds.minY),
+                    max(pageBounds.maxY - (edit.bounds.maxY - edit.baseline), pageBounds.minY))
+        let movedEdit = edit.movingSelection(to: CGPoint(x: x, y: y))
+        let annotation = ReplacementTextAnnotation(edit: movedEdit)
+        page.removeAnnotation(oldAnnotation)
+        page.addAnnotation(annotation)
+        edits.append(AppliedEdit(pageIndex: edit.pageIndex, annotations: [annotation],
+                                 replacement: movedEdit, restoredAnnotations: [oldAnnotation]))
+        selectedTarget = nil
+        isInlineEditing = false
+        replacementText = ""
+        revision += 1
+        statusMessage = "文字の位置を移動しました。"
     }
 
     func deleteSelection() {
@@ -262,6 +335,7 @@ final class EditorModel: ObservableObject {
             replacement: result.edit
         ))
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         revision += 1
         statusMessage = "選択した文字を表示から削除しました。確認後に編集済みPDFを書き出してください。"
@@ -313,7 +387,9 @@ final class EditorModel: ObservableObject {
         guard let document, let edit = edits.popLast(),
               let page = document.page(at: edit.pageIndex) else { return }
         for annotation in edit.annotations.reversed() { page.removeAnnotation(annotation) }
+        for annotation in edit.restoredAnnotations { page.addAnnotation(annotation) }
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         revision += 1
         statusMessage = "直前の変更を取り消しました。"
@@ -334,7 +410,7 @@ final class EditorModel: ObservableObject {
             return
         }
         do {
-            try PDFExportEngine.export(sourceURL: sourceURL, edits: edits.map(\.replacement), to: outputURL)
+            try PDFExportEngine.export(sourceURL: sourceURL, edits: activeReplacements, to: outputURL)
             statusMessage = "保存しました: \(outputURL.lastPathComponent)"
         } catch {
             statusMessage = "PDFの保存に失敗しました。"
@@ -379,7 +455,7 @@ final class EditorModel: ObservableObject {
             } else {
                 try PDFExportEngine.exportForPrinting(
                     sourceURL: sourceURL,
-                    edits: edits.map(\.replacement),
+                    edits: activeReplacements,
                     to: preparedURL
                 )
                 resizeSourceURL = preparedURL
@@ -432,7 +508,7 @@ final class EditorModel: ObservableObject {
         do {
             let prepared = try PDFPrintPreparationEngine.prepare(
                 sourceURL: sourceURL,
-                edits: edits.map(\.replacement)
+                edits: activeReplacements
             )
             defer { prepared.cleanup() }
             guard let operation = prepared.document.printOperation(
@@ -491,6 +567,7 @@ final class EditorModel: ObservableObject {
     private func discardPendingEditorInput() {
         discardInsertionDraft()
         selectedTarget = nil
+        isInlineEditing = false
         replacementText = ""
         revision += 1
     }

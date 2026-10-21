@@ -34,6 +34,24 @@ enum PDFEditEngine {
         return (annotation, edit)
     }
 
+    static func applyMovement(
+        to page: PDFPage,
+        target: TextTarget,
+        destination: CGPoint
+    ) -> (annotation: PDFAnnotation, edit: ReplacementEdit) {
+        let resolution = resolveFont(for: target, on: page, replacement: target.originalText)
+        let edit = ReplacementEdit(
+            target: target,
+            replacement: target.originalText,
+            resolvedFont: resolution.font,
+            fontIsExact: resolution.isExact,
+            exactGlyphs: resolution.exactGlyphs
+        ).movingSelection(to: destination)
+        let annotation = ReplacementTextAnnotation(edit: edit)
+        page.addAnnotation(annotation)
+        return (annotation, edit)
+    }
+
     private static func resolveFont(
         for target: TextTarget,
         on page: PDFPage,

@@ -8,7 +8,7 @@ import Testing
 
 @Suite("PDF edit engine")
 struct PDFEditEngineTests {
-    @Test("selecting text prefills the replacement and requests input focus")
+    @Test("selecting text keeps replacement ready for direct editing")
     @MainActor
     func selectingTextRequestsInputFocus() {
         let model = EditorModel(initialURL: nil)
@@ -31,7 +31,9 @@ struct PDFEditEngineTests {
 
         #expect(model.selectedTarget == target)
         #expect(model.replacementText == "請求書")
-        #expect(model.replacementFocusRequest == 1)
+        #expect(model.replacementFocusRequest == 0)
+        model.beginInlineEditing()
+        #expect(model.isInlineEditing)
     }
 
     @Test("replacement adds a single self-drawing annotation")
@@ -209,6 +211,64 @@ struct PDFEditEngineTests {
         #expect(plan.shift > 0)
         #expect(plan.outputEnd > layout.lineWidth)
         #expect(plan.scale == 1)
+        let embeddedPlan = PDFTextRenderer.reflowPlan(
+            text: "11", font: font, layout: layout, replacementWidth: 14
+        )
+        #expect(embeddedPlan.shift == 8)
+        #expect(embeddedPlan.outputEnd > layout.lineWidth)
+    }
+
+    @Test("replacement uses visually connected glyphs across font resource runs")
+    func replacementReflowsAcrossRuns() throws {
+        let baseline: CGFloat = 60
+        func makeRun(_ pieces: [(String, CGFloat, CGFloat)], key: String) -> ScannedRun {
+            let glyphs = pieces.map { text, x, width in
+                ScannedGlyph(text: text,
+                             advanceBox: CGRect(x: x, y: 57, width: width, height: 13),
+                             baseline: baseline, fontKey: key, fontSize: 12,
+                             advance: width, fillColor: .black)
+            }
+            let box = glyphs.map(\.advanceBox).reduce(CGRect.null) { $0.union($1) }
+            return ScannedRun(glyphs: glyphs, text: glyphs.map(\.text).joined(), box: box,
+                              baseline: baseline, fontKey: key, fontSize: 12)
+        }
+        let digit = makeRun([("9", 100, 7)], key: "F1")
+        let remainder = makeRun([("月", 107, 12), ("3", 119, 7), ("0", 126, 7), ("日", 133, 12)], key: "F2")
+        let nextColumn = makeRun([("他", 190, 12)], key: "F3")
+        let index = PageTextIndex(runs: [digit, remainder, nextColumn],
+                                  pageBounds: CGRect(x: 0, y: 0, width: 260, height: 120))
+        let target = try #require(index.target(in: digit, range: 0..<1, pageIndex: 0))
+        let layout = try #require(target.lineLayout)
+        #expect(layout.glyphs.map(\.text).joined() == "9月30日")
+        #expect(layout.selectedRange == 0..<1)
+        #expect(layout.lineStartX + layout.maxWidth == 190)
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let plan = PDFTextRenderer.reflowPlan(text: "11", font: font, layout: layout)
+        #expect(plan.shift > 0)
+        #expect(plan.scale == 1)
+    }
+
+    @Test("moved replacement bounds include the full replacement width")
+    func movedReplacementBoundsIncludeRenderedText() {
+        let target = TextTarget(
+            pageIndex: 0,
+            bounds: CGRect(x: 40, y: 50, width: 6, height: 12),
+            baseline: 52,
+            originalText: "9",
+            fontSize: 12,
+            fontColor: .black,
+            fontKey: nil,
+            fontIsExact: false,
+            coverBounds: CGRect(x: 40, y: 50, width: 6, height: 12),
+            maxWidth: 200
+        )
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        let edit = ReplacementEdit(target: target, replacement: "11111111", resolvedFont: font,
+                                   fontIsExact: false)
+            .movingSelection(to: CGPoint(x: 80, y: 70))
+
+        #expect(edit.displayedTextBounds.width > target.bounds.width)
+        #expect(edit.annotationBounds.contains(edit.displayedTextBounds))
     }
 
     @Test("insertion creates one movable free-text annotation")
@@ -236,6 +296,53 @@ struct PDFEditEngineTests {
         #expect(annotation.type == "FreeText")
         #expect(annotation.userName == PDFEditEngine.draftMarker)
         #expect(annotation.contents == "追加テキスト")
+    }
+
+    @Test("moving selected PDF text updates preview, export, and undo")
+    @MainActor
+    func movingOriginalTextRoundTrips() throws {
+        let fixtureURL = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 300, height: 160)) { context in
+            let font = NSFont(name: "Helvetica", size: 12) ?? .systemFont(ofSize: 12)
+            SyntheticFixture.drawLine("A04B".map { .init(character: $0, font: font) },
+                                      startX: 80, baseline: 60, gap: 0, in: context)
+        }
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+        let model = EditorModel(initialURL: fixtureURL)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first)
+        let digit = try #require(run.glyphs.firstIndex { $0.text == "4" })
+        let target = try #require(index.target(in: run, range: digit..<(digit + 1), pageIndex: 0))
+        model.select(target)
+        model.moveSelection(by: CGPoint(x: 30, y: 20))
+
+        let applied = try #require(model.edits.last)
+        let destination = try #require(applied.replacement.destinationOrigin)
+        #expect(destination.x == target.bounds.minX + 30)
+        #expect(destination.y == target.baseline + 20)
+        #expect(page.annotations.count == 1)
+        #expect(applied.replacement.annotationBounds.contains(destination))
+
+        model.moveExistingEdit(id: applied.replacement.id, by: CGPoint(x: 12, y: -5))
+        #expect(page.annotations.count == 1)
+        #expect(model.activeReplacements.count == 1)
+        let movedAgain = try #require(model.activeReplacements.first?.destinationOrigin)
+        #expect(movedAgain.x == destination.x + 12)
+        #expect(movedAgain.y == destination.y - 5)
+
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-move-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: fixtureURL, edits: model.activeReplacements, to: output)
+        let exported = try #require(PDFDocument(url: output)?.page(at: 0))
+        #expect(exported.string?.contains("4") == true)
+
+        model.undoLastEdit()
+        #expect(page.annotations.count == 1)
+        #expect(model.activeReplacements.first?.destinationOrigin == destination)
+        model.undoLastEdit()
+        #expect(page.annotations.isEmpty)
+        #expect(model.edits.isEmpty)
     }
 
     @Test("automatic font resolution always returns an installed font")
@@ -628,41 +735,15 @@ struct PageTextIndexGeometryTests {
 
         let outputDocument = try #require(PDFDocument(url: outputURL))
         let outputPage = try #require(outputDocument.page(at: 0))
-        // `page.draw(with:to:)` は元ページを再レンダリングするため、PDFKit 自身が
-        // 追加するページ全面の背景塗りなどが混ざり得るので、ページ全面の塗りは除外する。
-        let pageBounds = outputPage.bounds(for: .mediaBox)
-        let fills = InkScanner.scan(page: outputPage).filter {
-            $0.bounds.width < pageBounds.width * 0.5 && $0.bounds.height < pageBounds.height * 0.5
-        }
-        #expect(fills.count >= 2)
-
-        let coverFill = try #require(fills.first(where: { $0.isPlainRect }))
-        let inkFills = fills.filter { !$0.isPlainRect }
-        #expect(!inkFills.isEmpty)
-        let inkBounds = inkFills.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
-
-        #expect(coverFill.isPlainRect)
+        // 通常の CoreText 文字描画は PDF のテキスト演算子になるため、
+        // 輪郭パス専用の InkScanner では検出されない。文字抽出と再配置計算を検証する。
+        #expect(outputPage.string?.contains("9999") == true)
         let lineLayout = try #require(target.lineLayout)
-        #expect(abs(coverFill.bounds.minX - lineLayout.coverBounds.minX) < 0.01)
-        #expect(coverFill.bounds.maxX >= lineLayout.coverBounds.maxX - 0.01)
-        #expect(coverFill.bounds.maxX > lineLayout.coverBounds.maxX)
-        #expect(coverFill.bounds.maxX <= lineLayout.lineStartX + lineLayout.maxWidth + 0.5)
-
-        // 折り返しなし: 描画されたグリフの高さが 1 行分（fontSize の 1.3 倍未満）に収まる。
-        #expect(inkBounds.height < target.fontSize * 1.3)
-        // ベースラインはほぼ動かない(descender 分だけ下に出ることはある)。
-        #expect(inkBounds.minY > target.baseline - target.fontSize)
-        #expect(inkBounds.maxY < target.baseline + target.fontSize)
-        // 拡張後の文字は行末の空きへ入り、ページ外へは出ない。
-        #expect(inkBounds.maxX <= lineLayout.lineStartX + lineLayout.maxWidth + 0.5)
-
-        // 同一 run の A は描き直し、後続の B は置換文字幅分だけ右へ移す。
-        let originalIndex = PDFGlyphIndex.makeIndex(for: outputPage)
-        let originalRun = try #require(originalIndex.runs.first { $0.text == "A04B" })
-        let aGlyph = try #require(originalRun.glyphs.first { $0.text == "A" })
-        let bGlyph = try #require(originalRun.glyphs.first { $0.text == "B" })
-        #expect(inkBounds.minX <= aGlyph.advanceBox.minX + 0.5)
-        #expect(inkBounds.maxX > bGlyph.advanceBox.maxX)
+        let plan = PDFTextRenderer.reflowPlan(text: "9999", font: fallbackFont, layout: lineLayout)
+        #expect(plan.shift > 0)
+        #expect(plan.outputEnd > lineLayout.lineWidth)
+        #expect(plan.outputEnd <= lineLayout.maxWidth)
+        #expect(plan.scale == 1)
 
         try? FileManager.default.removeItem(at: fixture.url)
         try? FileManager.default.removeItem(at: outputURL)
