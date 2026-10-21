@@ -82,12 +82,19 @@ struct PDFMarkupEngineTests {
             $0.type == PDFAnnotationSubtype.highlight.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         })
         #expect(editorAnnotations.contains { $0.contents == "Review this" })
-        #expect(page.annotations.filter { $0.contents == "Original review note" }.count == 1)
+        let externalNotes = page.annotations.filter {
+            $0.type == PDFAnnotationSubtype.text.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                && $0.userName == "Another PDF app" && $0.contents == "Original review note"
+        }
+        #expect(externalNotes.count == 1)
 
         let printPageCopy = try #require(page.copy() as? PDFPage)
         PDFMarkupEngine.replaceManagedAnnotations(on: printPageCopy, with: markups)
         #expect(markedAnnotations(on: printPageCopy).count == 2)
-        #expect(printPageCopy.annotations.filter { $0.contents == "Original review note" }.count == 1)
+        #expect(printPageCopy.annotations.filter {
+            $0.type == PDFAnnotationSubtype.text.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                && $0.userName == "Another PDF app" && $0.contents == "Original review note"
+        }.count == 1)
 
         let deletedMarkupCopy = try #require(page.copy() as? PDFPage)
         PDFMarkupEngine.replaceManagedAnnotations(

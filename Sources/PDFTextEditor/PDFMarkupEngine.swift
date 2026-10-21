@@ -95,13 +95,19 @@ enum PDFMarkupEngine {
 
     static func duplicateAnnotation(_ annotation: PDFAnnotation) -> PDFAnnotation? {
         guard let type = annotation.type else { return nil }
+        let popup = annotation.popup
         var properties = annotation.annotationKeyValues
         properties.removeValue(forKey: PDFAnnotationKey.page)
-        return PDFAnnotation(
+        properties.removeValue(forKey: PDFAnnotationKey.popup)
+        let duplicate = PDFAnnotation(
             bounds: annotation.bounds,
             forType: PDFAnnotationSubtype(rawValue: type),
             withProperties: properties
         )
+        if let popup, let popupCopy = duplicateAnnotation(popup) {
+            duplicate.popup = popupCopy
+        }
+        return duplicate
     }
 
     static func edit(from annotation: PDFAnnotation, pageIndex: Int) -> PDFMarkupEdit? {
