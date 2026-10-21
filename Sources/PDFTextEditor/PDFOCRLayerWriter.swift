@@ -46,14 +46,19 @@ enum PDFOCRLayerWriter {
         guard !allCharacters.isEmpty, allCharacters.count < 65_535 else { throw PDFOCRError.cannotSave }
         let codes = Dictionary(uniqueKeysWithValues: allCharacters.enumerated().map { ($0.element.value, $0.offset + 1) })
         var next = pdf.nextObjectNumber
-        let fontNumber = next; next += 1
-        let cidNumber = next; next += 1
         let cmapNumber = next; next += 1
-        let descriptorNumber = next; next += 1
         var objects: [Int: String] = [:]
-        objects[fontNumber] = "<< /Type /Font /Subtype /Type0 /BaseFont /PDFEditorOCR /Encoding /Identity-H /DescendantFonts [\(cidNumber) 0 R] /ToUnicode \(cmapNumber) 0 R >>"
-        objects[cidNumber] = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /PDFEditorOCR /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor \(descriptorNumber) 0 R /DW 1000 /CIDToGIDMap /Identity >>"
-        objects[descriptorNumber] = "<< /Type /FontDescriptor /FontName /PDFEditorOCR /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
+        let fontNames = Set(linesByPage.values.flatMap { $0.map { fontNameKey($0.fontPostScriptName) } })
+        var fontNumbers: [String: Int] = [:]
+        for fontName in fontNames.sorted() {
+            let fontNumber = next; next += 1
+            let cidNumber = next; next += 1
+            let descriptorNumber = next; next += 1
+            fontNumbers[fontName] = fontNumber
+            objects[fontNumber] = "<< /Type /Font /Subtype /Type0 /BaseFont /PDFEditorOCR /Encoding /Identity-H /DescendantFonts [\(cidNumber) 0 R] /ToUnicode \(cmapNumber) 0 R >>"
+            objects[cidNumber] = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /PDFEditorOCR /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor \(descriptorNumber) 0 R /DW 1000 /CIDToGIDMap /Identity >>"
+            objects[descriptorNumber] = "<< /Type /FontDescriptor /FontName /PDFEditorOCR /Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
+        }
         let cmap = makeToUnicode(characters: allCharacters)
         objects[cmapNumber] = stream(cmap)
         for (pageIndex, lines) in linesByPage.sorted(by: { $0.key < $1.key }) {
@@ -88,15 +93,20 @@ enum PDFOCRLayerWriter {
                 originalResourcesWereDirect = false
             }
 
-            var fontResourceName = "Focr"
-            resourcesDictionary = try addFontReference(
-                fontNumber,
-                to: resourcesDictionary,
-                using: pdf,
-                objects: &objects,
-                nextObjectNumber: &next,
-                fontResourceName: &fontResourceName
-            )
+            var fontResourceNames: [String: String] = [:]
+            for fontName in Set(lines.map { fontNameKey($0.fontPostScriptName) }).sorted() {
+                guard let fontNumber = fontNumbers[fontName] else { throw PDFOCRError.cannotSave }
+                var fontResourceName = "Focr"
+                resourcesDictionary = try addFontReference(
+                    fontNumber,
+                    to: resourcesDictionary,
+                    using: pdf,
+                    objects: &objects,
+                    nextObjectNumber: &next,
+                    fontResourceName: &fontResourceName
+                )
+                fontResourceNames[fontName] = fontResourceName
+            }
             let resourceNumber = next; next += 1
             let streamNumber = next; next += 1
             objects[resourceNumber] = resourcesDictionary
@@ -106,10 +116,18 @@ enum PDFOCRLayerWriter {
                                   y: mediaBox.minY + line.bounds.minY * mediaBox.height,
                                   width: line.bounds.width * mediaBox.width,
                                   height: line.bounds.height * mediaBox.height)
+                let fontHeight: CGFloat
+                if let preservedFontSize = line.fontSize, preservedFontSize.isFinite, preservedFontSize > 0 {
+                    fontHeight = preservedFontSize
+                } else {
+                    fontHeight = max(1, rect.height * 0.8)
+                }
                 let characters = Array(line.text.unicodeScalars)
                 let encoded = characters.map { String(format: "%04X", codes[$0.value]!) }.joined()
                 let advance = max(0.1, rect.width / CGFloat(max(1, characters.count)))
-                return "BT /\(fontResourceName) 1 Tf 3 Tr \(number(advance)) 0 0 \(number(max(1, rect.height * 0.8))) \(number(rect.minX)) \(number(rect.minY + rect.height * 0.12)) Tm <\(encoded)> Tj ET"
+                let fontName = fontNameKey(line.fontPostScriptName)
+                guard let fontResourceName = fontResourceNames[fontName] else { return "" }
+                return "BT /\(fontResourceName) 1 Tf 3 Tr \(number(advance)) 0 0 \(number(fontHeight)) \(number(rect.minX)) \(number(rect.minY + rect.height * 0.12)) Tm <\(encoded)> Tj ET"
             }.joined(separator: "\n")
             objects[streamNumber] = stream("q\n\(commands)\nQ\n")
             var replacement = page.dictionary
@@ -123,9 +141,16 @@ enum PDFOCRLayerWriter {
                 with: "[\(existingContentStreams) \(streamNumber) 0 R]")
             replacement = pdf.settingValue(named: "Resources", in: replacement,
                 with: "\(resourceNumber) 0 R")
+            let fontNameMap = fontResourceNames
+                .filter { $0.key != defaultFontNameKey }
+                .sorted { $0.value < $1.value }
+                .map { "/\($0.value) /\(pdfNameToken($0.key))" }
+                .joined(separator: " ")
+            let fontNameMarker = fontNameMap.isEmpty ? "" : " /PDFTextEditorOCRFontNames [\(fontNameMap)]"
             replacement = replacement.replacingOccurrences(of: ">>", with:
                 "\(marker) /PDFTextEditorOCRBaseContents \(contents) /PDFTextEditorOCRBaseResources \(originalResourcesMarker) "
-                    + (originalResourcesWereDirect ? "/PDFTextEditorOCRBaseResourcesWasDirect true " : "") + ">>",
+                    + (originalResourcesWereDirect ? "/PDFTextEditorOCRBaseResourcesWasDirect true " : "")
+                    + fontNameMarker + ">>",
                 options: [], range: replacement.range(of: ">>", options: .backwards))
             objects[page.number] = replacement
         }
@@ -151,7 +176,7 @@ enum PDFOCRLayerWriter {
             } else {
                 replacement = pdf.settingValue(named: "Resources", in: replacement, with: resources)
             }
-            for key in ["PDFTextEditorOCRLayer", "PDFTextEditorOCRBaseContents", "PDFTextEditorOCRBaseResources", "PDFTextEditorOCRBaseResourcesWasDirect"] {
+            for key in ["PDFTextEditorOCRLayer", "PDFTextEditorOCRBaseContents", "PDFTextEditorOCRBaseResources", "PDFTextEditorOCRBaseResourcesWasDirect", "PDFTextEditorOCRFontNames"] {
                 replacement = replacement.replacingOccurrences(
                     of: "/\(key)\\s+(?:\\[[^]]*\\]|\\d+\\s+0\\s+R|\\d+|true|false|null)", with: "",
                     options: .regularExpression)
@@ -205,6 +230,25 @@ enum PDFOCRLayerWriter {
             return pdf.settingValue(named: "Font", in: dictionary, with: "\(copiedFontNumber) 0 R")
         }
         return pdf.settingValue(named: "Font", in: dictionary, with: updatedFontDictionary)
+    }
+
+    private static let defaultFontNameKey = "\u{0}PDFEditorOCR"
+
+    private static func fontNameKey(_ postScriptName: String?) -> String {
+        guard let name = postScriptName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return defaultFontNameKey
+        }
+        return name
+    }
+
+    private static func pdfNameToken(_ name: String) -> String {
+        let delimiters: Set<UInt8> = [0x23, 0x25, 0x28, 0x29, 0x2F, 0x3C, 0x3E, 0x5B, 0x5D, 0x7B, 0x7D]
+        return name.utf8.map { byte in
+            if byte <= 0x20 || byte >= 0x7F || delimiters.contains(byte) {
+                return String(format: "#%02X", byte)
+            }
+            return String(UnicodeScalar(byte))
+        }.joined()
     }
 
     private static func makeToUnicode(characters: [Unicode.Scalar]) -> String {

@@ -8,6 +8,26 @@ struct PDFOCRLine: Sendable, Identifiable {
     let text: String
     let confidence: Float
     let bounds: CGRect
+    /// Text patches preserve the resolved font and point size so a later edit can use
+    /// the same appearance. Real OCR results leave these unset.
+    let fontPostScriptName: String?
+    let fontSize: CGFloat?
+
+    init(
+        pageIndex: Int,
+        text: String,
+        confidence: Float,
+        bounds: CGRect,
+        fontPostScriptName: String? = nil,
+        fontSize: CGFloat? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.text = text
+        self.confidence = confidence
+        self.bounds = bounds
+        self.fontPostScriptName = fontPostScriptName
+        self.fontSize = fontSize
+    }
 }
 
 struct PDFOCRResult: Sendable {

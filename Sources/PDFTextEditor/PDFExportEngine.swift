@@ -381,7 +381,9 @@ enum PDFExportEngine {
                 pageIndex: edit.pageIndex,
                 text: edit.replacement,
                 confidence: 1,
-                bounds: normalizedBounds
+                bounds: normalizedBounds,
+                fontPostScriptName: edit.resolvedFont.map { CTFontCopyPostScriptName($0) as String },
+                fontSize: edit.resolvedFont.map(CTFontGetSize)
             ))
         }
         guard !linesByPage.isEmpty else { return data }

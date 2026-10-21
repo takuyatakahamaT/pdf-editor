@@ -97,6 +97,8 @@ struct TextTarget: Equatable {
     let lineLayout: TextRunLayout?
     /// 選択した全グリフに明示的な `/ToUnicode` 対応があるか。
     let hasExplicitSourceMapping: Bool
+    /// PDF editor が追加した不可視検索文字層に記録された元書体名。
+    let fontPostScriptNameOverride: String?
 
     init(
         pageIndex: Int,
@@ -110,7 +112,8 @@ struct TextTarget: Equatable {
         coverBounds: CGRect,
         maxWidth: CGFloat,
         lineLayout: TextRunLayout? = nil,
-        hasExplicitSourceMapping: Bool = true
+        hasExplicitSourceMapping: Bool = true,
+        fontPostScriptNameOverride: String? = nil
     ) {
         self.pageIndex = pageIndex
         self.bounds = bounds
@@ -124,6 +127,7 @@ struct TextTarget: Equatable {
         self.maxWidth = maxWidth
         self.lineLayout = lineLayout
         self.hasExplicitSourceMapping = hasExplicitSourceMapping
+        self.fontPostScriptNameOverride = fontPostScriptNameOverride
     }
 }
 
@@ -174,6 +178,8 @@ struct PageTextIndex {
     /// content streamの通常本文とForm XObject内で参照されたフォント辞書。
     /// Form固有のフォント名はページ直下の同名リソースと区別した内部キーで保持する。
     var fontDictionaries: [String: CGPDFDictionaryRef] = [:]
+    /// 編集結果の不可視検索文字層に対応する、元のPostScript書体名。
+    var fontPostScriptNameOverrides: [String: String] = [:]
 
     /// クリック点にちょうど乗っているグリフを探す。
     func run(at point: CGPoint) -> (run: ScannedRun, glyphIndex: Int)? {
@@ -352,7 +358,8 @@ struct PageTextIndex {
             coverBounds: coverBounds,
             maxWidth: maxWidth,
             lineLayout: lineLayout,
-            hasExplicitSourceMapping: clusterGlyphs.allSatisfy(\.hasExplicitToUnicodeMapping)
+            hasExplicitSourceMapping: clusterGlyphs.allSatisfy(\.hasExplicitToUnicodeMapping),
+            fontPostScriptNameOverride: fontPostScriptNameOverrides[fontKey]
         )
     }
 
@@ -647,6 +654,22 @@ enum PDFGlyphIndex {
         var index = PageTextIndex(runs: runs, fontHasEmbeddedProgram: hasEmbedded)
         index.pageBounds = cgPage.getBoxRect(.mediaBox)
         index.fontDictionaries = state.fontDictionaries
+        if let pageDictionary = cgPage.dictionary {
+            var fontNameArray: CGPDFArrayRef?
+            if CGPDFDictionaryGetArray(pageDictionary, "PDFTextEditorOCRFontNames", &fontNameArray),
+               let fontNameArray {
+                var position = 0
+                while position + 1 < CGPDFArrayGetCount(fontNameArray) {
+                    var keyPointer: UnsafePointer<Int8>?
+                    var namePointer: UnsafePointer<Int8>?
+                    if CGPDFArrayGetName(fontNameArray, position, &keyPointer), let keyPointer,
+                       CGPDFArrayGetName(fontNameArray, position + 1, &namePointer), let namePointer {
+                        index.fontPostScriptNameOverrides[String(cString: keyPointer)] = String(cString: namePointer)
+                    }
+                    position += 2
+                }
+            }
+        }
         return index
     }
 }

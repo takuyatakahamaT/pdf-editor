@@ -42,6 +42,62 @@ struct PDFOCREngineTests {
         return url
     }
 
+    @Test("同じページの検索レイヤーが複数の書体名を保持する")
+    func searchableLayersPreserveResolvedFontNames() throws {
+        let source = try makeImagePDF()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let sourceData = try Data(contentsOf: source)
+        let lines = [
+            PDFOCRLine(pageIndex: 0, text: "日本語 OCR", confidence: 0.98,
+                       bounds: CGRect(x: 0.1, y: 0.3, width: 0.6, height: 0.2),
+                       fontPostScriptName: "MS-Gothic", fontSize: 16),
+            PDFOCRLine(pageIndex: 0, text: "追加文字", confidence: 0.98,
+                       bounds: CGRect(x: 0.1, y: 0.6, width: 0.6, height: 0.2),
+                       fontPostScriptName: "HiraginoSans-W3", fontSize: 12),
+            PDFOCRLine(pageIndex: 0, text: "PLUS", confidence: 0.98,
+                       bounds: CGRect(x: 0.1, y: 0.1, width: 0.3, height: 0.15),
+                       fontPostScriptName: "Test+Font", fontSize: 10),
+            PDFOCRLine(pageIndex: 0, text: "MINUS", confidence: 0.98,
+                       bounds: CGRect(x: 0.5, y: 0.1, width: 0.3, height: 0.15),
+                       fontPostScriptName: "Test-Font", fontSize: 11),
+            PDFOCRLine(pageIndex: 0, text: "HASH", confidence: 0.98,
+                       bounds: CGRect(x: 0.1, y: 0.82, width: 0.3, height: 0.12),
+                       fontPostScriptName: "Test#Font", fontSize: 9)
+        ]
+
+        let layered = try PDFOCRLayerWriter.add(linesByPage: [0: lines], to: sourceData)
+        let document = try #require(PDFDocument(data: layered))
+        let page = try #require(document.page(at: 0))
+        #expect(page.string?.contains("日本語 OCR") == true)
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let glyphs = index.runs.flatMap(\.glyphs)
+        #expect(glyphs.map(\.text).joined().contains("日本語 OCR"))
+        let glyph = try #require(glyphs.first { $0.text == "日" })
+        let override = index.fontPostScriptNameOverrides[glyph.fontKey]
+        #expect(override == "MS-Gothic")
+        let secondGlyph = try #require(glyphs.first { $0.text == "追" })
+        #expect(index.fontPostScriptNameOverrides[secondGlyph.fontKey] == "HiraginoSans-W3")
+        let fontDictionary = try #require(PDFGlyphIndex.fontDictionary(for: glyph.fontKey, page: page))
+        #expect(PDFEmbeddedFontLoader.describe(
+            fontDict: fontDictionary,
+            postScriptNameOverride: override
+        ).pdfName == "MS-Gothic")
+        let firstRun = try #require(index.runs.first { $0.text.contains("日本語 OCR") })
+        let target = try #require(index.target(in: firstRun, range: 0..<1, pageIndex: 0))
+        #expect(target.fontPostScriptNameOverride == "MS-Gothic")
+        #expect(abs(target.fontSize - 16) < 0.05)
+        let secondRun = try #require(index.runs.first { $0.text.contains("追加文字") })
+        let secondTarget = try #require(index.target(in: secondRun, range: 0..<1, pageIndex: 0))
+        #expect(abs(secondTarget.fontSize - 12) < 0.05)
+        let plusGlyph = try #require(glyphs.first { $0.text == "P" })
+        let minusGlyph = try #require(glyphs.first { $0.text == "M" })
+        let hashGlyph = try #require(glyphs.first { $0.text == "H" })
+        #expect(index.fontPostScriptNameOverrides[plusGlyph.fontKey] == "Test+Font")
+        #expect(index.fontPostScriptNameOverrides[minusGlyph.fontKey] == "Test-Font")
+        #expect(index.fontPostScriptNameOverrides[hashGlyph.fontKey] == "Test#Font")
+        #expect(PDFSearchEngine.search(document: document, query: "日本語").count == 1)
+    }
+
     @Test("separate OCR stream is searchable and removable without source embedding")
     func separateLayerRoundTrip() throws {
         let source = try makeImagePDF()
