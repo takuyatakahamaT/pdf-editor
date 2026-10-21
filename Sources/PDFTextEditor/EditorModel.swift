@@ -605,6 +605,70 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    func cropPreview(pageIndex: Int, margins: PDFCropMargins) -> PDFCropPreview? {
+        guard let document, !hasPendingEditorInput,
+              document.page(at: pageIndex) != nil else { return nil }
+        let previewURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-crop-preview-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: previewURL) }
+        guard document.write(to: previewURL), let previewDocument = PDFDocument(url: previewURL) else { return nil }
+        return try? PDFCropEngine.preview(document: previewDocument, pageIndex: pageIndex, margins: margins)
+    }
+
+    @discardableResult
+    func cropFromPanel(margins: PDFCropMargins, pageSpecification: String) -> Bool {
+        guard let sourceURL, let document else { return false }
+        guard margins.isValid else {
+            statusMessage = PDFCropError.invalidMargins.localizedDescription
+            return false
+        }
+        guard !hasPendingEditorInput else {
+            statusMessage = "入力中の文字を確定してから切り抜いてください。"
+            return false
+        }
+        do {
+            _ = try PDFCropEngine.pageIndices(from: pageSpecification, pageCount: document.pageCount)
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+        guard document.allowsCopying && document.allowsDocumentAssembly else {
+            statusMessage = "このPDFは内容のコピーまたはページの変更が許可されていません。"
+            return false
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-cropped.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "表示範囲だけを変更したPDFを別名で保存します。隠れた内容はPDF内部に残ります。"
+        guard panel.runModal() == .OK, let outputURL = panel.url else {
+            statusMessage = "保存をキャンセルしました。"
+            return false
+        }
+
+        let preparedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-crop-prepared-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: preparedURL) }
+        do {
+            guard document.write(to: preparedURL) else { throw PDFCropError.unreadableSource }
+            try PDFCropEngine.crop(
+                sourceURL: preparedURL,
+                to: outputURL,
+                margins: margins,
+                pageSpecification: pageSpecification,
+                protecting: [sourceURL]
+            )
+            statusMessage = "切り抜いて保存しました: \(outputURL.lastPathComponent)"
+            return true
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+    }
+
     func printFromPanel() {
         guard let sourceURL else { return }
 
