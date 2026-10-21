@@ -20,6 +20,7 @@ struct PDFTextEditorApp: App {
         WindowGroup("PDF editor") {
             EditorScreen()
                 .environmentObject(model)
+                .environmentObject(updater)
                 .frame(minWidth: 1_080, minHeight: 720)
                 .task { updater.start() }
         }

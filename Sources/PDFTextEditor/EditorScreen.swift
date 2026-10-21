@@ -1,818 +1,127 @@
-import SwiftUI
-
-struct EditorScreen: View {
-    @EnvironmentObject private var model: EditorModel
-    @StateObject private var zoomState = PDFZoomState()
-    @State private var zoomInput = "100"
-    @FocusState private var zoomInputIsFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            NihoDivider()
-
-            if let document = model.document {
-                HStack(spacing: 0) {
-                    VStack(spacing: 0) {
-                        HStack {
-                            Spacer()
-                            zoomToolbar
-                            Spacer()
-                        }
-                        .frame(height: 44)
-                        .background(NihoPalette.pdfStage)
-                        NihoDivider()
-
-                        PDFCanvas(
-                            document: document,
-                            revision: model.revision,
-                            mode: model.mode,
-                            markupTool: model.selectedMarkupTool,
-                            selectedTarget: model.selectedTarget,
-                            redactionRegions: model.redactionRegions,
-                            selectedMarkupID: model.selectedMarkupID,
-                            highlightedSearchSelections: model.highlightedSearchSelections,
-                            focusedSearchSelection: model.focusedSearchSelection,
-                            searchHighlightRevision: model.searchHighlightRevision,
-                            searchNavigationRevision: model.searchNavigationRevision,
-                            isInlineEditing: model.isInlineEditing,
-                            zoomState: zoomState,
-                            onSelection: { target in model.select(target) },
-                            onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
-                            onMoveInsertion: { marker, pageIndex, bounds in
-                                model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
-                            },
-                            onMoveSelection: { delta in model.moveSelection(by: delta) },
-                            onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
-                            onMarkupCreate: { pageIndex, bounds, points in
-                                model.addMarkup(pageIndex: pageIndex, bounds: bounds, points: points)
-                            },
-                            onRedactionRegion: { pageIndex, bounds in
-                                model.addRedactionRegion(pageIndex: pageIndex, bounds: bounds)
-                            },
-                            onSelectMarkup: { id in model.selectMarkup(id) },
-                            onMoveMarkup: { id, bounds in model.moveMarkup(id: id, to: bounds) },
-                            onBeginInlineEditing: { model.beginInlineEditing() },
-                            onChangeInlineText: { value in model.updateEditorText(value) },
-                            onCommitInlineEditing: { model.commitEditorText() },
-                            onCancelInlineEditing: { model.cancelInlineEditing() }
-                        )
-                        .background(NihoPalette.pdfStage)
-                    }
-
-                    inspector
-                        .frame(width: 370)
-                }
-            } else {
-                landing
-            }
-
-            statusBar
-        }
-        .background(NihoPalette.canvas)
-        .foregroundStyle(NihoPalette.ink)
-        .tint(NihoPalette.green)
-        .preferredColorScheme(.light)
-        .onChange(of: zoomState.scale) { _, newScale in
-            guard !zoomInputIsFocused else { return }
-            zoomInput = String(Int((newScale * 100).rounded()))
-        }
-        .sheet(isPresented: $model.isShowingMergeSheet) {
-            PDFMergeSheet()
-        }
-        .sheet(isPresented: $model.isShowingPageOrganizerSheet) {
-            if let document = model.document, let sourceURL = model.sourceURL {
-                PDFPageOrganizerSheet(document: document, sourceURL: sourceURL)
-            }
-        }
-        .sheet(isPresented: $model.isShowingResizeSheet) {
-            PDFPageResizeSheet()
-                .environmentObject(model)
-        }
-        .sheet(isPresented: $model.isShowingCompressionSheet) {
-            PDFCompressionSheet()
-                .environmentObject(model)
-        }
-        .sheet(isPresented: $model.isShowingSearchSheet, onDismiss: model.closeSearchSheet) {
-            PDFSearchSheet()
-                .environmentObject(model)
-        }
-        .sheet(isPresented: $model.isShowingOCRSheet) {
-            PDFOCRSheet()
-                .environmentObject(model)
-        }
-    }
-
-    private var topBar: some View {
-        HStack(spacing: 16) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(NihoPalette.green)
-                Text("T/")
-                    .font(.custom("Avenir Next", size: 16).weight(.heavy))
-                    .foregroundStyle(Color.white)
-            }
-            .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("PDF EDITOR")
-                    .font(.custom("Avenir Next", size: 13).weight(.bold))
-                    .tracking(1.8)
-                    .foregroundStyle(NihoPalette.heading)
-                Text(model.sourceURL?.lastPathComponent ?? "PDFã‚’é¸æŠžã—ã¦ãã ã•ã„")
-                    .font(.custom("Hiragino Sans", size: 11))
-                    .foregroundStyle(NihoPalette.muted)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            Text(model.pageCountText)
-                .font(.custom("Avenir Next", size: 12).weight(.medium))
-                .foregroundStyle(NihoPalette.muted)
-
-            Button(action: model.showSearchSheet) {
-                Image(systemName: "magnifyingglass")
-                    .frame(width: 32, height: 34)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("PDFå†…ã‚’æ¤œç´¢ï¼ˆâŒ˜Fï¼‰")
-            .accessibilityLabel("PDFå†…ã‚’æ¤œç´¢")
-            .disabled(model.document == nil)
-
-            actionButton("OCR", icon: "text.viewfinder", emphasized: false) {
-                model.isShowingOCRSheet = true
-            }
-            .disabled(model.document == nil)
-
-            actionButton("PDFã‚’é–‹ã", icon: "folder", emphasized: false) {
-                model.openFromPanel()
-            }
-
-            actionButton("çµåˆ", icon: "doc.on.doc", emphasized: false) {
-                model.showMergeSheet()
-            }
-
-            actionButton("ãƒšãƒ¼ã‚¸æ•´ç†", icon: "square.grid.2x2", emphasized: false) {
-                model.showPageOrganizerSheet()
-            }
-            .disabled(model.document == nil)
-
-            actionButton("ãƒšãƒ¼ã‚¸ã‚µã‚¤ã‚º", icon: "arrow.up.left.and.arrow.down.right", emphasized: false) {
-                model.showResizeSheet()
-            }
-            .disabled(model.document == nil)
-
-            actionButton("PDFã‚’åœ§ç¸®", icon: "arrow.down.doc", emphasized: false) {
-                model.showCompressionSheet()
-            }
-            .disabled(model.document == nil)
-
-            actionButton("å°åˆ·", icon: "printer", emphasized: false) {
-                model.printFromPanel()
-            }
-            .disabled(!model.canPrint)
-
-            actionButton("æ›¸ãå‡ºã™", icon: "square.and.arrow.up", emphasized: true) {
-                model.exportFromPanel()
-            }
-            .disabled(!model.canExport)
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 62)
-        .background(NihoPalette.canvas)
-    }
-
-    private var zoomToolbar: some View {
-        HStack(spacing: 8) {
-            zoomButton("minus.magnifyingglass", help: "ç¸®å°") { zoomState.zoomOut() }
-            TextField("å€çŽ‡", text: $zoomInput)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 48)
-                .multilineTextAlignment(.trailing)
-                .focused($zoomInputIsFocused)
-                .onSubmit {
-                    zoomState.setPercent(Double(zoomInput) ?? Double(zoomState.scale * 100))
-                    zoomInputIsFocused = false
-                }
-            Text("%")
-                .font(.custom("Avenir Next", size: 11).weight(.medium))
-                .foregroundStyle(NihoPalette.muted)
-            zoomButton("plus.magnifyingglass", help: "æ‹¡å¤§") { zoomState.zoomIn() }
-
-            Menu {
-                Button("ãƒšãƒ¼ã‚¸å…¨ä½“ã«åˆã‚ã›ã‚‹") { zoomState.fitPage() }
-                Button("ãƒšãƒ¼ã‚¸å¹…ã«åˆã‚ã›ã‚‹") { zoomState.fitWidth() }
-                Button("å®Ÿå¯¸ï¼ˆ100%ï¼‰") { zoomState.actualSize() }
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .frame(width: 30, height: 28)
-            }
-            .menuStyle(.borderlessButton)
-            .help("ãƒšãƒ¼ã‚¸ã®è¡¨ç¤ºå€çŽ‡")
-
-            NihoDivider()
-                .frame(height: 20)
-
-            Button {
-                zoomState.toggleMagnifier()
-            } label: {
-                Image(systemName: zoomState.magnifierIsActive ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
-                    .frame(width: 30, height: 28)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(zoomState.magnifierIsActive ? NihoPalette.green : NihoPalette.ink)
-            .help(zoomState.magnifierIsActive ? "è™«çœ¼é¡ã‚’çµ‚äº†ï¼ˆEscï¼‰" : "ãƒã‚¤ãƒ³ã‚¿ãƒ¼ä»˜è¿‘ã‚’æ‹¡å¤§")
-            .accessibilityLabel(zoomState.magnifierIsActive ? "è™«çœ¼é¡ã‚’çµ‚äº†" : "è™«çœ¼é¡")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8).stroke(NihoPalette.line, lineWidth: 1)
-        }
-        .padding(.top, 10)
-        .zIndex(1)
-    }
-
-    private func zoomButton(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .frame(width: 30, height: 28)
-        }
-        .buttonStyle(.plain)
-        .help(help)
-        .accessibilityLabel(help)
-    }
-
-    private var inspector: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("TEXT PATCH")
-                    .font(.custom("Avenir Next", size: 12).weight(.bold))
-                    .tracking(1.7)
-                    .foregroundStyle(NihoPalette.green)
-                Picker("ç·¨é›†æ–¹æ³•", selection: Binding(
-                    get: { model.mode },
-                    set: { newMode in model.setMode(newMode) }
-                )) {
-                    ForEach(EditorMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .padding(.vertical, 8)
-
-                Text(modeHeading)
-                    .font(.custom("Hiragino Sans", size: 21).weight(.semibold))
-                    .foregroundStyle(NihoPalette.heading)
-                Text(modeInstructions)
-                    .font(.custom("Hiragino Sans", size: 12))
-                    .foregroundStyle(NihoPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(24)
-
-            NihoDivider()
-
-            VStack(alignment: .leading, spacing: 18) {
-                if model.mode == .replacement {
-                    fieldLabel("é¸æŠžã—ãŸæ–‡å­—")
-                    Text(model.selectedTarget?.originalText ?? "ã¾ã é¸æŠžã•ã‚Œã¦ã„ã¾ã›ã‚“")
-                        .font(.custom("Hiragino Sans", size: 15).weight(.medium))
-                        .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
-                        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(NihoPalette.line, lineWidth: 1)
-                        }
-                } else if model.mode == .insertion {
-                    HStack(spacing: 9) {
-                        Image(systemName: model.hasInsertionLocation ? "mappin.and.ellipse" : "cursorarrow.click")
-                            .foregroundStyle(accentColor)
-                        Text(model.hasInsertionLocation ? "å…¥åŠ›ä½ç½®ã‚’é…ç½®æ¸ˆã¿" : "PDFä¸Šã®è¿½åŠ ä½ç½®ã‚’ã‚¯ãƒªãƒƒã‚¯")
-                            .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                            .foregroundStyle(model.hasInsertionLocation ? NihoPalette.ink : NihoPalette.muted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-                }
-
-                if model.mode == .redaction {
-                    redactionControls
-                }
-
-                if model.mode == .insertion {
-                    fieldLabel("è¿½åŠ ã™ã‚‹æ–‡å­—")
-                    ReplacementTextField(
-                        text: Binding(
-                            get: { model.replacementText },
-                            set: { newText in model.updateEditorText(newText) }
-                        ),
-                        isEnabled: model.canEditText,
-                        focusRequest: model.replacementFocusRequest,
-                        onSubmit: { model.commitEditorText() }
-                    )
-                        .frame(minHeight: 20)
-                        .padding(14)
-                        .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
-                        }
-                }
-
-                if model.mode == .markup {
-                    markupControls
-                }
-
-                if model.mode == .replacement {
-                    ReplacementStylePanel(model: model)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Button(action: model.importFontFromPanel) {
-                            Label("ãƒ•ã‚©ãƒ³ãƒˆãƒ•ã‚¡ã‚¤ãƒ«ã‚’èª­ã¿è¾¼ã‚€", systemImage: "textformat")
-                                .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(NihoPalette.green)
-                        Text("ä¸€è‡´ã™ã‚‹ãƒ•ã‚©ãƒ³ãƒˆã¯ç½®æ›ã«ä½¿ã‚ã‚Œã¾ã™ã€‚èª­ã¿è¾¼ã‚“ã ãƒ•ã‚©ãƒ³ãƒˆã¯ã‚¢ãƒ—ãƒªçµ‚äº†ã¾ã§æœ‰åŠ¹ã§ã™ã€‚")
-                            .font(.custom("Hiragino Sans", size: 10))
-                            .foregroundStyle(NihoPalette.muted)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if !model.importedFontFamilies.isEmpty {
-                            Text("èª­ã¿è¾¼ã¿æ¸ˆã¿: \(model.importedFontFamilies.joined(separator: "ã€"))")
-                                .font(.custom("Hiragino Sans", size: 10))
-                                .foregroundStyle(NihoPalette.green)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                }
-
-                if model.mode == .insertion {
-                    InsertionStylePanel(model: model)
-                }
-
-                if model.mode == .insertion {
-                    Button(action: model.commitEditorText) {
-                        HStack {
-                            Text("ã“ã®æ–‡å­—ã‚’è¿½åŠ ")
-                            Spacer()
-                            Image(systemName: "arrow.right")
-                        }
-                        .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
-                        .foregroundStyle(Color.white)
-                        .padding(.horizontal, 16)
-                        .frame(height: 46)
-                        .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!model.canCommit)
-                    .opacity(model.canCommit ? 1 : 0.42)
-                }
-
-                if model.mode == .replacement {
-                    Button("é¸æŠžæ–‡å­—ã‚’è¡¨ç¤ºã‹ã‚‰å‰Šé™¤", action: model.deleteSelection)
-                        .buttonStyle(.plain)
-                        .font(.custom("Hiragino Sans", size: 13).weight(.medium))
-                        .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted.opacity(0.6))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(model.hasSelection ? NihoPalette.creamTint : NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-                        .disabled(!model.hasSelection)
-                }
-
-                if model.mode == .markup, model.selectedMarkupID != nil {
-                    if let selected = model.selectedMarkup, selected.tool == .note || selected.tool == .signature {
-                        fieldLabel(selected.tool == .note ? "ãƒ¡ãƒ¢ã®å†…å®¹" : "ç½²åã®æ–‡å­—")
-                        TextField(selected.tool == .note ? "ãƒ¡ãƒ¢ã‚’å…¥åŠ›" : "ç½²åã‚’å…¥åŠ›", text: Binding(
-                            get: { selected.tool == .note ? model.markupText : model.signatureText },
-                            set: { value in
-                                if selected.tool == .note { model.setMarkupText(value) }
-                                else { model.setSignatureText(value) }
-                            }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        Button("æ³¨é‡ˆã®æ–‡å­—ã‚’æ›´æ–°", action: model.commitSelectedMarkupText)
-                            .buttonStyle(.plain)
-                            .foregroundStyle(NihoPalette.green)
-                    }
-                    Button("é¸æŠžä¸­ã®æ³¨é‡ˆã‚’å‰Šé™¤", action: model.deleteSelectedMarkup)
-                        .buttonStyle(.plain)
-                        .foregroundStyle(NihoPalette.ink)
-                        .frame(maxWidth: .infinity, minHeight: 40)
-                        .background(NihoPalette.creamTint, in: RoundedRectangle(cornerRadius: 8))
-                }
-
-                HStack(spacing: 12) {
-                    Button("å–ã‚Šæ¶ˆã™", action: model.undoLastEdit)
-                        .disabled(!model.canUndo)
-                    Button("ã‚„ã‚Šç›´ã™", action: model.redoLastEdit)
-                        .disabled(!model.canRedo)
-                }
-                .buttonStyle(.plain)
-                .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                .foregroundStyle(NihoPalette.muted)
-            }
-            .padding(24)
-
-            Spacer()
-
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "info.circle")
-                    .foregroundStyle(accentColor)
-                Text(model.mode == .replacement
-                    ? "ç™½ã„èƒŒæ™¯ã®å¸³ç¥¨å‘ã‘MVPã§ã™ã€‚ç™½å¡—ã‚Šã¯å…ƒã®æ–‡å­—ã‚’è¦‹ãˆãªãã™ã‚‹ã ã‘ã§ã€æ›¸ãå‡ºã—ãŸPDFã®ãƒ†ã‚­ã‚¹ãƒˆæŠ½å‡ºã§ã¯å…ƒã®æ–‡å­—åˆ—ãŒæ®‹ã‚Šã¾ã™ã€‚å…ƒãƒ•ã‚¡ã‚¤ãƒ«ã¯ä¸Šæ›¸ãã›ãšã€ç·¨é›†æ¸ˆã¿PDFã‚’åˆ¥åä¿å­˜ã—ã¾ã™ã€‚"
-                    : model.mode == .insertion
-                    ? "æ–‡å­—ã¯1è¡Œã§è¿½åŠ ã•ã‚Œã€æ›¸ãå‡ºã—æ™‚ã«ãƒ™ã‚¯ã‚¿ãƒ¼åŒ–ã•ã‚Œã¾ã™ã€‚å›žè»¢ãƒ»ç¸¦æ›¸ããƒ»è¤‡æ•°è¡Œã¯æœªå¯¾å¿œã§ã™ã€‚"
-                    : model.mode == .redaction
-                    ? "å¢¨æ¶ˆã—ã¯å…¨ãƒšãƒ¼ã‚¸ã‚’é«˜è§£åƒåº¦ç”»åƒã«å¤‰æ›ã—ã¾ã™ã€‚å…ƒPDFã®æ–‡æ›¸ãƒ¡ã‚¿ãƒ‡ãƒ¼ã‚¿ã¯å¼•ãç¶™ãŽã¾ã›ã‚“ã€‚ç”Ÿæˆæ—¥æ™‚ã‚„Produceræƒ…å ±ã¯æ–°ã—ã„PDFã«ä»˜ãå ´åˆãŒã‚ã‚Šã¾ã™ã€‚"
-                    : "æ³¨é‡ˆãƒ»ç½²åã¯PDFå†…ã®ç·¨é›†å¯èƒ½ãªæ³¨é‡ˆã¨ã—ã¦ä¿å­˜ã—ã¾ã™ã€‚æ›¸ãå‡ºã—ãŸPDFã‚’åˆ¥ã®ç·¨é›†ã‚¢ãƒ—ãƒªã§é–‹ãã¨ã€è¡¨ç¤ºãŒå¤‰ã‚ã‚‹å ´åˆãŒã‚ã‚Šã¾ã™ã€‚")
-                    .font(.custom("Hiragino Sans", size: 11))
-                    .foregroundStyle(NihoPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(20)
-            .background(NihoPalette.surface)
-            .overlay(alignment: .top) { NihoDivider() }
-        }
-        .background(NihoPalette.canvas)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(NihoPalette.line).frame(width: 1)
-        }
-    }
-
-    private var modeHeading: String {
-        switch model.mode {
-        case .replacement: "æ—¢å­˜ã®æ–‡å­—ã‚’é¸æŠžã—ã¦ç·¨é›†"
-        case .insertion: "PDFä¸Šã‚’ã‚¯ãƒªãƒƒã‚¯ã—ã¦é…ç½®"
-        case .redaction: "é¸æŠžã—ãŸæ–‡å­—ã‚’å®‰å…¨ã«å¢¨æ¶ˆã—"
-        case .markup: "æ³¨é‡ˆãƒ»ç½²åã‚’è¿½åŠ "
-        }
-    }
-
-    private var modeInstructions: String {
-        switch model.mode {
-        case .replacement: "ã‚¯ãƒªãƒƒã‚¯ã§é¸æŠžã€ãƒ€ãƒ–ãƒ«ã‚¯ãƒªãƒƒã‚¯ã§ç›´æŽ¥ç·¨é›†ã€‚é¸æŠžã—ãŸæ–‡å­—ã¯ãƒ‰ãƒ©ãƒƒã‚°ã§ç§»å‹•ã§ãã¾ã™ã€‚"
-        case .insertion: "ã‚¯ãƒªãƒƒã‚¯ã—ãŸä½ç½®ã¸æ–‡å­—ã‚’è¿½åŠ ã€‚ç¢ºå®šå¾Œã¯æ–‡å­—ã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦ç§»å‹•ã§ãã¾ã™ã€‚"
-        case .redaction: "æ–‡å­—ã‚’ã‚¯ãƒªãƒƒã‚¯ã—ã¦è¿½åŠ ã™ã‚‹ã‹ã€ãƒšãƒ¼ã‚¸ã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦ç¯„å›²ã‚’æŒ‡å®šã—ã¾ã™ã€‚ç”»åƒPDFã«ã‚‚ä½¿ãˆã¾ã™ã€‚å¯¾è±¡ãŒã‚ã‚‹é–“ã¯é€šå¸¸æ›¸ãå‡ºã—ãƒ»å°åˆ·ã‚’æ­¢ã‚ã¾ã™ã€‚"
-        case .markup: "ãƒ„ãƒ¼ãƒ«ã‚’é¸ã³ã€æ–‡å­—ã‚’é¸æŠžã¾ãŸã¯ãƒšãƒ¼ã‚¸ä¸Šã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦æ³¨é‡ˆã‚’é…ç½®ã—ã¾ã™ã€‚"
-        }
-    }
-
-    @ViewBuilder
-    private var redactionControls: some View {
-        fieldLabel("é¸æŠžã—ãŸæ–‡å­—")
-        Text(model.selectedTarget?.originalText ?? "PDFä¸Šã®æ–‡å­—ã‚’ã‚¯ãƒªãƒƒã‚¯ã—ã¦ãã ã•ã„")
-            .font(.custom("Hiragino Sans", size: 13))
-            .foregroundStyle(model.hasSelection ? NihoPalette.ink : NihoPalette.muted)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-
-        Button("é¸æŠžæ–‡å­—ã‚’å¢¨æ¶ˆã—å¯¾è±¡ã«è¿½åŠ ", action: model.addSelectedRedactionRegion)
-            .disabled(!model.hasSelection)
-            .buttonStyle(.borderedProminent)
-        Text("ã¾ãŸã¯ãƒšãƒ¼ã‚¸ä¸Šã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦ç¯„å›²ã‚’æŒ‡å®šï¼ˆç”»åƒãƒ»å›³å½¢PDFã«ã‚‚å¯¾å¿œï¼‰")
-            .font(.custom("Hiragino Sans", size: 11))
-            .foregroundStyle(NihoPalette.muted)
-
-        fieldLabel("å¢¨æ¶ˆã—ãƒ—ãƒ¬ãƒ“ãƒ¥ãƒ¼ï¼ˆ\(model.redactionRegions.count)ã‹æ‰€ï¼‰")
-        if model.redactionRegions.isEmpty {
-            Text("å¯¾è±¡ã‚’è¿½åŠ ã™ã‚‹ã¨ã€ãƒšãƒ¼ã‚¸ä¸Šã«é»’ã„ãƒ—ãƒ¬ãƒ“ãƒ¥ãƒ¼ãŒè¡¨ç¤ºã•ã‚Œã¾ã™ã€‚")
-                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
-        } else {
-            ForEach(model.redactionRegions) { region in
-                HStack(alignment: .top, spacing: 8) {
-                    Text("\(region.pageIndex + 1)ãƒšãƒ¼ã‚¸ Â· \(region.text.isEmpty ? "ãƒ‰ãƒ©ãƒƒã‚°ç¯„å›²" : region.text)")
-                        .font(.custom("Hiragino Sans", size: 11))
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Button {
-                        model.removeRedactionRegion(id: region.id)
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("ã“ã®å¢¨æ¶ˆã—ç¯„å›²ã‚’å¤–ã™")
-                }
-                .padding(8)
-                .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 6))
-            }
-            Button("ã™ã¹ã¦ã®ç¯„å›²ã‚’å¤–ã™", action: model.clearRedactionRegions)
-                .buttonStyle(.plain).foregroundStyle(NihoPalette.muted)
-        }
-
-        Button(action: model.applyRedactionsFromPanel) {
-            HStack {
-                Text("å¢¨æ¶ˆã—ã‚’é©ç”¨ã—ã¦åˆ¥åä¿å­˜")
-                Spacer()
-                Image(systemName: "lock.doc")
-            }
-            .font(.custom("Hiragino Sans", size: 13).weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 14)
-            .frame(height: 44)
-            .background(Color.black, in: RoundedRectangle(cornerRadius: 8))
-        }
-        .buttonStyle(.plain)
-        .disabled(model.redactionRegions.isEmpty)
-        .opacity(model.redactionRegions.isEmpty ? 0.42 : 1)
-    }
-
-    @ViewBuilder
-    private var markupControls: some View {
-        Picker("æ³¨é‡ˆãƒ„ãƒ¼ãƒ«", selection: Binding(
-            get: { model.selectedMarkupTool },
-            set: { model.setMarkupTool($0) }
-        )) {
-            ForEach(PDFMarkupTool.allCases) { tool in
-                Text(tool.title).tag(tool)
-            }
-        }
-        .pickerStyle(.menu)
-
-        if model.selectedMarkupTool.isTextMarkup {
-            fieldLabel("æ³¨é‡ˆã‚’ä»˜ã‘ã‚‹æ–‡å­—")
-            Text(model.selectedTarget?.originalText ?? "PDFä¸Šã®æ–‡å­—ã‚’ã‚¯ãƒªãƒƒã‚¯ã—ã¦ãã ã•ã„")
-                .font(.custom("Hiragino Sans", size: 13))
-                .foregroundStyle(model.selectedTarget == nil ? NihoPalette.muted : NihoPalette.ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-            Button("é¸æŠžç¯„å›²ã«\(model.selectedMarkupTool.title)ã‚’é©ç”¨", action: model.applySelectedTextMarkup)
-                .disabled(model.selectedTarget == nil)
-                .buttonStyle(.borderedProminent)
-        } else if model.selectedMarkupTool == .note {
-            fieldLabel("ãƒ¡ãƒ¢")
-            TextField("ãƒ¡ãƒ¢ã®å†…å®¹", text: Binding(
-                get: { model.markupText }, set: { model.setMarkupText($0) }
-            ))
-            .textFieldStyle(.roundedBorder)
-            Text("PDFä¸Šã‚’ã‚¯ãƒªãƒƒã‚¯ã—ã¦é…ç½®ã—ã¾ã™ã€‚")
-                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
-        } else if model.selectedMarkupTool == .signature {
-            fieldLabel("ç½²å")
-            TextField("ç½²åã™ã‚‹åå‰", text: Binding(
-                get: { model.signatureText }, set: { model.setSignatureText($0) }
-            ))
-            .textFieldStyle(.roundedBorder)
-            Button("ã“ã®Macã«ç½²åã‚’ä¿å­˜", action: model.saveSignatureLocally)
-                .buttonStyle(.plain).foregroundStyle(NihoPalette.green)
-            Text("ã‚¯ãƒªãƒƒã‚¯ã§é…ç½®ã—ã€è§’ã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦å¤§ãã•ã‚’èª¿æ•´ã§ãã¾ã™ã€‚")
-                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
-        } else {
-            Text("PDFä¸Šã‚’ãƒ‰ãƒ©ãƒƒã‚°ã—ã¦\(model.selectedMarkupTool.title)ã‚’æãã¾ã™ã€‚é¸æŠžã—ãŸæ³¨é‡ˆã¯ç§»å‹•ã§ãã¾ã™ã€‚")
-                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
-        }
-    }
-
-    private var landing: some View {
-        VStack(spacing: 28) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 18)
-                    .fill(NihoPalette.canvas)
-                RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [8, 8]))
-                    .foregroundStyle(NihoPalette.heading.opacity(0.28))
-
-                VStack(spacing: 20) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 44, weight: .light))
-                        .foregroundStyle(NihoPalette.green)
-                    VStack(spacing: 8) {
-                        Text("PDFã‚’ä½œæ¥­å°ã¸")
-                            .font(.custom("Hiragino Sans", size: 26).weight(.semibold))
-                            .foregroundStyle(NihoPalette.heading)
-                        Text("æ—¢å­˜æ–‡å­—ã®ç½®æ›ã‚‚ã€å¥½ããªä½ç½®ã¸ã®æ–‡å­—è¿½åŠ ã‚‚ã§ãã¾ã™ã€‚")
-                            .font(.custom("Hiragino Sans", size: 13))
-                            .foregroundStyle(NihoPalette.muted)
-                    }
-                    actionButton("PDFã‚’1ã¤é¸ã¶", icon: "folder", emphasized: true) {
-                        model.openFromPanel()
-                    }
-                    actionButton("è¤‡æ•°ã®PDFã‚’çµåˆ", icon: "doc.on.doc", emphasized: false) {
-                        model.showMergeSheet()
-                    }
-                }
-            }
-            .frame(width: 560, height: 340)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(NihoPalette.surface)
-    }
-
-    private var statusBar: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(NihoPalette.green)
-                .frame(width: 6, height: 6)
-            Text(model.statusMessage)
-                .font(.custom("Hiragino Sans", size: 11))
-                .foregroundStyle(NihoPalette.muted)
-            Spacer()
-            Text("âŒ˜O é–‹ã  Â·  âŒ˜P å°åˆ·  Â·  âŒ˜S æ›¸ãå‡ºã™  Â·  âŒ˜Z å–ã‚Šæ¶ˆã™")
-                .font(.custom("Avenir Next", size: 10))
-                .foregroundStyle(NihoPalette.muted)
-        }
-        .padding(.horizontal, 18)
-        .frame(height: 32)
-        .background(NihoPalette.canvas)
-        .overlay(alignment: .top) { NihoDivider() }
-    }
-
-    private func fieldLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.custom("Hiragino Sans", size: 11).weight(.medium))
-            .foregroundStyle(NihoPalette.muted)
-    }
-
-    private var accentColor: Color {
-        NihoPalette.green
-    }
-
-    private func actionButton(
-        _ title: String,
-        icon: String,
-        emphasized: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.custom("Hiragino Sans", size: 12).weight(.semibold))
-                .padding(.horizontal, 14)
-                .frame(height: 34)
-                .foregroundStyle(emphasized ? Color.white : NihoPalette.ink)
-                .background(
-                    emphasized ? NihoPalette.green : NihoPalette.creamTint,
-                    in: RoundedRectangle(cornerRadius: 7)
-                )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct InsertionStylePanel: View {
-    @ObservedObject var model: EditorModel
-
-    private var fontChoice: Binding<InsertionFontChoice> {
-        Binding(
-            get: { model.insertionFontChoice },
-            set: { newChoice in model.setInsertionFontChoice(newChoice) }
-        )
-    }
-
-    private var fontSize: Binding<Double> {
-        Binding(
-            get: { model.insertionFontSize },
-            set: { newSize in model.setInsertionFontSize(newSize) }
-        )
-    }
-
-    private var fontColor: Binding<Color> {
-        Binding(
-            get: { Color(nsColor: model.insertionFontColor) },
-            set: { model.setInsertionFontColor(NSColor($0)) }
-        )
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                label("ãƒ•ã‚©ãƒ³ãƒˆ")
-                Spacer()
-                Picker("ãƒ•ã‚©ãƒ³ãƒˆ", selection: fontChoice) {
-                    ForEach(InsertionFontChoice.allCases.filter { $0 != .custom || !model.importedFontFamilies.isEmpty }) { choice in
-                        Text(choice.title).tag(choice)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: 210)
-            }
-
-            if model.insertionFontChoice == .custom {
-                ImportedFontPicker(model: model)
-            }
-
-            if model.hasInsertionLocation {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("æ¤œå‡º: \(model.detectedFontName ?? "ãªã—")")
-                    Text("ä½¿ç”¨: \(model.effectiveInsertionFontName)")
-                    if let reason = model.insertionFontPreviewReason {
-                        Text(reason).foregroundStyle(.orange)
-                    }
-                }
-                .font(.custom("Avenir Next", size: 10))
-                .foregroundStyle(NihoPalette.muted)
-            }
-
-            HStack(spacing: 12) {
-                label("ã‚µã‚¤ã‚º")
-                Stepper(value: fontSize, in: 6.0...72.0, step: 1.0) {
-                    Text("\(Int(model.insertionFontSize)) pt")
-                        .font(.custom("Avenir Next", size: 12).weight(.medium))
-                        .monospacedDigit()
-                }
-                Spacer()
-                ColorPicker("è‰²", selection: fontColor, supportsOpacity: true)
-                    .font(.custom("Hiragino Sans", size: 11))
-            }
-        }
-        .padding(12)
-        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(NihoPalette.line, lineWidth: 1)
-        }
-    }
-
-    private func label(_ text: String) -> some View {
-        Text(text)
-            .font(.custom("Hiragino Sans", size: 11).weight(.medium))
-            .foregroundStyle(NihoPalette.muted)
-    }
-}
-
-private struct ReplacementStylePanel: View {
-    @ObservedObject var model: EditorModel
-
-    private var fontChoice: Binding<InsertionFontChoice> {
-        Binding(get: { model.replacementFontChoice }, set: { model.setReplacementFontChoice($0) })
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("é¸æŠžæ–‡å­—ã®ãƒ•ã‚©ãƒ³ãƒˆ")
-                .font(.custom("Hiragino Sans", size: 11).weight(.medium))
-                .foregroundStyle(NihoPalette.muted)
-            if let target = model.selectedTarget {
-                let detail = model.selectedFontDescription
-                Text("PDFæŒ‡å®š: \(detail?.pdfName ?? "å–å¾—ä¸å¯")")
-                Text("å½¢å¼: \(detail?.subtype ?? "ä¸æ˜Ž")\(detail?.descendantSubtype.map { "/" + $0 } ?? "") / \(detail?.encoding ?? "æ¨™æº–ã¾ãŸã¯è¾žæ›¸æŒ‡å®š")\(detail?.isSubset == true ? " / ã‚µãƒ–ã‚»ãƒƒãƒˆ" : "")")
-                Text("\(Int(target.fontSize.rounded())) pt  Â·  \(detail?.hasEmbeddedProgram == true ? "åŸ‹ã‚è¾¼ã¿ã‚ã‚Š" : "åŸ‹ã‚è¾¼ã¿ãªã—")  Â·  \(detail?.installedFamily.map { "ãƒ­ãƒ¼ã‚«ãƒ«: " + $0 } ?? "åŒåãƒ•ã‚©ãƒ³ãƒˆæœªå°Žå…¥")")
-                HStack(spacing: 5) {
-                    Text("è‰²: \(colorCode(target.fontColor))")
-                    Circle().fill(Color(nsColor: target.fontColor)).frame(width: 12, height: 12)
-                }
-            } else {
-                Text("æ–‡å­—ã‚’é¸ã¶ã¨PDFå†…ã®æ›¸ä½“æƒ…å ±ã‚’è¡¨ç¤ºã—ã¾ã™ã€‚")
-            }
-
-            HStack {
-                Text("ç½®æ›ã«ä½¿ã†ãƒ•ã‚©ãƒ³ãƒˆ")
-                Spacer()
-                Picker("ç½®æ›ã«ä½¿ã†ãƒ•ã‚©ãƒ³ãƒˆ", selection: fontChoice) {
-                    ForEach(InsertionFontChoice.allCases.filter { $0 != .custom || !model.importedFontFamilies.isEmpty }) { choice in
-                        Text(choice.title).tag(choice)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: 190)
-            }
-            if model.replacementFontChoice == .custom {
-                ImportedFontPicker(model: model)
-            }
-            if let preview = model.replacementFontPreview {
-                Text("ä½¿ç”¨äºˆå®š: \(preview.familyName)\(preview.isExact ? "ï¼ˆPDFåŸ‹ã‚è¾¼ã¿ï¼‰" : "")")
-                if let reason = preview.reason { Text(reason).foregroundStyle(.orange) }
-            }
-        }
-        .font(.custom("Hiragino Sans", size: 10))
-        .foregroundStyle(NihoPalette.ink)
-        .padding(12)
-        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8).stroke(NihoPalette.line, lineWidth: 1)
-        }
-    }
-
-    private func colorCode(_ color: NSColor) -> String {
-        guard let rgb = color.usingColorSpace(.deviceRGB) else { return "ä¸æ˜Ž" }
-        return String(format: "#%02X%02X%02X",
-                      Int((rgb.redComponent * 255).rounded()),
-                      Int((rgb.greenComponent * 255).rounded()),
-                      Int((rgb.blueComponent * 255).rounded()))
-    }
-}
-
-private struct ImportedFontPicker: View {
-    @ObservedObject var model: EditorModel
-
-    var body: some View {
-        Picker("èª­ã¿è¾¼ã¿æ¸ˆã¿", selection: Binding(
-            get: { model.customFontName ?? model.importedFontFamilies.first ?? "" },
-            set: { model.setCustomFontName($0) }
-        )) {
-            ForEach(model.importedFontFamilies, id: \.self) { family in
-                Text(family).tag(family)
-            }
-        }
-        .pickerStyle(.menu)
-    }
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×}uí:-jZ.¶›­–)Þ³V–×÷'B7v–gET §7G'V7BVF—F÷%67&VVã¢f–Wr°¢Vçf—&öæÖVçDö&¦V7B&—fFRf"ÖöFVÃ¢VF—F÷$ÖöFVÀ¢Vçf—&öæÖVçDö&¦V7B&—fFRf"WFFW#¢WFFT6öçG&öÆÆW ¢7FFTö&¦V7B&—fFRf"¦ööÕ7FFRÒDe¦ööÕ7FFR‚¢7FFR&—fFRf"¦ööÔ–çWBÒ# ¢fö7W57FFR&—fFRf"¦ööÔ–çWD—4fö7W6VC¢&ööÀ ¢f"&öG“¢6öÖRf–Wr°¢e7F6²‡76–æs¢’°¢F÷& ¢æ–†ôF—f–FW"‚ ¢–bWFFW"çWFFTæ÷F–6Ræ—5f—6–&ÆRbbWFFW"æ—5&W7F'EVæF–ær°¢WFFTæ÷F–6P¢æ–†ôF—f–FW"‚¢Ð ¢–bÆWBFö7VÖVçBÒÖöFVÂæFö7VÖVçB°¢…7F6²‡76–æs¢’°¢e7F6²‡76–æs¢’°¢…7F6²°¢76W"‚¢¦ööÕFööÆ& ¢76W"‚¢Ð¢æg&ÖR††V–v‡C¢CB¢æ&6¶w&÷VæB„æ–†õÆWGFRçFe7FvR¢æ–†ôF—f–FW"‚ ¢Dd6çf2€¢Fö7VÖVçC¢Fö7VÖVçBÀ¢&Wf—6–öã¢ÖöFVÂç&Wf—6–öâÀ¢ÖöFS¢ÖöFVÂæÖöFRÀ¢Ö&·WFööÃ¢ÖöFVÂç6VÆV7FVDÖ&·WFööÂÀ¢6VÆV7FVEF&vWC¢ÖöFVÂç6VÆV7FVEF&vWBÀ¢&VF7F–öå&Vv–öç3¢ÖöFVÂç&VF7F–öå&Vv–öç2À¢6VÆV7FVDÖ&·W”C¢ÖöFVÂç6VÆV7FVDÖ&·W”BÀ¢†–v†Æ–v‡FVE6V&6…6VÆV7F–öç3¢ÖöFVÂæ†–v†Æ–v‡FVE6V&6…6VÆV7F–öç2À¢fö7W6VE6V&6…6VÆV7F–öã¢ÖöFVÂæfö7W6VE6V&6…6VÆV7F–öâÀ¢6V&6„†–v†Æ–v‡E&Wf—6–öã¢ÖöFVÂç6V&6„†–v†Æ–v‡E&Wf—6–öâÀ¢6V&6„æf–vF–öå&Wf—6–öã¢ÖöFVÂç6V&6„æf–vF–öå&Wf—6–öâÀ¢—4–æÆ–æTVF—F–æs¢ÖöFVÂæ—4–æÆ–æTVF—F–ærÀ¢¦ööÕ7FFS¢¦ööÕ7FFRÀ¢öå6VÆV7F–öã¢²F&vWB–âÖöFVÂç6VÆV7B‡F&vWB’ÒÀ¢öä–ç6W'F–öã¢²vT–æFW‚Âö–çB–âÖöFVÂæ&Vv–ä–ç6W'F–öâ‡vT–æFWƒ¢vT–æFW‚Âö–çC¢ö–çB’ÒÀ¢öäÖ÷fT–ç6W'F–öã¢²Ö&¶W"ÂvT–æFW‚Â&÷VæG2–à¢ÖöFVÂæÖ÷fT–ç6W'F–öâ†Ö&¶W#¢Ö&¶W"ÂvT–æFWƒ¢vT–æFW‚Â&÷VæG3¢&÷VæG2¢ÒÀ¢öäÖ÷fU6VÆV7F–öã¢²FVÇF–âÖöFVÂæÖ÷fU6VÆV7F–öâ†'“¢FVÇF’ÒÀ¢öäÖ÷fTW†—7F–ætVF—C¢²–BÂFVÇF–âÖöFVÂæÖ÷fTW†—7F–ætVF—B†–C¢–BÂ'“¢FVÇF’ÒÀ¢öäÖ&·W7&VFS¢²vT–æFW‚Â&÷VæG2Âö–çG2–à¢ÖöFVÂæFDÖ&·W‡vT–æFWƒ¢vT–æFW‚Â&÷VæG3¢&÷VæG2Âö–çG3¢ö–çG2¢ÒÀ¢öå&VF7F–öå&Vv–öã¢²vT–æFW‚Â&÷VæG2–à¢ÖöFVÂæFE&VF7F–öå&Vv–öâ‡vT–æFWƒ¢vT–æFW‚Â&÷VæG3¢&÷VæG2¢ÒÀ¢öå6VÆV7DÖ&·W¢²–B–âÖöFVÂç6VÆV7DÖ&·W†–B’ÒÀ¢öäÖ÷fTÖ&·W¢²–BÂ&÷VæG2–âÖöFVÂæÖ÷fTÖ&·W†–C¢–BÂFó¢&÷VæG2’ÒÀ¢öä&Vv–ä–æÆ–æTVF—F–æs¢²ÖöFVÂæ&Vv–ä–æÆ–æTVF—F–ær‚’ÒÀ¢öä6†ævT–æÆ–æUFW‡C¢²fÇVR–âÖöFVÂçWFFTVF—F÷%FW‡B‡fÇVR’ÒÀ¢öä6öÖÖ—D–æÆ–æTVF—F–æs¢²ÖöFVÂæ6öÖÖ—DVF—F÷%FW‡B‚’ÒÀ¢öä6æ6VÄ–æÆ–æTVF—F–æs¢²ÖöFVÂæ6æ6VÄ–æÆ–æTVF—F–ær‚’Ð¢¢æ&6¶w&÷VæB„æ–†õÆWGFRçFe7FvR¢Ð ¢–ç7V7F÷ ¢æg&ÖR‡v–GFƒ¢3s¢Ð¢ÒVÇ6R°¢ÆæF–æp¢Ð ¢7FGW4& ¢Ð¢æ&6¶w&÷VæB„æ–†õÆWGFRæ6çf2¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ–æ²¢çF–çB„æ–†õÆWGFRæw&VVâ¢ç&VfW'&VD6öÆ÷%66†VÖR‚æÆ–v‡B¢æöä6†ævR†öc¢¦ööÕ7FFRç66ÆR’²òÂæWu66ÆR–à¢wV&B¦ööÔ–çWD—4fö7W6VBVÇ6R²&WGW&âÐ¢¦ööÔ–çWBÒ7G&–ær„–çB‚†æWu66ÆR¢’ç&÷VæFVB‚’’¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–ætÖW&vU6†VWB’°¢DdÖW&vU6†VWB‚¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–æuvT÷&væ—¦W%6†VWB’°¢–bÆWBFö7VÖVçBÒÖöFVÂæFö7VÖVçBÂÆWB6÷W&6UU$ÂÒÖöFVÂç6÷W&6UU$Â°¢DevT÷&væ—¦W%6†VWB†Fö7VÖVçC¢Fö7VÖVçBÂ6÷W&6UU$Ã¢6÷W&6UU$Â¢Ð¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–æu&W6—¦U6†VWB’°¢DevU&W6—¦U6†VWB‚¢æVçf—&öæÖVçDö&¦V7B†ÖöFVÂ¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–æt6ö×&W76–öå6†VWB’°¢Dd6ö×&W76–öå6†VWB‚¢æVçf—&öæÖVçDö&¦V7B†ÖöFVÂ¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–æu6V&6…6†VWBÂöäF—6Ö—73¢ÖöFVÂæ6Æ÷6U6V&6…6†VWB’°¢De6V&6…6†VWB‚¢æVçf—&öæÖVçDö&¦V7B†ÖöFVÂ¢Ð¢ç6†VWB†—5&W6VçFVC¢FÖöFVÂæ—56†÷v–ætô5%6†VWB’°¢Ddô5%6†VWB‚¢æVçf—&öæÖVçDö&¦V7B†ÖöFVÂ¢Ð¢Ð ¢&—fFRf"WFFTæ÷F–6S¢6öÖRf–Wr°¢…7F6²‡76–æs¢"’°¢–ÖvR‡7—7FVÔæÖS¢&'&÷ræF÷vâæ6—&6ÆRæf–ÆÂ"¢æföçB‚ç7—7FVÒ‡6—¦S¢‚’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæw&VVâ ¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢"’°¢FW‡B‚.ik8~8Nx˜‚Â‡WFFW"çWFFTæ÷F–6Ræf–Æ&ÆUfW'6–öâóò""’8Î8.8(®8î8’"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢2’çvV–v‡B‚ç6VÖ–&öÆB’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ†VF–ær¢FW‡B‚.i»Nik8îz+®Š¨Þ[èÎ8DbVF—F÷.8).XhÞ‹[~X¹^8~8nXøÞiŠ8~8î8ž8""¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢Ð ¢76W"†Ö–äÆVæwFƒ¢‚ ¢'WGFöâ‚.i»Nik8~8nXhÞ‹[~X¹R"’°¢WFFW"æ6†V6´f÷%WFFW2‚¢Ð¢æ'WGFöå7G–ÆR‚æ&÷&FW&VE&öÖ–æVçB¢çF–çB„æ–†õÆWGFRæw&VVâ ¢'WGFöâ°¢WFFW"æF—6Ö—75WFFTæ÷F–6R‚¢ÒÆ&VÃ¢°¢–ÖvR‡7—7FVÔæÖS¢'†Ö&²"¢æföçB‚ç7—7FVÒ‡6—¦S¢ÂvV–v‡C¢ç6VÖ–&öÆB’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢æg&ÖR‡v–GFƒ¢#‚Â†V–v‡C¢#‚¢æ6öçFVçE6†R…&V7FævÆR‚’¢Ð¢æ'WGFöå7G–ÆR‚çÆ–â¢æ66W76–&–Æ—G”Æ&VÂ‚.™hž8Ž8(²"¢Ð¢çFF–ær‚æ†÷&—¦öçFÂÂ‚¢çFF–ær‚çfW'F–6ÂÂ‚¢æg&ÖR†Ö…v–GFƒ¢æ–æf–æ—G’ÂÆ–væÖVçC¢æÆVF–ær¢æ&6¶w&÷VæB„æ–†õÆWGFRç7W&f6R¢Ð ¢&—fFRf"F÷&#¢6öÖRf–Wr°¢…7F6²‡76–æs¢b’°¢¥7F6²°¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚¢æf–ÆÂ„æ–†õÆWGFRæw&VVâ¢FW‡B‚%Bò"¢æföçB‚æ7W7FöÒ‚$fVæ—"æW‡B"Â6—¦S¢b’çvV–v‡B‚æ†Vg’’¢æf÷&Vw&÷VæE7G–ÆR„6öÆ÷"çv†—FR¢Ð¢æg&ÖR‡v–GFƒ¢3BÂ†V–v‡C¢3B ¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢’°¢FW‡B‚%DbTD•Dõ""¢æföçB‚æ7W7FöÒ‚$fVæ—"æW‡B"Â6—¦S¢2’çvV–v‡B‚æ&öÆB’¢çG&6¶–ærƒã‚¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ†VF–ær¢FW‡B†ÖöFVÂç6÷W&6UU$ÃòæÆ7EF„6ö×öæVçBóò%Dn8).˜Žh©î8~8n8þ88^8B"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢æÆ–æTÆ–Ö—Bƒ¢Ð ¢76W"‚ ¢FW‡B†ÖöFVÂçvT6÷VçEFW‡B¢æföçB‚æ7W7FöÒ‚$fVæ—"æW‡B"Â6—¦S¢"’çvV–v‡B‚æÖVF—VÒ’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB ¢'WGFöâ†7F–öã¢ÖöFVÂç6†÷u6V&6…6†VWB’°¢–ÖvR‡7—7FVÔæÖS¢&Övæ–g––ævvÆ72"¢æg&ÖR‡v–GFƒ¢3"Â†V–v‡C¢3B¢æ6öçFVçE6†R…&V7FævÆR‚’¢Ð¢æ'WGFöå7G–ÆR‚çÆ–â¢æ†VÇ‚%DnXh^8).jIÎ{J.ûÈŽ(É„nûÈ’"¢æ66W76–&–Æ—G”Æ&VÂ‚%DnXh^8).jIÎ{J""¢æF—6&ÆVB†ÖöFVÂæFö7VÖVçBÓÒæ–Â ¢7F–öä'WGFöâ‚$ô5""Â–6öã¢'FW‡Bçf–Wvf–æFW""ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂæ—56†÷v–ætô5%6†VWBÒG'VP¢Ð¢æF—6&ÆVB†ÖöFVÂæFö7VÖVçBÓÒæ–Â ¢7F–öä'WGFöâ‚%Dn8).™h¾8ò"Â–6öã¢&föÆFW""ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂæ÷Väg&öÕæVÂ‚¢Ð ¢7F–öä'WGFöâ‚.{YY‚"Â–6öã¢&Fö2æöâæFö2"ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂç6†÷tÖW&vU6†VWB‚¢Ð ¢7F–öä'WGFöâ‚.89®8;Î8+Ži[Nyb"Â–6öã¢'7V&Ræw&–Bã'ƒ""ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂç6†÷uvT÷&væ—¦W%6†VWB‚¢Ð¢æF—6&ÆVB†ÖöFVÂæFö7VÖVçBÓÒæ–Â ¢7F–öä'WGFöâ‚.89®8;Î8+Ž8+^8*N8+¢"Â–6öã¢&'&÷rçWæÆVgBææBæ'&÷ræF÷vâç&–v‡B"ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂç6†÷u&W6—¦U6†VWB‚¢Ð¢æF—6&ÆVB†ÖöFVÂæFö7VÖVçBÓÒæ–Â ¢7F–öä'WGFöâ‚%Dn8).YÊ~{Šâ"Â–6öã¢&'&÷ræF÷vâæFö2"ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂç6†÷t6ö×&W76–öå6†VWB‚¢Ð¢æF—6&ÆVB†ÖöFVÂæFö7VÖVçBÓÒæ–Â ¢7F–öä'WGFöâ‚.XÛX‹r"Â–6öã¢'&–çFW""ÂV×†6—¦VC¢fÇ6R’°¢ÖöFVÂç&–çDg&öÕæVÂ‚¢Ð¢æF—6&ÆVB‚ÖöFVÂæ6å&–çB ¢7F–öä'WGFöâ‚.i»Ž8ÞX{®8’"Â–6öã¢'7V&RææBæ'&÷rçW"ÂV×†6—¦VC¢G'VR’°¢ÖöFVÂæW‡÷'Dg&öÕæVÂ‚¢Ð¢æF—6&ÆVB‚ÖöFVÂæ6äW‡÷'B¢Ð¢çFF–ær‚æ†÷&—¦öçFÂÂ#¢æg&ÖR††V–v‡C¢c"¢æ&6¶w&÷VæB„æ–†õÆWGFRæ6çf2¢Ð ¢&—fFRf"¦ööÕFööÆ&#¢6öÖRf–Wr°¢…7F6²‡76–æs¢‚’°¢¦ööÔ'WGFöâ‚&Ö–çW2æÖvæ–g––ævvÆ72"Â†VÇ¢.{Šî[ò"’²¦ööÕ7FFRç¦ööÔ÷WB‚’Ð¢FW‡Df–VÆB‚.XÞxèr"ÂFW‡C¢G¦ööÔ–çWB¢çFW‡Df–VÆE7G–ÆR‚ç&÷VæFVD&÷&FW"¢æg&ÖR‡v–GFƒ¢C‚¢æ×VÇF–Æ–æUFW‡DÆ–væÖVçB‚çG&–Æ–ær¢æfö7W6VB‚G¦ööÔ–çWD—4fö7W6VB¢æöå7V&Ö—B°¢¦ööÕ7FFRç6WEW&6VçB„F÷V&ÆR‡¦ööÔ–çWB’óòF÷V&ÆR‡¦ööÕ7FFRç66ÆR¢’¢¦ööÔ–çWD—4fö7W6VBÒfÇ6P¢Ð¢FW‡B‚"R"¢æföçB‚æ7W7FöÒ‚$fVæ—"æW‡B"Â6—¦S¢’çvV–v‡B‚æÖVF—VÒ’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢¦ööÔ'WGFöâ‚'ÇW2æÖvæ–g––ævvÆ72"Â†VÇ¢.hºZJr"’²¦ööÕ7FFRç¦ööÔ–â‚’Ð ¢ÖVçR°¢'WGFöâ‚.89®8;Î8+ŽXZŽKÙ>8¾YŽ8(þ8¾8(²"’²¦ööÕ7FFRæf—EvR‚’Ð¢'WGFöâ‚.89®8;Î8+Ž[˜^8¾YŽ8(þ8¾8(²"’²¦ööÕ7FFRæf—Ev–GF‚‚’Ð¢'WGFöâ‚.ZéþZûŽûÈƒ^ûÈ’"’²¦ööÕ7FFRæ7GVÅ6—¦R‚’Ð¢ÒÆ&VÃ¢°¢–ÖvR‡7—7FVÔæÖS¢&'&÷rçWæÆVgBææBæ'&÷ræF÷vâç&–v‡B"¢æg&ÖR‡v–GFƒ¢3Â†V–v‡C¢#‚¢Ð¢æÖVçU7G–ÆR‚æ&÷&FW&ÆW74'WGFöâ¢æ†VÇ‚.89®8;Î8+Ž8îŠŽzK®XÞxèr" ¢æ–†ôF—f–FW"‚¢æg&ÖR††V–v‡C¢# ¢'WGFöâ°¢¦ööÕ7FFRçFövvÆTÖvæ–f–W"‚¢ÒÆ&VÃ¢°¢–ÖvR‡7—7FVÔæÖS¢¦ööÕ7FFRæÖvæ–f–W$—47F—fRò&Övæ–g––ævvÆ72æ6—&6ÆRæf–ÆÂ"¢&Övæ–g––ævvÆ72æ6—&6ÆR"¢æg&ÖR‡v–GFƒ¢3Â†V–v‡C¢#‚¢Ð¢æ'WGFöå7G–ÆR‚çÆ–â¢æf÷&Vw&÷VæE7G–ÆR‡¦ööÕ7FFRæÖvæ–f–W$—47F—fRòæ–†õÆWGFRæw&VVâ¢æ–†õÆWGFRæ–æ²¢æ†VÇ‡¦ööÕ7FFRæÖvæ–f–W$—47F—fRò.‰š¾yËÎ˜ú8).{X.K¨nûÈ„W6>ûÈ’"¢.89Þ8*N8;>8+þ8;ÎK¹Ž‹ù8).hºZJr"¢æ66W76–&–Æ—G”Æ&VÂ‡¦ööÕ7FFRæÖvæ–f–W$—47F—fRò.‰š¾yËÎ˜ú8).{X.K¨b"¢.‰š¾yËÎ˜ú"¢Ð¢çFF–ær‚æ†÷&—¦öçFÂÂ¢çFF–ær‚çfW'F–6ÂÂb¢æ&6¶w&÷VæB‚ç&VwVÆ$ÖFW&–ÂÂ–ã¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚’¢æ÷fW&Æ’°¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚’ç7G&ö¶R„æ–†õÆWGFRæÆ–æRÂÆ–æUv–GFƒ¢¢Ð¢çFF–ær‚çF÷Â¢ç¤–æFW‚ƒ¢Ð ¢&—fFRgVæ2¦ööÔ'WGFöâ…ò–6öã¢7G&–ærÂ†VÇ¢7G&–ærÂ7F–öã¢W66–ær‚’Óâfö–B’Óâ6öÖRf–Wr°¢'WGFöâ†7F–öã¢7F–öâ’°¢–ÖvR‡7—7FVÔæÖS¢–6öâ¢æg&ÖR‡v–GFƒ¢3Â†V–v‡C¢#‚¢Ð¢æ'WGFöå7G–ÆR‚çÆ–â¢æ†VÇ††VÇ¢æ66W76–&–Æ—G”Æ&VÂ††VÇ¢Ð ¢&—fFRf"–ç7V7F÷#¢6öÖRf–Wr°¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢’°¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢‚’°¢FW‡B‚%DU…BD4‚"¢æföçB‚æ7W7FöÒ‚$fVæ—"æW‡B"Â6—¦S¢"’çvV–v‡B‚æ&öÆB’¢çG&6¶–ærƒãr¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæw&VVâ¢–6¶W"‚.{zŽ™¸nikžk9R"Â6VÆV7F–öã¢&–æF–ær€¢vWC¢²ÖöFVÂæÖöFRÒÀ¢6WC¢²æWtÖöFR–âÖöFVÂç6WDÖöFR†æWtÖöFR’Ð¢’’°¢f÷$V6‚„VF—F÷$ÖöFRæÆÄ66W2’²ÖöFR–à¢FW‡B†ÖöFRçF—FÆR’çFr†ÖöFR¢Ð¢Ð¢ç–6¶W%7G–ÆR‚ç6VvÖVçFVB¢æÆ&VÇ4†–FFVâ‚¢çFF–ær‚çfW'F–6ÂÂ‚ ¢FW‡B†ÖöFT†VF–ær¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢#’çvV–v‡B‚ç6VÖ–&öÆB’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ†VF–ær¢FW‡B†ÖöFT–ç7G'V7F–öç2¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢"’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢æf—†VE6—¦R††÷&—¦öçFÃ¢fÇ6RÂfW'F–6Ã¢G'VR¢Ð¢çFF–ærƒ#B ¢æ–†ôF—f–FW"‚ ¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢‚’°¢–bÖöFVÂæÖöFRÓÒç&WÆ6VÖVçB°¢f–VÆDÆ&VÂ‚.˜Žh©î8~8þih~ZÙr"¢FW‡B†ÖöFVÂç6VÆV7FVEF&vWCòæ÷&–v–æÅFW‡Bóò.8î8˜Žh©î8^8(Î8n8N8î8¾8)2"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢R’çvV–v‡B‚æÖVF—VÒ’¢æf÷&Vw&÷VæE7G–ÆR†ÖöFVÂæ†56VÆV7F–öâòæ–†õÆWGFRæ–æ²¢æ–†õÆWGFRæ×WFVB¢æg&ÖR†Ö…v–GFƒ¢æ–æf–æ—G’ÂÆ–væÖVçC¢æÆVF–ær¢çFF–ærƒB¢æ&6¶w&÷VæB„æ–†õÆWGFRç7W&f6RÂ–ã¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚’¢æ÷fW&Æ’°¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚¢ç7G&ö¶R„æ–†õÆWGFRæÆ–æRÂÆ–æUv–GFƒ¢¢Ð¢ÒVÇ6R–bÖöFVÂæÖöFRÓÒæ–ç6W'F–öâ°¢…7F6²‡76–æs¢’’°¢–ÖvR‡7—7FVÔæÖS¢ÖöFVÂæ†4–ç6W'F–öäÆö6F–öâò&Ö–âææBæVÆÆ—6R"¢&7W'6÷&'&÷ræ6Æ–6²"¢æf÷&Vw&÷VæE7G–ÆR†66VçD6öÆ÷"¢FW‡B†ÖöFVÂæ†4–ç6W'F–öäÆö6F–öâò.XZ^X©¾KØÞ{Úî8).˜XÞ{ÚîkˆŽ8ò"¢%DnKˆ®8î‹ûÞXªKØÞ{Úî8).8*þ8:®88>8*ò"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢"’çvV–v‡B‚æÖVF—VÒ’¢æf÷&Vw&÷VæE7G–ÆR†ÖöFVÂæ†4–ç6W'F–öäÆö6F–öâòæ–†õÆWGFRæ–æ²¢æ–†õÆWGFRæ×WFVB¢Ð¢æg&ÖR†Ö…v–GFƒ¢æ–æf–æ—G’ÂÆ–væÖVçC¢æÆVF–ær¢çFF–ærƒ"¢æ&6¶w&÷VæB„æ–†õÆWGFRç7W&f6RÂ–ã¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚’¢Ð ¢–bÖöFVÂæÖöFRÓÒç&VF7F–öâ°¢&VF7F–öä6öçG&öÇ0¢Ð ¢–bÖöFVÂæÖöFRÓÒæ–ç6W'F–öâ°¢f–VÆDÆ&VÂ‚.‹ûÞXª8ž8(¾ih~ZÙr"¢&WÆ6VÖVçEFW‡Df–VÆB€¢FW‡C¢&–æF–ær€¢vWC¢²ÖöFVÂç&WÆ6VÖVçEFW‡BÒÀ¢6WC¢²æWuFW‡B–âÖöFVÂçWFFTVF—F÷%FW‡B†æWuFW‡B’Ð¢’À¢—4Væ&ÆVC¢ÖöFVÂæ6äVF—EFW‡BÀ¢fö7W5&WVW7C¢ÖöFVÂç&WÆ6VÖVçDfö7W5&WVW7BÀ¢öå7V&Ö—C¢²ÖöFVÂæ6öÖÖ—DVF—F÷%FW‡B‚’Ð¢¢æg&ÖR†Ö–ä†V–v‡C¢#¢çFF–ærƒB¢æ&6¶w&÷VæB„æ–†õÆWGFRæ6çf2Â–ã¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚’¢æ÷fW&Æ’°¢&÷VæFVE&V7FævÆR†6÷&æW%&F—W3¢‚¢ç7G&ö¶R†ÖöFVÂæ6äVF—EFW‡Bò66VçD6öÆ÷"æ÷6—G’ƒãr’¢æ–†õÆWGFRæÆ–æRÂÆ–æUv–GFƒ¢¢Ð¢Ð ¢–bÖöFVÂæÖöFRÓÒæÖ&·W°¢Ö&·W6öçG&öÇ0¢Ð ¢–bÖöFVÂæÖöFRÓÒç&WÆ6VÖVçB°¢&WÆ6VÖVçE7G–ÆUæVÂ†ÖöFVÃ¢ÖöFVÂ¢e7F6²†Æ–væÖVçC¢æÆVF–ærÂ76–æs¢R’°¢'WGFöâ†7F–öã¢ÖöFVÂæ–×÷'DföçDg&öÕæVÂ’°¢Æ&VÂ‚.89^8*ž8;>88Ž89^8*8*N8:¾8).ŠªÞ8þ‹ëÎ8("Â7—7FVÔ–ÖvS¢'FW‡Ff÷&ÖB"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢"’çvV–v‡B‚æÖVF—VÒ’¢Ð¢æ'WGFöå7G–ÆR‚çÆ–â¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæw&VVâ¢FW‡B‚.Kˆˆ{N8ž8(¾89^8*ž8;>88Ž8þ{Úîhù¾8¾KÛþ8(þ8(Î8î8ž8.ŠªÞ8þ‹ëÎ8)>889^8*ž8;>88Ž8þ8*.89~8:®{X.K¨n8î8~iÈžX«ž8~8ž8""¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæ×WFVB¢æf—†VE6—¦R††÷&—¦öçFÃ¢fÇ6RÂfW'F–6Ã¢G'VR¢–bÖöFVÂæ–×÷'FVDföçDfÖ–Æ–W2æ—4V×G’°¢FW‡B‚.ŠªÞ8þ‹ëÎ8þkˆŽ8ó¢Â†ÖöFVÂæ–×÷'FVDföçDfÖ–Æ–W2æ¦ö–æVB‡6W&F÷#¢.8"’’"¢æföçB‚æ7W7FöÒ‚$†—&v–æò6ç2"Â6—¦S¢’¢æf÷&Vw&÷VæE7G–ÆR„æ–†õÆWGFRæw&VVâ¢æÆ–æTÆ–Ö—Bƒ"¢æf—†VE6—¦R††÷&—¦öçFÃ¢fÇ6RÂfW'F–6Ã¢G'VR¢Ð¢Ð¢Ð ¢–bÖöFVÂæÖöFRÓÒæ–ç6W'F–öâ°¢–ç6W'F–öå7G–ÆUæVÂ†ÖöFVÃ¢ÖöFVÂ¢Ð ¢–bÖöFVÂæÖöFRÓÒæ–ç6W'F–öâ°¢'WGFöâ†7F–öã¢ÖöFVÂæ6öÖÖ—DVF—F÷%FW‡B’°¢u×»h‘éì¶»§q«^t!MÑ…¬¡…±¥¹µ•¹Ðè€¹Ñ½À°ÍÁ…¥¹œè€ÄÀ¤ì(€€€€€€€€€€€€€€€%µ…”¡ÍåÍÑ•µ9…µ”è€‰¥¹™¼¹¥É±”ˆ¤(€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡…•¹Ñ½±½È¤(€€€€€€€€€€€€€€€Q•áÐ¡µ½‘•°¹µ½‘”€ôô€¹É•Á±…•µ•¹Ð(€€€€€€€€€€€€€€€€€€€€ü€‹žf÷Ž¢3šf¿Ž»–âÏž–£–BGŽE5YCŽŸŽgŽžf÷–†_Ž
++Ž¿–Ž»šZ–¶_Ž
+K¢š/Ž#Ž«Ž?ŽgŽ
+/ŽƒŽGŽŸŽšnãŽ7–ëŽ_Ž}AŽ»ŽŽ
+·Ž
+çŽ#š*÷–ëŽŸŽ¿–Ž»šZ–¶_–"_Ž3šº/Ž
++ŽûŽgŽ–ŽWŽ
+‡Ž
+“Ž¯Ž¿’â+šnãŽ7ŽoŽkŽžÞ£¦nšâ#ŽýAŽ
+K–"—–B7’þw–¶cŽ_ŽûŽgŽˆ(€€€€€€€€€€€€€€€€€€€€èµ½‘•°¹µ½‘”€ôô€¹¥¹Í•ÉÑ¥½¸(€€€€€€€€€€€€€€€€€€€€ü€‹šZ–¶_Ž¼Ç¢†3ŽŸ¢þ÷–*ƒŽWŽ
+3ŽšnãŽ7–ëŽ_šfŽ¯ŽgŽ
+¿Ž
+ÿŽó–2[ŽWŽ
+3ŽûŽgŽ–n{¢î‹Žïžâ›šnãŽ7Žï¢’šVÃ¢†3Ž¿šr«–¾û–þsŽŸŽgŽˆ(€€€€€€€€€€€€€€€€€€€€èµ½‘•°¹µ½‘”€ôô€¹É•‘…Ñ¥½¸(€€€€€€€€€€€€€€€€€€€€ü€‹–Š£šÚ#Ž_Ž¿–£ŽkŽóŽ
+ãŽ
+K¦®c¢ž–?–ê›žRï–?Ž¯–’'š>oŽ_ŽûŽgŽ–AŽ»šZšnãŽ‡Ž
+ÿŽŽóŽ
+ÿŽ¿–òWŽ7žÚgŽ;ŽûŽoŽ
+OŽžRš"Cš^—šfŽ
+AÉ½‘Õ•Ëš–‚ÇŽ¿šZÃŽ_ŽAŽ¯’îcŽ?–‚Ó–B#Ž3ŽŽ
++ŽûŽgŽˆ(€€€€€€€€€€€€€€€€€€€€è€‹šÎ£¦#ŽïžöË–B7Ž½A–Ž»žÞ£¦n–>¿¢÷Ž«šÎ£¦#Ž£Ž_Ž›’þw–¶cŽ_ŽûŽgŽšnãŽ7–ëŽ_Ž}AŽ
+K–"—Ž»žÞ£¦nŽ
+‹Ž_Ž«ŽŸ¦Z/Ž?Ž£Ž¢†£ž’ëŽ3–’'Ž
+?Ž
+/–‚Ó–B#Ž3ŽŽ
++ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤(€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€€€€€€€€€€¹™¥á•‘M¥é”¡¡½É¥é½¹Ñ…°è™…±Í”°Ù•ÉÑ¥…°èÑÉÕ”¤(€€€€€€€€€€€ô(€€€€€€€€€€€€¹Á…‘‘¥¹œ ÈÀ¤(€€€€€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”¤(€€€€€€€€€€€€¹½Ù•É±…ä¡…±¥¹µ•¹Ðè€¹Ñ½À¤ì9¥¡½¥Ù¥‘•È ¤ô(€€€€€€€ô(€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹…¹Ù…Ì¤(€€€€€€€€¹½Ù•É±…ä¡…±¥¹µ•¹Ðè€¹±•…‘¥¹œ¤ì(€€€€€€€€€€€I•Ñ…¹±” ¤¹™¥±°¡9¥¡½A…±•ÑÑ”¹±¥¹”¤¹™É…µ”¡Ý¥‘Ñ è€Ä¤(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…Èµ½‘•!•…‘¥¹œèMÑÉ¥¹œì(€€€€€€€ÍÝ¥Ñ µ½‘•°¹µ½‘”ì(€€€€€€€…Í”€¹É•Á±…•µ•¹Ðè€‹š^‹–¶cŽ»šZ–¶_Ž
+K¦ãš*{Ž_Ž›žÞ£¦nˆ(€€€€€€€…Í”€¹¥¹Í•ÉÑ¥½¸è€‰A’â+Ž
+KŽ
+¿Ž«ŽŽ
+¿Ž_Ž›¦7žö¸ˆ(€€€€€€€…Í”€¹É•‘…Ñ¥½¸è€‹¦ãš*{Ž_ŽšZ–¶_Ž
+K–º'–£Ž¯–Š£šÚ#Ž\ˆ(€€€€€€€…Í”€¹µ…É­ÕÀè€‹šÎ£¦#ŽïžöË–B7Ž
+K¢þ÷–*€ˆ(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…Èµ½‘•%¹ÍÑÉÕÑ¥½¹ÌèMÑÉ¥¹œì(€€€€€€€ÍÝ¥Ñ µ½‘•°¹µ½‘”ì(€€€€€€€…Í”€¹É•Á±…•µ•¹Ðè€‹Ž
+¿Ž«ŽŽ
+¿ŽŸ¦ãš*{ŽŽŽ[Ž¯Ž
+¿Ž«ŽŽ
+¿ŽŸžnÓš:—žÞ£¦nŽ¦ãš*{Ž_ŽšZ–¶_Ž¿Ž'Ž§ŽŽ
+ÃŽŸžžï–.WŽŸŽ7ŽûŽgŽˆ(€€€€€€€…Í”€¹¥¹Í•ÉÑ¥½¸è€‹Ž
+¿Ž«ŽŽ
+¿Ž_Ž’ö7žö»ŽãšZ–¶_Ž
+K¢þ÷–*ƒŽžŠë–ºk–ú3Ž¿šZ–¶_Ž
+KŽ'Ž§ŽŽ
+ÃŽ_Ž›žžï–.WŽŸŽ7ŽûŽgŽˆ(€€€€€€€…Í”€¹É•‘…Ñ¥½¸è€‹šZ–¶_Ž
+KŽ
+¿Ž«ŽŽ
+¿Ž_Ž›¢þ÷–*ƒŽgŽ
+/Ž/ŽŽkŽóŽ
+ãŽ
+KŽ'Ž§ŽŽ
+ÃŽ_Ž›ž¾–nËŽ
+Kš2–ºkŽ_ŽûŽgŽžRï–=AŽ¯Ž
+’öÿŽ#ŽûŽgŽ–¾û¢Æ‡Ž3ŽŽ
+/¦ZOŽ¿¦k–âãšnãŽ7–ëŽ_Žï–6Ã–"ßŽ
+Kš¶‹Ž
+ŽûŽgŽˆ(€€€€€€€…Í”€¹µ…É­ÕÀè€‹ŽŽóŽ¯Ž
+K¦ãŽÏŽšZ–¶_Ž
+K¦ãš*{ŽûŽŽ¿ŽkŽóŽ
+ã’â+Ž
+KŽ'Ž§ŽŽ
+ÃŽ_Ž›šÎ£¦#Ž
+K¦7žö»Ž_ŽûŽgŽˆ(€€€€€€€ô(€€€ô((€€€Y¥•Ý	Õ¥±‘•È(€€€ÁÉ¥Ù…Ñ”Ù…ÈÉ•‘…Ñ¥½¹½¹ÑÉ½±ÌèÍ½µ”Y¥•Üì(€€€€€€€™¥•±‘1…‰•° ‹¦ãš*{Ž_ŽšZ–¶\ˆ¤(€€€€€€€Q•áÐ¡µ½‘•°¹Í•±•Ñ•‘Q…É•Ðü¹½É¥¥¹…±Q•áÐ€üü€‰A’â+Ž»šZ–¶_Ž
+KŽ
+¿Ž«ŽŽ
+¿Ž_Ž›Ž?ŽƒŽWŽˆ¤(€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÌ¤¤(€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡µ½‘•°¹¡…ÍM•±•Ñ¥½¸€ü9¥¡½A…±•ÑÑ”¹¥¹¬€è9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€¹¥¹™¥¹¥Ñä°…±¥¹µ•¹Ðè€¹±•…‘¥¹œ¤(€€€€€€€€€€€€¹Á…‘‘¥¹œ ÄÈ¤(€€€€€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¤((€€€€€€€	ÕÑÑ½¸ ‹¦ãš*{šZ–¶_Ž
+K–Š£šÚ#Ž_–¾û¢Æ‡Ž¯¢þ÷–*€ˆ°…Ñ¥½¸èµ½‘•°¹…‘‘M•±•Ñ•‘I•‘…Ñ¥½¹I•¥½¸¤(€€€€€€€€€€€€¹‘¥Í…‰±• …µ½‘•°¹¡…ÍM•±•Ñ¥½¸¤(€€€€€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹‰½É‘•É•‘AÉ½µ¥¹•¹Ð¤(€€€€€€€Q•áÐ ‹ŽûŽŽ¿ŽkŽóŽ
+ã’â+Ž
+KŽ'Ž§ŽŽ
+ÃŽ_Ž›ž¾–nËŽ
+Kš2–ºk¾ò#žRï–?Žï–nÏ–ö‰AŽ¯Ž
+–¾û–þs¾ò$ˆ¤(€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤(€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤((€€€€€€€™¥•±‘1…‰•° ‹–Š£šÚ#Ž_Ž_Ž³ŽOŽ—Žó¾ò!p¡µ½‘•°¹É•‘…Ñ¥½¹I•¥½¹Ì¹½Õ¹Ð§Ž/š&¾ò$ˆ¤(€€€€€€€¥˜µ½‘•°¹É•‘…Ñ¥½¹I•¥½¹Ì¹¥ÍµÁÑäì(€€€€€€€€€€€Q•áÐ ‹–¾û¢Æ‡Ž
+K¢þ÷–*ƒŽgŽ
+/Ž£ŽŽkŽóŽ
+ã’â+Ž¯¦îKŽŽ_Ž³ŽOŽ—ŽóŽ3¢†£ž’ëŽWŽ
+3ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô•±Í”ì(€€€€€€€€€€€½É… ¡µ½‘•°¹É•‘…Ñ¥½¹I•¥½¹Ì¤ìÉ•¥½¸¥¸(€€€€€€€€€€€€€€€!MÑ…¬¡…±¥¹µ•¹Ðè€¹Ñ½À°ÍÁ…¥¹œè€à¤ì(€€€€€€€€€€€€€€€€€€€Q•áÐ ‰p¡É•¥½¸¹Á…•%¹‘•à€¬€Ä§ŽkŽóŽ
+àƒ
+Üp¡É•¥½¸¹Ñ•áÐ¹¥ÍµÁÑä€ü€‹Ž'Ž§ŽŽ
+Ãž¾–nÈˆ€èÉ•¥½¸¹Ñ•áÐ¤ˆ¤(€€€€€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤(€€€€€€€€€€€€€€€€€€€€€€€€¹±¥¹•1¥µ¥Ð È¤(€€€€€€€€€€€€€€€€€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€¹¥¹™¥¹¥Ñä°…±¥¹µ•¹Ðè€¹±•…‘¥¹œ¤(€€€€€€€€€€€€€€€€€€€	ÕÑÑ½¸ì(€€€€€€€€€€€€€€€€€€€€€€€µ½‘•°¹É•µ½Ù•I•‘…Ñ¥½¹I•¥½¸¡¥èÉ•¥½¸¹¥¤(€€€€€€€€€€€€€€€€€€€ô±…‰•°èì(€€€€€€€€€€€€€€€€€€€€€€€%µ…”¡ÍåÍÑ•µ9…µ”è€‰áµ…É¬¹¥É±”¹™¥±°ˆ¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹Á±…¥¸¤(€€€€€€€€€€€€€€€€€€€€¹…•ÍÍ¥‰¥±¥Ñå1…‰•° ‹ŽOŽ»–Š£šÚ#Ž_ž¾–nËŽ
+K–’[Ždˆ¤(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€¹Á…‘‘¥¹œ à¤(€€€€€€€€€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€Ø¤¤(€€€€€€€€€€€ô(€€€€€€€€€€€	ÕÑÑ½¸ ‹ŽgŽçŽ›Ž»ž¾–nËŽ
+K–’[Ždˆ°…Ñ¥½¸èµ½‘•°¹±•…ÉI•‘…Ñ¥½¹I•¥½¹Ì¤(€€€€€€€€€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹Á±…¥¸¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô((€€€€€€€	ÕÑÑ½¸¡…Ñ¥½¸èµ½‘•°¹…ÁÁ±åI•‘…Ñ¥½¹ÍÉ½µA…¹•°¤ì(€€€€€€€€€€€!MÑ…¬ì(€€€€€€€€€€€€€€€Q•áÐ ‹–Š£šÚ#Ž_Ž
+K¦§žR£Ž_Ž›–"—–B7’þw–¶`ˆ¤(€€€€€€€€€€€€€€€MÁ…•È ¤(€€€€€€€€€€€€€€€%µ…”¡ÍåÍÑ•µ9…µ”è€‰±½¬¹‘½Œˆ¤(€€€€€€€€€€€ô(€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÌ¤¹Ý•¥¡Ð ¹Í•µ¥‰½±¤¤(€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±” ¹Ý¡¥Ñ”¤(€€€€€€€€€€€€¹Á…‘‘¥¹œ ¹¡½É¥é½¹Ñ…°°€ÄÐ¤(€€€€€€€€€€€€¹™É…µ”¡¡•¥¡Ðè€ÐÐ¤(€€€€€€€€€€€€¹‰…­É½Õ¹¡½±½È¹‰±…¬°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¤(€€€€€€€ô(€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹Á±…¥¸¤(€€€€€€€€¹‘¥Í…‰±•¡µ½‘•°¹É•‘…Ñ¥½¹I•¥½¹Ì¹¥ÍµÁÑä¤(€€€€€€€€¹½Á…¥Ñä¡µ½‘•°¹É•‘…Ñ¥½¹I•¥½¹Ì¹¥ÍµÁÑä€ü€À¸ÐÈ€è€Ä¤(€€€ô((€€€Y¥•Ý	Õ¥±‘•È(€€€ÁÉ¥Ù…Ñ”Ù…Èµ…É­ÕÁ½¹ÑÉ½±ÌèÍ½µ”Y¥•Üì(€€€€€€€A¥­•È ‹šÎ£¦#ŽŽóŽ¬ˆ°Í•±•Ñ¥½¸è	¥¹‘¥¹œ (€€€€€€€€€€€•Ðèìµ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°ô°(€€€€€€€€€€€Í•Ðèìµ½‘•°¹Í•Ñ5…É­ÕÁQ½½° À¤ô(€€€€€€€€¤¤ì(€€€€€€€€€€€½É… ¡A5…É­ÕÁQ½½°¹…±±…Í•Ì¤ìÑ½½°¥¸(€€€€€€€€€€€€€€€Q•áÐ¡Ñ½½°¹Ñ¥Ñ±”¤¹Ñ…œ¡Ñ½½°¤(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€€¹Á¥­•ÉMÑå±” ¹µ•¹Ô¤((€€€€€€€¥˜µ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°¹¥ÍQ•áÑ5…É­ÕÀì(€€€€€€€€€€€™¥•±‘1…‰•° ‹šÎ£¦#Ž
+K’îcŽGŽ
+/šZ–¶\ˆ¤(€€€€€€€€€€€Q•áÐ¡µ½‘•°¹Í•±•Ñ•‘Q…É•Ðü¹½É¥¥¹…±Q•áÐ€üü€‰A’â+Ž»šZ–¶_Ž
+KŽ
+¿Ž«ŽŽ
+¿Ž_Ž›Ž?ŽƒŽWŽˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÌ¤¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡µ½‘•°¹Í•±•Ñ•‘Q…É•Ð€ôô¹¥°€ü9¥¡½A…±•ÑÑ”¹µÕÑ•€è9¥¡½A…±•ÑÑ”¹¥¹¬¤(€€€€€€€€€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€¹¥¹™¥¹¥Ñä°…±¥¹µ•¹Ðè€¹±•…‘¥¹œ¤(€€€€€€€€€€€€€€€€¹Á…‘‘¥¹œ ÄÈ¤(€€€€€€€€€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¤(€€€€€€€€€€€	ÕÑÑ½¸ ‹¦ãš*{ž¾–nËŽ­p¡µ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°¹Ñ¥Ñ±”§Ž
+K¦§žR ˆ°…Ñ¥½¸èµ½‘•°¹…ÁÁ±åM•±•Ñ•‘Q•áÑ5…É­ÕÀ¤(€€€€€€€€€€€€€€€€¹‘¥Í…‰±•¡µ½‘•°¹Í•±•Ñ•‘Q…É•Ð€ôô¹¥°¤(€€€€€€€€€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹‰½É‘•É•‘AÉ½µ¥¹•¹Ð¤(€€€€€€€ô•±Í”¥˜µ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°€ôô€¹¹½Ñ”ì(€€€€€€€€€€€™¥•±‘1…‰•° ‹Ž‡Žˆˆ¤(€€€€€€€€€€€Q•áÑ¥•± ‹Ž‡Ž‹Ž»––ºäˆ°Ñ•áÐè	¥¹‘¥¹œ (€€€€€€€€€€€€€€€•Ðèìµ½‘•°¹µ…É­ÕÁQ•áÐô°Í•Ðèìµ½‘•°¹Í•Ñ5…É­ÕÁQ•áÐ À¤ô(€€€€€€€€€€€€¤¤(€€€€€€€€€€€€¹Ñ•áÑ¥•±‘MÑå±” ¹É½Õ¹‘•‘	½É‘•È¤(€€€€€€€€€€€Q•áÐ ‰A’â+Ž
+KŽ
+¿Ž«ŽŽ
+¿Ž_Ž›¦7žö»Ž_ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô•±Í”¥˜µ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°€ôô€¹Í¥¹…ÑÕÉ”ì(€€€€€€€€€€€™¥•±‘1…‰•° ‹žöË–B4ˆ¤(€€€€€€€€€€€Q•áÑ¥•± ‹žöË–B7ŽgŽ
+/–B7–&4ˆ°Ñ•áÐè	¥¹‘¥¹œ (€€€€€€€€€€€€€€€•Ðèìµ½‘•°¹Í¥¹…ÑÕÉ•Q•áÐô°Í•Ðèìµ½‘•°¹Í•ÑM¥¹…ÑÕÉ•Q•áÐ À¤ô(€€€€€€€€€€€€¤¤(€€€€€€€€€€€€¹Ñ•áÑ¥•±‘MÑå±” ¹É½Õ¹‘•‘	½É‘•È¤(€€€€€€€€€€€	ÕÑÑ½¸ ‹ŽOŽ¹5…Ž¯žöË–B7Ž
+K’þw–¶`ˆ°…Ñ¥½¸èµ½‘•°¹Í…Ù•M¥¹…ÑÕÉ•1½…±±ä¤(€€€€€€€€€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹Á±…¥¸¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹É••¸¤(€€€€€€€€€€€Q•áÐ ‹Ž
+¿Ž«ŽŽ
+¿ŽŸ¦7žö»Ž_Ž¢žKŽ
+KŽ'Ž§ŽŽ
+ÃŽ_Ž›–’ŸŽ7ŽWŽ
+K¢ªÿšVÓŽŸŽ7ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô•±Í”ì(€€€€€€€€€€€Q•áÐ ‰A’â+Ž
+KŽ'Ž§ŽŽ
+ÃŽ_Ž™p¡µ½‘•°¹Í•±•Ñ•‘5…É­ÕÁQ½½°¹Ñ¥Ñ±”§Ž
+Kš>?Ž7ŽûŽgŽ¦ãš*{Ž_ŽšÎ£¦#Ž¿žžï–.WŽŸŽ7ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…È±…¹‘¥¹œèÍ½µ”Y¥•Üì(€€€€€€€YMÑ…¬¡ÍÁ…¥¹œè€Èà¤ì(€€€€€€€€€€€iMÑ…¬ì(€€€€€€€€€€€€€€€I½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€Äà¤(€€€€€€€€€€€€€€€€€€€€¹™¥±°¡9¥¡½A…±•ÑÑ”¹…¹Ù…Ì¤(€€€€€€€€€€€€€€€I½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€Äà¤(€€€€€€€€€€€€€€€€€€€€¹ÍÑÉ½­•	½É‘•È¡ÍÑå±”èMÑÉ½­•MÑå±”¡±¥¹•]¥‘Ñ è€Ä°‘…Í èlà°€át¤¤(€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹¡•…‘¥¹œ¹½Á…¥Ñä À¸Èà¤¤((€€€€€€€€€€€€€€€YMÑ…¬¡ÍÁ…¥¹œè€ÈÀ¤ì(€€€€€€€€€€€€€€€€€€€%µ…”¡ÍåÍÑ•µ9…µ”è€‰‘½Œ¹Ñ•áÐ¹µ…¹¥™å¥¹±…ÍÌˆ¤(€€€€€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÍåÍÑ•´¡Í¥é”è€ÐÐ°Ý•¥¡Ðè€¹±¥¡Ð¤¤(€€€€€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹É••¸¤(€€€€€€€€€€€€€€€€€€€YMÑ…¬¡ÍÁ…¥¹œè€à¤ì(€€€€€€€€€€€€€€€€€€€€€€€Q•áÐ ‰AŽ
+K’ösš–·–>ÃŽàˆ¤(€€€€€€€€€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÈØ¤¹Ý•¥¡Ð ¹Í•µ¥‰½±¤¤(€€€€€€€€€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹¡•…‘¥¹œ¤(€€€€€€€€€€€€€€€€€€€€€€€Q•áÐ ‹š^‹–¶cšZ–¶_Ž»žö»š>oŽ
+Ž––÷Ž7Ž«’ö7žö»ŽãŽ»šZ–¶_¢þ÷–*ƒŽ
+ŽŸŽ7ŽûŽgŽˆ¤(€€€€€€€€€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÌ¤¤(€€€€€€€€€€€€€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€€€€…Ñ¥½¹	ÕÑÑ½¸ ‰AŽ
+HÇŽ“¦ãŽØˆ°¥½¸è€‰™½±‘•Èˆ°•µÁ¡…Í¥é•èÑÉÕ”¤ì(€€€€€€€€€€€€€€€€€€€€€€€µ½‘•°¹½Á•¹É½µA…¹•° ¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€€€€…Ñ¥½¹	ÕÑÑ½¸ ‹¢’šVÃŽ¹AŽ
+KžÖC–B ˆ°¥½¸è€‰‘½Œ¹½¸¹‘½Œˆ°•µÁ¡…Í¥é•è™…±Í”¤ì(€€€€€€€€€€€€€€€€€€€€€€€µ½‘•°¹Í¡½Ý5•É•M¡••Ð ¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€ô(€€€€€€€€€€€€¹™É…µ”¡Ý¥‘Ñ è€ÔØÀ°¡•¥¡Ðè€ÌÐÀ¤(€€€€€€€ô(€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€¹¥¹™¥¹¥Ñä°µ…á!•¥¡Ðè€¹¥¹™¥¹¥Ñä¤(€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”¤(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…ÈÍÑ…ÑÕÍ	…ÈèÍ½µ”Y¥•Üì(€€€€€€€!MÑ…¬¡ÍÁ…¥¹œè€ÄÀ¤ì(€€€€€€€€€€€¥É±” ¤(€€€€€€€€€€€€€€€€¹™¥±°¡9¥¡½A…±•ÑÑ”¹É••¸¤(€€€€€€€€€€€€€€€€¹™É…µ”¡Ý¥‘Ñ è€Ø°¡•¥¡Ðè€Ø¤(€€€€€€€€€€€Q•áÐ¡µ½‘•°¹ÍÑ…ÑÕÍ5•ÍÍ…”¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€MÁ…•È ¤(€€€€€€€€€€€Q•áÐ ‹Š2a<ƒ¦Z/Ž<€ƒ
+Ü€ƒŠ2a@ƒ–6Ã–"Ü€ƒ
+Ü€ƒŠ2aLƒšnãŽ7–ëŽd€ƒ
+Ü€ƒŠ2ahƒ–>[Ž
++šÚ#Ždˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰Ù•¹¥È9•áÐˆ°Í¥é”è€ÄÀ¤¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€ô(€€€€€€€€¹Á…‘‘¥¹œ ¹¡½É¥é½¹Ñ…°°€Äà¤(€€€€€€€€¹™É…µ”¡¡•¥¡Ðè€ÌÈ¤(€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹…¹Ù…Ì¤(€€€€€€€€¹½Ù•É±…ä¡…±¥¹µ•¹Ðè€¹Ñ½À¤ì9¥¡½¥Ù¥‘•È ¤ô(€€€ô((€€€ÁÉ¥Ù…Ñ”™Õ¹Œ™¥•±‘1…‰•°¡|Ñ•áÐèMÑÉ¥¹œ¤€´øÍ½µ”Y¥•Üì(€€€€€€€Q•áÐ¡Ñ•áÐ¤(€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¹Ý•¥¡Ð ¹µ•‘¥Õ´¤¤(€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…È…•¹Ñ½±½Èè½±½Èì(€€€€€€€9¥¡½A…±•ÑÑ”¹É••¸(€€€ô((€€€ÁÉ¥Ù…Ñ”™Õ¹Œ…Ñ¥½¹	ÕÑÑ½¸ (€€€€€€€|Ñ¥Ñ±”èMÑÉ¥¹œ°(€€€€€€€¥½¸èMÑÉ¥¹œ°(€€€€€€€•µÁ¡…Í¥é•è	½½°°(€€€€€€€…Ñ¥½¸è•Í…Á¥¹œ€ ¤€´øY½¥(€€€€¤€´øÍ½µ”Y¥•Üì(€€€€€€€	ÕÑÑ½¸¡…Ñ¥½¸è…Ñ¥½¸¤ì(€€€€€€€€€€€1…‰•°¡Ñ¥Ñ±”°ÍåÍÑ•µ%µ…”è¥½¸¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÈ¤¹Ý•¥¡Ð ¹Í•µ¥‰½±¤¤(€€€€€€€€€€€€€€€€¹Á…‘‘¥¹œ ¹¡½É¥é½¹Ñ…°°€ÄÐ¤(€€€€€€€€€€€€€€€€¹™É…µ”¡¡•¥¡Ðè€ÌÐ¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡•µÁ¡…Í¥é•€ü½±½È¹Ý¡¥Ñ”€è9¥¡½A…±•ÑÑ”¹¥¹¬¤(€€€€€€€€€€€€€€€€¹‰…­É½Õ¹ (€€€€€€€€€€€€€€€€€€€•µÁ¡…Í¥é•€ü9¥¡½A…±•ÑÑ”¹É••¸€è9¥¡½A…±•ÑÑ”¹É•…µQ¥¹Ð°(€€€€€€€€€€€€€€€€€€€¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€Ü¤(€€€€€€€€€€€€€€€€¤(€€€€€€€ô(€€€€€€€€¹‰ÕÑÑ½¹MÑå±” ¹Á±…¥¸¤(€€€ô)ô()ÁÉ¥Ù…Ñ”ÍÑÉÕÐ%¹Í•ÉÑ¥½¹MÑå±•A…¹•°èY¥•Üì(€€€=‰Í•ÉÙ•‘=‰©•ÐÙ…Èµ½‘•°è‘¥Ñ½É5½‘•°((€€€ÁÉ¥Ù…Ñ”Ù…È™½¹Ñ¡½¥”è	¥¹‘¥¹œñ%¹Í•ÉÑ¥½¹½¹Ñ¡½¥”øì(€€€€€€€	¥¹‘¥¹œ (€€€€€€€€€€€•Ðèìµ½‘•°¹¥¹Í•ÉÑ¥½¹½¹Ñ¡½¥”ô°(€€€€€€€€€€€Í•Ðèì¹•Ý¡½¥”¥¸µ½‘•°¹Í•Ñ%¹Í•ÉÑ¥½¹½¹Ñ¡½¥”¡¹•Ý¡½¥”¤ô(€€€€€€€€¤(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…È™½¹ÑM¥é”è	¥¹‘¥¹œñ½Õ‰±”øì(€€€€€€€	¥¹‘¥¹œ (€€€€€€€€€€€•Ðèìµ½‘•°¹¥¹Í•ÉÑ¥½¹½¹ÑM¥é”ô°(€€€€€€€€€€€Í•Ðèì¹•ÝM¥é”¥¸µ½‘•°¹Í•Ñ%¹Í•ÉÑ¥½¹½¹ÑM¥é”¡¹•ÝM¥é”¤ô(€€€€€€€€¤(€€€ô((€€€ÁÉ¥Ù…Ñ”Ù…È™½¹Ñ½±½Èè	¥¹‘¥¹œñ½±½Èøì(€€€€€€€	¥¹‘¥¹œ (€€€€€€€€€€€•Ðèì½±½È¡¹Í½±½Èèµ½‘•°¹¥¹Í•ÉÑ¥½¹½¹Ñ½±½È¤ô°(€€€€€€€€€€€Í•Ðèìµ½‘•°¹Í•Ñ%¹Í•ÉÑ¥½¹½¹Ñ½±½È¡9M½±½È À¤¤ô(€€€€€€€€¤(€€€ô((€€€Ù…È‰½‘äèÍ½µ”Y¥•Üì(€€€€€€€YMÑ…¬¡…±¥¹µ•¹Ðè€¹±•…‘¥¹œ°ÍÁ…¥¹œè€ÄÈ¤ì(€€€€€€€€€€€!MÑ…¬ì(€€€€€€€€€€€€€€€±…‰•° ‹ŽWŽ
+§ŽÏŽ ˆ¤(€€€€€€€€€€€€€€€MÁ…•È ¤(€€€€€€€€€€€€€€€A¥­•È ‹ŽWŽ
+§ŽÏŽ ˆ°Í•±•Ñ¥½¸è™½¹Ñ¡½¥”¤ì(€€€€€€€€€€€€€€€€€€€½É… ¡%¹Í•ÉÑ¥½¹½¹Ñ¡½¥”¹…±±…Í•Ì¹™¥±Ñ•Èì€À€„ô€¹ÕÍÑ½´ñð€…µ½‘•°¹¥µÁ½ÉÑ•‘½¹Ñ…µ¥±¥•Ì¹¥ÍµÁÑäô¤ì¡½¥”¥¸(€€€€€€€€€€€€€€€€€€€€€€€Q•áÐ¡¡½¥”¹Ñ¥Ñ±”¤¹Ñ…œ¡¡½¥”¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€¹Á¥­•ÉMÑå±” ¹µ•¹Ô¤(€€€€€€€€€€€€€€€€¹±…‰•±Í!¥‘‘•¸ ¤(€€€€€€€€€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€ÈÄÀ¤(€€€€€€€€€€€ô((€€€€€€€€€€€¥˜µ½‘•°¹¥¹Í•ÉÑ¥½¹½¹Ñ¡½¥”€ôô€¹ÕÍÑ½´ì(€€€€€€€€€€€€€€€%µÁ½ÉÑ•‘½¹ÑA¥­•È¡µ½‘•°èµ½‘•°¤(€€€€€€€€€€€ô((€€€€€€€€€€€¥˜µ½‘•°¹¡…Í%¹Í•ÉÑ¥½¹1½…Ñ¥½¸ì(€€€€€€€€€€€€€€€YMÑ…¬¡…±¥¹µ•¹Ðè€¹±•…‘¥¹œ°ÍÁ…¥¹œè€Ì¤ì(€€€€€€€€€€€€€€€€€€€Q•áÐ ‹š’s–èèp¡µ½‘•°¹‘•Ñ•Ñ•‘½¹Ñ9…µ”€üü€‹Ž«Ž\ˆ¤ˆ¤(€€€€€€€€€€€€€€€€€€€Q•áÐ ‹’öÿžR èp¡µ½‘•°¹•™™•Ñ¥Ù•%¹Í•ÉÑ¥½¹½¹Ñ9…µ”¤ˆ¤(€€€€€€€€€€€€€€€€€€€¥˜±•ÐÉ•…Í½¸€ôµ½‘•°¹¥¹Í•ÉÑ¥½¹½¹ÑAÉ•Ù¥•ÝI•…Í½¸ì(€€€€€€€€€€€€€€€€€€€€€€€Q•áÐ¡É•…Í½¸¤¹™½É•É½Õ¹‘MÑå±” ¹½É…¹”¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰Ù•¹¥È9•áÐˆ°Í¥é”è€ÄÀ¤¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€ô((€€€€€€€€€€€!MÑ…¬¡ÍÁ…¥¹œè€ÄÈ¤ì(€€€€€€€€€€€€€€€±…‰•° ‹Ž
+×Ž
+“Ž
+èˆ¤(€€€€€€€€€€€€€€€MÑ•ÁÁ•È¡Ù…±Õ”è™½¹ÑM¥é”°¥¸è€Ø¸À¸¸¸ÜÈ¸À°ÍÑ•Àè€Ä¸À¤ì(€€€€€€€€€€€€€€€€€€€Q•áÐ ‰p¡%¹Ð¡µ½‘•°¹¥¹Í•ÉÑ¥½¹½¹ÑM¥é”¤¤ÁÐˆ¤(€€€€€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰Ù•¹¥È9•áÐˆ°Í¥é”è€ÄÈ¤¹Ý•¥¡Ð ¹µ•‘¥Õ´¤¤(€€€€€€€€€€€€€€€€€€€€€€€€¹µ½¹½ÍÁ…•‘¥¥Ð ¤(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€MÁ…•È ¤(€€€€€€€€€€€€€€€½±½ÉA¥­•È ‹¢&Èˆ°Í•±•Ñ¥½¸è™½¹Ñ½±½È°ÍÕÁÁ½ÉÑÍ=Á…¥ÑäèÑÉÕ”¤(€€€€€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¤(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€€¹Á…‘‘¥¹œ ÄÈ¤(€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¤(€€€€€€€€¹½Ù•É±…äì(€€€€€€€€€€€I½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤(€€€€€€€€€€€€€€€€¹ÍÑÉ½­”¡9¥¡½A…±•ÑÑ”¹±¥¹”°±¥¹•]¥‘Ñ è€Ä¤(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”™Õ¹Œ±…‰•°¡|Ñ•áÐèMÑÉ¥¹œ¤€´øÍ½µ”Y¥•Üì(€€€€€€€Q•áÐ¡Ñ•áÐ¤(€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¹Ý•¥¡Ð ¹µ•‘¥Õ´¤¤(€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€ô)ô()ÁÉ¥Ù…Ñ”ÍÑÉÕÐI•Á±…•µ•¹ÑMÑå±•A…¹•°èY¥•Üì(€€€=‰Í•ÉÙ•‘=‰©•ÐÙ…Èµ½‘•°è‘¥Ñ½É5½‘•°((€€€ÁÉ¥Ù…Ñ”Ù…È™½¹Ñ¡½¥”è	¥¹‘¥¹œñ%¹Í•ÉÑ¥½¹½¹Ñ¡½¥”øì(€€€€€€€	¥¹‘¥¹œ¡•Ðèìµ½‘•°¹É•Á±…•µ•¹Ñ½¹Ñ¡½¥”ô°Í•Ðèìµ½‘•°¹Í•ÑI•Á±…•µ•¹Ñ½¹Ñ¡½¥” À¤ô¤(€€€ô((€€€Ù…È‰½‘äèÍ½µ”Y¥•Üì(€€€€€€€YMÑ…¬¡…±¥¹µ•¹Ðè€¹±•…‘¥¹œ°ÍÁ…¥¹œè€à¤ì(€€€€€€€€€€€Q•áÐ ‹¦ãš*{šZ–¶_Ž»ŽWŽ
+§ŽÏŽ ˆ¤(€€€€€€€€€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÄ¤¹Ý•¥¡Ð ¹µ•‘¥Õ´¤¤(€€€€€€€€€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹µÕÑ•¤(€€€€€€€€€€€¥˜±•ÐÑ…É•Ð€ôµ½‘•°¹Í•±•Ñ•‘Q…É•Ðì(€€€€€€€€€€€€€€€±•Ð‘•Ñ…¥°€ôµ½‘•°¹Í•±•Ñ•‘½¹Ñ•ÍÉ¥ÁÑ¥½¸(€€€€€€€€€€€€€€€Q•áÐ ‰Aš2–ºhèp¡‘•Ñ…¥°ü¹Á‘™9…µ”€üü€‹–>[–ú_’â7–>¼ˆ¤ˆ¤(€€€€€€€€€€€€€€€Q•áÐ ‹–ö‹–ò<èp¡‘•Ñ…¥°ü¹ÍÕ‰ÑåÁ”€üü€‹’â7šb8ˆ¥p¡‘•Ñ…¥°ü¹‘•Í•¹‘…¹ÑMÕ‰ÑåÁ”¹µ…Àì€ˆ¼ˆ€¬€Àô€üü€ˆˆ¤€¼p¡‘•Ñ…¥°ü¹•¹½‘¥¹œ€üü€‹š¢gšê[ŽûŽŽ¿¢ú{šnãš2–ºhˆ¥p¡‘•Ñ…¥°ü¹¥ÍMÕ‰Í•Ð€ôôÑÉÕ”€ü€ˆ€¼ƒŽ
+×Ž[Ž
+ïŽŽ ˆ€è€ˆˆ¤ˆ¤(€€€€€€€€€€€€€€€Q•áÐ ‰p¡%¹Ð¡Ñ…É•Ð¹™½¹ÑM¥é”¹É½Õ¹‘• ¤¤¤ÁÐ€ƒ
+Ü€p¡‘•Ñ…¥°ü¹¡…Íµ‰•‘‘•‘AÉ½É…´€ôôÑÉÕ”€ü€‹–~/Ž
+¢úóŽÿŽŽ
+(ˆ€è€‹–~/Ž
+¢úóŽÿŽ«Ž\ˆ¤€ƒ
+Ü€p¡‘•Ñ…¥°ü¹¥¹ÍÑ…±±•‘…µ¥±ä¹µ…Àì€‹Ž·ŽóŽ
+¯Ž¬è€ˆ€¬€Àô€üü€‹–B3–B7ŽWŽ
+§ŽÏŽ#šr«–Â;–”ˆ¤ˆ¤(€€€€€€€€€€€€€€€!MÑ…¬¡ÍÁ…¥¹œè€Ô¤ì(€€€€€€€€€€€€€€€€€€€Q•áÐ ‹¢&Èèp¡½±½É½‘”¡Ñ…É•Ð¹™½¹Ñ½±½È¤¤ˆ¤(€€€€€€€€€€€€€€€€€€€¥É±” ¤¹™¥±°¡½±½È¡¹Í½±½ÈèÑ…É•Ð¹™½¹Ñ½±½È¤¤¹™É…µ”¡Ý¥‘Ñ è€ÄÈ°¡•¥¡Ðè€ÄÈ¤(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€ô•±Í”ì(€€€€€€€€€€€€€€€Q•áÐ ‹šZ–¶_Ž
+K¦ãŽÛŽ¡A–Ž»šnã’öOš–‚ÇŽ
+K¢†£ž’ëŽ_ŽûŽgŽˆ¤(€€€€€€€€€€€ô((€€€€€€€€€€€!MÑ…¬ì(€€€€€€€€€€€€€€€Q•áÐ ‹žö»š>oŽ¯’öÿŽŽWŽ
+§ŽÏŽ ˆ¤(€€€€€€€€€€€€€€€MÁ…•È ¤(€€€€€€€€€€€€€€€A¥­•È ‹žö»š>oŽ¯’öÿŽŽWŽ
+§ŽÏŽ ˆ°Í•±•Ñ¥½¸è™½¹Ñ¡½¥”¤ì(€€€€€€€€€€€€€€€€€€€½É… ¡%¹Í•ÉÑ¥½¹½¹Ñ¡½¥”¹…±±…Í•Ì¹™¥±Ñ•Èì€À€„ô€¹ÕÍÑ½´ñð€…µ½‘•°¹¥µÁ½ÉÑ•‘½¹Ñ…µ¥±¥•Ì¹¥ÍµÁÑäô¤ì¡½¥”¥¸(€€€€€€€€€€€€€€€€€€€€€€€Q•áÐ¡¡½¥”¹Ñ¥Ñ±”¤¹Ñ…œ¡¡½¥”¤(€€€€€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€ô(€€€€€€€€€€€€€€€€¹Á¥­•ÉMÑå±” ¹µ•¹Ô¤(€€€€€€€€€€€€€€€€¹±…‰•±Í!¥‘‘•¸ ¤(€€€€€€€€€€€€€€€€¹™É…µ”¡µ…á]¥‘Ñ è€ÄäÀ¤(€€€€€€€€€€€ô(€€€€€€€€€€€¥˜µ½‘•°¹É•Á±…•µ•¹Ñ½¹Ñ¡½¥”€ôô€¹ÕÍÑ½´ì(€€€€€€€€€€€€€€€%µÁ½ÉÑ•‘½¹ÑA¥­•È¡µ½‘•°èµ½‘•°¤(€€€€€€€€€€€ô(€€€€€€€€€€€¥˜±•ÐÁÉ•Ù¥•Ü€ôµ½‘•°¹É•Á±…•µ•¹Ñ½¹ÑAÉ•Ù¥•Üì(€€€€€€€€€€€€€€€Q•áÐ ‹’öÿžR£’ê#–ºhèp¡ÁÉ•Ù¥•Ü¹™…µ¥±å9…µ”¥p¡ÁÉ•Ù¥•Ü¹¥Íá…Ð€ü€‹¾ò!A–~/Ž
+¢úóŽÿ¾ò$ˆ€è€ˆˆ¤ˆ¤(€€€€€€€€€€€€€€€¥˜±•ÐÉ•…Í½¸€ôÁÉ•Ù¥•Ü¹É•…Í½¸ìQ•áÐ¡É•…Í½¸¤¹™½É•É½Õ¹‘MÑå±” ¹½É…¹”¤ô(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€€¹™½¹Ð ¹ÕÍÑ½´ ‰!¥É…¥¹¼M…¹Ìˆ°Í¥é”è€ÄÀ¤¤(€€€€€€€€¹™½É•É½Õ¹‘MÑå±”¡9¥¡½A…±•ÑÑ”¹¥¹¬¤(€€€€€€€€¹Á…‘‘¥¹œ ÄÈ¤(€€€€€€€€¹‰…­É½Õ¹¡9¥¡½A…±•ÑÑ”¹ÍÕÉ™…”°¥¸èI½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¤(€€€€€€€€¹½Ù•É±…äì(€€€€€€€€€€€I½Õ¹‘•‘I•Ñ…¹±”¡½É¹•ÉI…‘¥ÕÌè€à¤¹ÍÑÉ½­”¡9¥¡½A…±•ÑÑ”¹±¥¹”°±¥¹•]¥‘Ñ è€Ä¤(€€€€€€€ô(€€€ô((€€€ÁÉ¥Ù…Ñ”™Õ¹Œ½±½É½‘”¡|½±½Èè9M½±½È¤€´øMÑÉ¥¹œì(€€€€€€€Õ…É±•ÐÉˆ€ô½±½È¹ÕÍ¥¹½±½ÉMÁ…” ¹‘•Ù¥•I¤•±Í”ìÉ•ÑÕÉ¸€‹’â7šb8ˆô(€€€€€€€É•ÑÕÉ¸MÑÉ¥¹œ¡™½Éµ…Ðè€ˆŒ”ÀÉ`”ÀÉ`”ÀÉ`ˆ°(€€€€€€€€€€€€€€€€€€€€€%¹Ð ¡Éˆ¹É•‘½µÁ½¹•¹Ð€¨€ÈÔÔ¤¹É½Õ¹‘• ¤¤°(€€€€€€€€€€€€€€€€€€€€€%¹Ð ¡Éˆ¹É••¹½µÁ½¹•¹Ð€¨€ÈÔÔ¤¹É½Õ¹‘• ¤¤°(€€€€€€€€€€€€€€€€€€€€€%¹Ð ¡Éˆ¹‰±Õ•½µÁ½¹•¹Ð€¨€ÈÔÔ¤¹É½Õ¹‘• ¤¤¤(€€€ô)ô()ÁÉ¥Ù…Ñ”ÍÑÉÕÐ%µÁ½ÉÑ•‘½¹ÑA¥­•ÈèY¥•Üì(€€€=‰Í•ÉÙ•‘=‰©•ÐÙ…Èµ½‘•°è‘¥Ñ½É5½‘•°((€€€Ù…È‰½‘äèÍ½µ”Y¥•Üì(€€€€€€€A¥­•È ‹¢ª·Žÿ¢úóŽÿšâ#Žüˆ°Í•±•Ñ¥½¸è	¥¹‘¥¹œ (€€€€€€€€€€€•Ðèìµ½‘•°¹ÕÍÑ½µ½¹Ñ9…µ”€üüµ½‘•°¹¥µÁ½ÉÑ•‘½¹Ñ…µ¥±¥•Ì¹™¥ÉÍÐ€üü€ˆˆô°(€€€€€€€€€€€Í•Ðèìµ½‘•°¹Í•ÑÕÍÑ½µ½¹Ñ9…µ” À¤ô(€€€€€€€€¤¤ì(€€€€€€€€€€€½É… ¡µ½‘•°¹¥µÁ½ÉÑ•‘½¹Ñ…µ¥±¥•Ì°¥èp¹Í•±˜¤ì™…µ¥±ä¥¸(€€€€€€€€€€€€€€€Q•áÐ¡™…µ¥±ä¤¹Ñ…œ¡™…µ¥±ä¤(€€€€€€€€€€€ô(€€€€€€€ô(€€€€€€€€¹Á¥­•ÉMÑå±” ¹µ•¹Ô¤(€€€ô)ô(
