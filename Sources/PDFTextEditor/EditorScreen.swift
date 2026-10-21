@@ -86,6 +86,10 @@ struct EditorScreen: View {
             PDFSearchSheet()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.isShowingOCRSheet) {
+            PDFOCRSheet()
+                .environmentObject(model)
+        }
     }
 
     private var topBar: some View {
@@ -124,6 +128,11 @@ struct EditorScreen: View {
             .buttonStyle(.plain)
             .help("PDF内を検索（⌘F）")
             .accessibilityLabel("PDF内を検索")
+            .disabled(model.document == nil)
+
+            actionButton("OCR", icon: "text.viewfinder", emphasized: false) {
+                model.isShowingOCRSheet = true
+            }
             .disabled(model.document == nil)
 
             actionButton("PDFを開く", icon: "folder", emphasized: false) {

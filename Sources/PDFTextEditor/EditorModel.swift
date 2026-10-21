@@ -47,6 +47,12 @@ final class EditorModel: ObservableObject {
     @Published var isShowingResizeSheet = false
     @Published var isShowingCompressionSheet = false
     @Published var isShowingSearchSheet = false
+    @Published var isShowingOCRSheet = false
+    @Published private(set) var ocrIsRunning = false
+    @Published private(set) var ocrProgress = ""
+    @Published private(set) var ocrLowConfidenceLines: [PDFOCRLine] = []
+    @Published private(set) var ocrProcessedPages: [Int] = []
+    @Published private(set) var ocrLayerPresent = false
     @Published private(set) var searchQuery = ""
     @Published private(set) var searchResults: [PDFSearchHit] = []
     @Published private(set) var highlightedSearchSelections: [PDFSelection] = []
@@ -82,6 +88,8 @@ final class EditorModel: ObservableObject {
         return visible.map(\.1)
     }
     var canPrint: Bool { document != nil && sourceURL != nil }
+    var hasOCRLayer: Bool { ocrLayerPresent }
+    var canStartOCR: Bool { document != nil && !ocrIsRunning && !canUndo && !hasPendingEditorInput }
     var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
@@ -282,11 +290,15 @@ final class EditorModel: ObservableObject {
         discardInsertionDraft()
         document = loadedDocument
         sourceURL = url
+        ocrLayerPresent = PDFOCREngine.hasLayer(url: url)
         selectedTarget = nil
         isInlineEditing = false
         replacementFontChoice = .automatic
         replacementText = ""
         edits = []
+        ocrLowConfidenceLines = []
+        ocrProcessedPages = []
+        ocrProgress = ""
         searchResults = []
         highlightedSearchSelections = []
         focusedSearchSelection = nil
@@ -297,6 +309,80 @@ final class EditorModel: ObservableObject {
         statusMessage = mode == .replacement
             ? "変更したい文字をクリックしてください。"
             : "PDF上の追加したい位置をクリックしてください。"
+    }
+
+    func runOCR(pageSpecification: String, languages: [String]) {
+        guard canStartOCR, let sourceURL, let document else { return }
+        let selected: [Int]
+        do { selected = try PDFCropEngine.pageIndices(from: pageSpecification, pageCount: document.pageCount) }
+        catch { statusMessage = error.localizedDescription; return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-ocr.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "OCR済みPDFを別名で保存します。元のPDFは変更しません。"
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        guard !PDFOCREngine.sameFile(sourceURL, outputURL) else {
+            statusMessage = PDFOCRError.sameFile.localizedDescription
+            return
+        }
+        ocrIsRunning = true
+        ocrProgress = "画像だけのページを解析しています…"
+        let owner = self
+        Task {
+            do {
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try PDFOCREngine.recognize(sourceURL: sourceURL, outputURL: outputURL,
+                                               selectedPages: selected, languages: languages) { completed, total in
+                        Task { @MainActor in
+                            owner.ocrProgress = "\(completed) / \(total) ページ処理済み"
+                        }
+                    }
+                }.value
+                load(url: result.outputURL)
+                ocrProcessedPages = result.processedPages
+                ocrLowConfidenceLines = result.lowConfidenceLines
+                ocrProgress = "処理が完了しました。"
+                statusMessage = "OCR済みPDFを保存しました。検索・選択・コピーできます。"
+            } catch {
+                statusMessage = error.localizedDescription
+                ocrProgress = error.localizedDescription
+            }
+            ocrIsRunning = false
+        }
+    }
+
+    func removeOCRLayer() {
+        guard hasOCRLayer, let sourceURL, !ocrIsRunning, !canUndo else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-without-ocr.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "OCR層を除いたPDFを別名で保存します。"
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        guard !PDFOCREngine.sameFile(sourceURL, outputURL) else {
+            statusMessage = PDFOCRError.sameFile.localizedDescription
+            return
+        }
+        ocrIsRunning = true
+        ocrProgress = "OCR層を削除しています…"
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try PDFOCREngine.removeLayer(sourceURL: sourceURL, outputURL: outputURL)
+                }.value
+                load(url: outputURL)
+                statusMessage = "OCR層を削除したPDFを保存しました。"
+            } catch {
+                statusMessage = error.localizedDescription
+                ocrProgress = error.localizedDescription
+            }
+            ocrIsRunning = false
+        }
     }
 
     func setMode(_ newMode: EditorMode) {
