@@ -244,6 +244,50 @@ struct PDFEditingAcceptanceTests {
         #expect(page.annotations.isEmpty)
     }
 
+    @Test("書き出し先で置換文字のUnicode索引が失われた場合も再選択できる")
+    @MainActor
+    func missingExportedUnicodeMappingGetsInvisibleSearchText() throws {
+        PDFEmbeddedFontLoader.registerBundledFonts()
+        let source = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 100)) { context in
+            context.setFillColor(NSColor.white.cgColor)
+            context.fill(CGRect(x: 0, y: 0, width: 240, height: 100))
+        }
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try #require(PDFDocument(url: source))
+        let sourcePage = try #require(document.page(at: 0))
+        let bounds = CGRect(x: 42, y: 38, width: 24, height: 20)
+        let target = TextTarget(
+            pageIndex: 0,
+            bounds: bounds,
+            baseline: 42,
+            originalText: "A",
+            fontSize: 16,
+            fontColor: .black,
+            fontKey: nil,
+            fontIsExact: false,
+            coverBounds: bounds,
+            maxWidth: 120
+        )
+        let font = CTFontCreateWithName("Noto Sans JP" as CFString, 16, nil)
+        let edit = ReplacementEdit(target: target, replacement: "編集", resolvedFont: font, fontIsExact: false)
+        let result = try PDFExportEngine.addingSearchableTextForMissingReplacements(
+            in: Data(contentsOf: source),
+            edits: [edit]
+        )
+        let resultDocument = try #require(PDFDocument(data: result))
+        let resultPage = try #require(resultDocument.page(at: 0))
+        #expect(resultPage.string?.contains("編集") == true)
+        let index = PDFGlyphIndex.makeIndex(for: resultPage)
+        #expect(index.runs.contains { $0.text.contains("編集") })
+        #expect(index.cluster(at: CGPoint(x: bounds.midX, y: bounds.midY), pageIndex: 0)?.originalText == "編集")
+
+        let sourceRaster = try rasterMetrics(page: sourcePage, focus: bounds, scale: 4)
+        let resultRaster = try rasterMetrics(page: resultPage, focus: bounds, scale: 4)
+        #expect(resultRaster.darkPixels == sourceRaster.darkPixels)
+        #expect(resultRaster.antialiasPixels == sourceRaster.antialiasPixels)
+        #expect(resultRaster.edgeTransitions == sourceRaster.edgeTransitions)
+    }
+
     @Test("埋め込みフォントのUnicode cmapだけではPDFのグリフ対応とみなさない")
     func embeddedCMapIsNotTrustedWithoutIdentityMapping() throws {
         let font = CTFontCreateWithName("Helvetica" as CFString, 12, nil)

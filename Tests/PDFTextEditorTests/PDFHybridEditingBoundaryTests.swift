@@ -56,6 +56,24 @@ struct PDFHybridEditingBoundaryTests {
         return RawPDFBuilder.build(objects: objects)
     }
 
+    private func formXObjectFixture() -> URL {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
+                + "/Resources << /Font << /PageFont 4 0 R >> /XObject << /Widget 6 0 R >> >> "
+                + "/Contents 5 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "q 1 0 0 1 70 25 cm /Widget Do Q"),
+            RawPDFBuilder.streamObject(
+                dict: "/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 100 50] "
+                    + "/Matrix [1 0 0 1 10 5] /Resources << /Font << /Inside 4 0 R >> >>",
+                streamContent: "BT /Inside 18 Tf 1 0 0 1 4 20 Tm (ABC) Tj ET"
+            )
+        ]
+        return RawPDFBuilder.build(objects: objects)
+    }
+
     private let asciiAToUnicodeMap = """
         /CIDInit /ProcSet findresource begin
         12 dict begin begincmap
@@ -81,6 +99,41 @@ struct PDFHybridEditingBoundaryTests {
         endbfchar
         endcmap CMapName currentdict /CMap defineresource pop end end
         """
+
+    @Test("Form XObject内の文字を変換後の位置から選択し、内側のフォントを解決する")
+    @MainActor
+    func formXObjectTextIsIndexedAtTransformedPagePosition() throws {
+        let url = formXObjectFixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = EditorModel(initialURL: url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "ABC" })
+        let firstGlyph = try #require(run.glyphs.first)
+
+        #expect(abs(firstGlyph.baseline - 50) < 0.01)
+        #expect(abs(firstGlyph.advanceBox.minX - 84) < 0.01)
+        #expect(run.fontKey == "Widget\u{1F}Inside")
+        let fontDictionary = try #require(PDFGlyphIndex.fontDictionary(for: run.fontKey, page: page))
+        #expect(PDFEmbeddedFontLoader.describe(fontDict: fontDictionary).pdfName == "Helvetica")
+
+        let target = try #require(index.cluster(
+            at: CGPoint(x: firstGlyph.advanceBox.midX, y: firstGlyph.advanceBox.midY),
+            pageIndex: 0
+        ))
+        #expect(target.originalText == "ABC")
+        model.select(target)
+        model.updateEditorText("XYZ")
+        model.commitEditorText()
+        #expect(model.activeReplacements.first?.replacement == "XYZ")
+
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-text-bench-form-xobject-edit-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: url, edits: model.activeReplacements, to: output)
+        let exportedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        #expect(exportedPage.string?.contains("XYZ") == true)
+    }
 
     @Test("日本語の明示ToUnicodeとsubset名を読めても、元page objectは特定されない")
     func japaneseSubsetMetadata() throws {

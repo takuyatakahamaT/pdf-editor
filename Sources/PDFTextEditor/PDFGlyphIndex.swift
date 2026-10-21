@@ -165,6 +165,9 @@ struct PageTextIndex {
     /// 上限に使う。手組みで作ったテスト用の `PageTextIndex` などでは `.zero` のままで良く、
     /// その場合は従来どおりの汎用フォールバック値を使う。
     var pageBounds: CGRect = .zero
+    /// content streamの通常本文とForm XObject内で参照されたフォント辞書。
+    /// Form固有のフォント名はページ直下の同名リソースと区別した内部キーで保持する。
+    var fontDictionaries: [String: CGPDFDictionaryRef] = [:]
 
     /// クリック点にちょうど乗っているグリフを探す。
     func run(at point: CGPoint) -> (run: ScannedRun, glyphIndex: Int)? {
@@ -551,9 +554,10 @@ enum PDFGlyphIndex {
     /// 指定ページの Resources/Font 辞書から、フォントリソース名に対応する
     /// `CGPDFDictionaryRef` を取得する。`PDFEmbeddedFontLoader` からも使われる。
     static func fontDictionary(for fontKey: String, page: PDFPage) -> CGPDFDictionaryRef? {
-        guard let cgPage = cgPage(for: page), let pageDict = cgPage.dictionary else { return nil }
-        var resourcesDict: CGPDFDictionaryRef?
-        guard CGPDFDictionaryGetDictionary(pageDict, "Resources", &resourcesDict), let resourcesDict else { return nil }
+        if let dictionary = makeIndex(for: page).fontDictionaries[fontKey] {
+            return dictionary
+        }
+        guard let cgPage = cgPage(for: page), let resourcesDict = resourcesDictionary(for: cgPage) else { return nil }
         var fontsDict: CGPDFDictionaryRef?
         guard CGPDFDictionaryGetDictionary(resourcesDict, "Font", &fontsDict), let fontsDict else { return nil }
         var fontDict: CGPDFDictionaryRef?
@@ -567,12 +571,25 @@ enum PDFGlyphIndex {
         return cgDocument.page(at: pageIndex + 1)
     }
 
+    private static func resourcesDictionary(for cgPage: CGPDFPage) -> CGPDFDictionaryRef? {
+        var current = cgPage.dictionary
+        while let dictionary = current {
+            var resources: CGPDFDictionaryRef?
+            if CGPDFDictionaryGetDictionary(dictionary, "Resources", &resources), let resources {
+                return resources
+            }
+            var parent: CGPDFDictionaryRef?
+            guard CGPDFDictionaryGetDictionary(dictionary, "Parent", &parent) else { return nil }
+            current = parent
+        }
+        return nil
+    }
+
     private static func buildIndex(for page: PDFPage) -> PageTextIndex {
-        guard let cgPage = cgPage(for: page), let pageDict = cgPage.dictionary else {
+        guard let cgPage = cgPage(for: page) else {
             return PageTextIndex(runs: [])
         }
-        var resourcesDict: CGPDFDictionaryRef?
-        _ = CGPDFDictionaryGetDictionary(pageDict, "Resources", &resourcesDict)
+        let resourcesDict = resourcesDictionary(for: cgPage)
         var fontsDict: CGPDFDictionaryRef?
         if let resourcesDict {
             _ = CGPDFDictionaryGetDictionary(resourcesDict, "Font", &fontsDict)
@@ -587,7 +604,8 @@ enum PDFGlyphIndex {
             },
             colorSpaceLookup: { name in
                 colorSpaceComponentCount(name: name, resourcesDict: resourcesDict)
-            }
+            },
+            activeResources: resourcesDict
         )
 
         let contentStream = CGPDFContentStreamCreateWithPage(cgPage)
@@ -611,6 +629,7 @@ enum PDFGlyphIndex {
         for (key, info) in state.fonts { hasEmbedded[key] = info.hasEmbeddedProgram }
         var index = PageTextIndex(runs: runs, fontHasEmbeddedProgram: hasEmbedded)
         index.pageBounds = cgPage.getBoxRect(.mediaBox)
+        index.fontDictionaries = state.fontDictionaries
         return index
     }
 }
@@ -619,7 +638,7 @@ enum PDFGlyphIndex {
 /// 直接判定し、それ以外はページの `/Resources/ColorSpace` を辿って解決する
 /// （`ICCBased` は `/N`、`DeviceN` は名前配列の要素数、`Indexed`/`Separation` は 1）。
 /// 解決できない場合は DeviceRGB(3) を安全側の既定値とする。
-private func colorSpaceComponentCount(name: String, resourcesDict: CGPDFDictionaryRef?) -> Int {
+func colorSpaceComponentCount(name: String, resourcesDict: CGPDFDictionaryRef?) -> Int {
     switch name {
     case "DeviceGray", "CalGray", "G": return 1
     case "DeviceRGB", "CalRGB", "RGB": return 3
@@ -757,25 +776,62 @@ final class GlyphScanState {
     var skippingMarkedContentCount = 0
 
     let resourceLookup: (String) -> CGPDFDictionaryRef?
-    let colorSpaceLookup: (String) -> Int
+    var colorSpaceLookup: (String) -> Int
+    var fontDictionaries: [String: CGPDFDictionaryRef] = [:]
+    private var formResourcePath: [String] = []
+    private var colorSpaceLookupStack: [(String) -> Int] = []
+    var activeResources: CGPDFDictionaryRef?
+    private var resourceDictionaryStack: [CGPDFDictionaryRef?] = []
+    private(set) var formDepth = 0
+    private let maximumFormDepth = 32
 
     init(
         resourceLookup: @escaping (String) -> CGPDFDictionaryRef?,
-        colorSpaceLookup: @escaping (String) -> Int
+        colorSpaceLookup: @escaping (String) -> Int,
+        activeResources: CGPDFDictionaryRef? = nil
     ) {
         self.resourceLookup = resourceLookup
         self.colorSpaceLookup = colorSpaceLookup
+        self.activeResources = activeResources
     }
 
     func fontInfo(for key: String) -> PDFFontInfo {
         if let cached = fonts[key] { return cached }
-        guard let dict = resourceLookup(key) else {
+        guard let dict = fontDictionaries[key] ?? resourceLookup(key) else {
             fonts[key] = .fallback
             return .fallback
         }
         let info = PDFFontInfoLoader.load(from: dict)
         fonts[key] = info
         return info
+    }
+
+    func fontResourceKey(for name: String) -> String {
+        (formResourcePath + [name]).joined(separator: "\u{1F}")
+    }
+
+    func enterForm(named resourceName: String, resources: CGPDFDictionaryRef?) -> Bool {
+        guard formDepth < maximumFormDepth else { return false }
+        formDepth += 1
+        formResourcePath.append(resourceName)
+        colorSpaceLookupStack.append(colorSpaceLookup)
+        resourceDictionaryStack.append(activeResources)
+        if let resources {
+            activeResources = resources
+            colorSpaceLookup = { name in colorSpaceComponentCount(name: name, resourcesDict: resources) }
+        }
+        return true
+    }
+
+    func leaveForm() {
+        if !formResourcePath.isEmpty { formResourcePath.removeLast() }
+        if formDepth > 0 { formDepth -= 1 }
+        if let parentLookup = colorSpaceLookupStack.popLast() {
+            colorSpaceLookup = parentLookup
+        }
+        if let parentResources = resourceDictionaryStack.popLast() {
+            activeResources = parentResources
+        }
     }
 
     func pushGraphicsState() {
