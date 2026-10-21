@@ -259,6 +259,20 @@ struct PDFMarkupEngineTests {
         } == true)
     }
 
+    @Test("popup annotations are copied once with their parent")
+    func exportCopiesPopupAnnotationsOnce() {
+        let parent = PDFAnnotation(bounds: CGRect(x: 20, y: 100, width: 20, height: 20), forType: .text, withProperties: nil)
+        parent.userName = "Reviewer"
+        parent.contents = "Review note"
+        let popup = PDFAnnotation(bounds: CGRect(x: 42, y: 80, width: 118, height: 40), forType: .popup, withProperties: nil)
+        parent.popup = popup
+        let annotationsToCopy = PDFExportEngine.annotationsToCopy(from: [parent, popup])
+
+        #expect(parent.popup === popup)
+        #expect(annotationsToCopy.count == 1)
+        #expect(annotationsToCopy.first === parent)
+    }
+
     @Test("markup export preserves rotated page geometry and source annotation coordinates")
     func exportPreservesRotatedPageGeometry() throws {
         let source = RawPDFBuilder.build(objects: [

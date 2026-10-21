@@ -226,6 +226,14 @@ private struct PDFInternalLinkRemap: Encodable {
 }
 
 enum PDFExportEngine {
+    static func annotationsToCopy(from annotations: [PDFAnnotation]) -> [PDFAnnotation] {
+        let popupAnnotationIDs = Set(annotations.compactMap(\.popup).map(ObjectIdentifier.init))
+        return annotations.filter { annotation in
+            annotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) != true
+                && !popupAnnotationIDs.contains(ObjectIdentifier(annotation))
+        }
+    }
+
     static func export(
         sourceURL: URL,
         edits: [ReplacementEdit],
@@ -313,8 +321,7 @@ enum PDFExportEngine {
                 throw PDFExportError.unreadableSource
             }
             restorePageGeometry(from: sourcePage, to: outputPage)
-            for sourceAnnotation in sourcePage.annotations
-                where sourceAnnotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) != true {
+            for sourceAnnotation in annotationsToCopy(from: sourcePage.annotations) {
                 guard let copiedAnnotation = PDFMarkupEngine.duplicateAnnotation(sourceAnnotation) else {
                     throw PDFExportError.cannotCreateContext
                 }
