@@ -309,7 +309,8 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
                 fontKey: state.fontKey,
                 fontSize: effectiveSize,
                 advance: advance,
-                fillColor: state.fillColorStack.last ?? .black
+                fillColor: state.fillColorStack.last ?? .black,
+                hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code)
             ))
         }
     }

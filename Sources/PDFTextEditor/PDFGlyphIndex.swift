@@ -21,6 +21,9 @@ struct ScannedGlyph {
     let advance: CGFloat
     /// 塗り色（`g`/`rg`/`k`/`cs`+`sc`/`scn` から追跡）。解決できない色空間は黒。
     let fillColor: NSColor
+    /// `/ToUnicode` に明示された対応で文字を解決できたか。
+    /// 単純フォントのASCIIフォールバックで得た文字列とは区別する。
+    var hasExplicitToUnicodeMapping: Bool = true
 }
 
 /// 同一ベースライン・同一フォント・同一サイズで視覚的に連続するグリフの並び。
@@ -86,6 +89,8 @@ struct TextTarget: Equatable {
     /// 置換する際、見た目で連続する同一行の後続文字を右へ移し、
     /// 文字数増加分を行末の空きへ逃がすための情報。
     let lineLayout: TextRunLayout?
+    /// 選択した全グリフに明示的な `/ToUnicode` 対応があるか。
+    let hasExplicitSourceMapping: Bool
 
     init(
         pageIndex: Int,
@@ -98,7 +103,8 @@ struct TextTarget: Equatable {
         fontIsExact: Bool,
         coverBounds: CGRect,
         maxWidth: CGFloat,
-        lineLayout: TextRunLayout? = nil
+        lineLayout: TextRunLayout? = nil,
+        hasExplicitSourceMapping: Bool = true
     ) {
         self.pageIndex = pageIndex
         self.bounds = bounds
@@ -111,6 +117,7 @@ struct TextTarget: Equatable {
         self.coverBounds = coverBounds
         self.maxWidth = maxWidth
         self.lineLayout = lineLayout
+        self.hasExplicitSourceMapping = hasExplicitSourceMapping
     }
 }
 
@@ -328,7 +335,8 @@ struct PageTextIndex {
             fontIsExact: fontHasEmbeddedProgram[fontKey] ?? false,
             coverBounds: coverBounds,
             maxWidth: maxWidth,
-            lineLayout: lineLayout
+            lineLayout: lineLayout,
+            hasExplicitSourceMapping: clusterGlyphs.allSatisfy(\.hasExplicitToUnicodeMapping)
         )
     }
 
@@ -669,6 +677,8 @@ struct PDFFontInfo {
     var widthTable: [Int: CGFloat]
     var defaultWidth: CGFloat
     var toUnicode: [Int: String]
+    /// PDFに実際に書かれていた `/ToUnicode` のコード。ASCII補完分は含めない。
+    var explicitToUnicodeCodes: Set<Int> = []
     var ascent: CGFloat
     var descent: CGFloat
     var hasEmbeddedProgram: Bool
@@ -691,6 +701,7 @@ struct PDFFontInfo {
         widthTable: [:],
         defaultWidth: 0.5,
         toUnicode: [:],
+        explicitToUnicodeCodes: [],
         ascent: 0.8,
         descent: -0.2,
         hasEmbeddedProgram: false,

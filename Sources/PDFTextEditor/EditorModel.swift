@@ -453,8 +453,8 @@ final class EditorModel: ObservableObject {
         revision += 1
         let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
             ? "元フォントを再現できないため代替フォントで描画します。" : "")
-        let unknownSourceMessage = target.originalText.isEmpty
-            ? "元の文字情報を特定できないため、表示上の重ね描きです。元の内容はPDF内に残ります。墨消しには使えません。"
+        let unknownSourceMessage = !target.hasExplicitSourceMapping
+            ? "ToUnicodeで元の文字との対応づけを確認できないため、表示上の重ね描きです。元の内容はPDF内に残ります。墨消しには使えません。"
             : ""
         statusMessage = "文字を置換しました。\(unknownSourceMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }

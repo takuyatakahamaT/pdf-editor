@@ -38,6 +38,36 @@ struct PDFHybridEditingBoundaryTests {
         return RawPDFBuilder.build(objects: objects)
     }
 
+    private func simpleFontFixture(content: String, toUnicode: String? = nil) -> URL {
+        var font = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding"
+        if toUnicode != nil { font += " /ToUnicode 6 0 R" }
+        font += " >>"
+        var objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
+                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            font,
+            RawPDFBuilder.streamObject(dict: "", streamContent: content)
+        ]
+        if let toUnicode {
+            objects.append(RawPDFBuilder.streamObject(dict: "", streamContent: toUnicode))
+        }
+        return RawPDFBuilder.build(objects: objects)
+    }
+
+    private let asciiAToUnicodeMap = """
+        /CIDInit /ProcSet findresource begin
+        12 dict begin begincmap
+        /CMapName /SyntheticLatin def
+        /CMapType 2 def
+        1 begincodespacerange <00> <FF> endcodespacerange
+        1 beginbfchar
+        <41> <0041>
+        endbfchar
+        endcmap CMapName currentdict /CMap defineresource pop end end
+        """
+
     private let japaneseMap = """
         /CIDInit /ProcSet findresource begin
         12 dict begin begincmap
@@ -177,7 +207,7 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "代替"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("文字情報を特定できない"))
+        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
         #expect(model.statusMessage.contains("元の内容はPDF内に残ります"))
         #expect(model.statusMessage.contains("墨消しには使えません"))
 
@@ -199,12 +229,11 @@ struct PDFHybridEditingBoundaryTests {
         #expect(context.makeImage() != nil)
     }
 
-    @Test("元文字を解決できる場合は欠損専用の警告を出さない")
+    @Test("ASCII補完で読めてもToUnicodeがない場合は警告する")
     @MainActor
-    func mappedReplacementStatus() throws {
-        let url = RawPDFBuilder.singlePagePDF(
-            pageBounds: pageBounds,
-            contentStream: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET"
+    func asciiFallbackReplacementStatus() throws {
+        let url = simpleFontFixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET"
         )
         defer { try? FileManager.default.removeItem(at: url) }
         let model = EditorModel(initialURL: url)
@@ -213,10 +242,58 @@ struct PDFHybridEditingBoundaryTests {
         let run = try #require(index.runs.first)
         let target = try #require(index.target(in: run, range: 0..<1, pageIndex: 0))
         #expect(target.originalText == "A")
+        #expect(!target.hasExplicitSourceMapping)
         model.select(target)
         model.replacementText = "B"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(!model.statusMessage.contains("文字情報を特定できない"))
+        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
+    }
+
+    @Test("ToUnicodeで全グリフを解決できれば警告しない")
+    @MainActor
+    func explicitToUnicodeReplacementStatus() throws {
+        let url = simpleFontFixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET",
+            toUnicode: asciiAToUnicodeMap
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = EditorModel(initialURL: url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first)
+        let target = try #require(index.target(in: run, range: 0..<1, pageIndex: 0))
+
+        #expect(target.originalText == "A")
+        #expect(target.hasExplicitSourceMapping)
+        model.select(target)
+        model.replacementText = "B"
+        model.applyReplacement()
+        #expect(model.edits.count == 1)
+        #expect(!model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
+    }
+
+    @Test("選択内にToUnicode未対応グリフが混ざれば警告する")
+    @MainActor
+    func mixedExplicitAndFallbackSelectionWarns() throws {
+        let url = simpleFontFixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (AB) Tj ET",
+            toUnicode: asciiAToUnicodeMap
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = EditorModel(initialURL: url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first)
+        let target = try #require(index.target(in: run, range: 0..<2, pageIndex: 0))
+
+        #expect(run.glyphs.map(\.hasExplicitToUnicodeMapping) == [true, false])
+        #expect(target.originalText == "A")
+        #expect(!target.hasExplicitSourceMapping)
+        model.select(target)
+        model.replacementText = "CD"
+        model.applyReplacement()
+        #expect(model.edits.count == 1)
+        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
     }
 }

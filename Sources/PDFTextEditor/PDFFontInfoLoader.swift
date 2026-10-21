@@ -55,6 +55,7 @@ enum PDFFontInfoLoader {
             widthTable: widths,
             defaultWidth: CGFloat(defaultWidth) / 1000,
             toUnicode: toUnicode,
+            explicitToUnicodeCodes: Set(toUnicode.keys),
             ascent: ascent,
             descent: descent,
             hasEmbeddedProgram: hasEmbedded,
@@ -132,6 +133,7 @@ enum PDFFontInfoLoader {
         }
 
         var toUnicode = loadToUnicode(fontDict)
+        let explicitToUnicodeCodes = Set(toUnicode.keys)
         if toUnicode.isEmpty {
             // `/ToUnicode` を持たない単純フォントも珍しくない
             // (例: 標準14フォントを MacRomanEncoding/WinAnsiEncoding で使う場合)。
@@ -147,6 +149,7 @@ enum PDFFontInfoLoader {
             widthTable: widths,
             defaultWidth: 0.5,
             toUnicode: toUnicode,
+            explicitToUnicodeCodes: explicitToUnicodeCodes,
             ascent: ascent,
             descent: descent,
             hasEmbeddedProgram: hasEmbedded,
