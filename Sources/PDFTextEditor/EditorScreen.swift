@@ -2,6 +2,9 @@ import SwiftUI
 
 struct EditorScreen: View {
     @EnvironmentObject private var model: EditorModel
+    @StateObject private var zoomState = PDFZoomState()
+    @State private var zoomInput = "100"
+    @FocusState private var zoomInputIsFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,18 +13,37 @@ struct EditorScreen: View {
 
             if let document = model.document {
                 HStack(spacing: 0) {
-                    PDFCanvas(
-                        document: document,
-                        revision: model.revision,
-                        mode: model.mode,
-                        hasSelection: model.hasSelection,
-                        onSelection: { target in model.select(target) },
-                        onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
-                        onMoveInsertion: { marker, pageIndex, bounds in
-                            model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            zoomToolbar
+                            Spacer()
                         }
-                    )
-                    .background(NihoPalette.pdfStage)
+                        .frame(height: 44)
+                        .background(NihoPalette.pdfStage)
+                        NihoDivider()
+
+                        PDFCanvas(
+                            document: document,
+                            revision: model.revision,
+                            mode: model.mode,
+                            selectedTarget: model.selectedTarget,
+                            isInlineEditing: model.isInlineEditing,
+                            zoomState: zoomState,
+                            onSelection: { target in model.select(target) },
+                            onInsertion: { pageIndex, point in model.beginInsertion(pageIndex: pageIndex, point: point) },
+                            onMoveInsertion: { marker, pageIndex, bounds in
+                                model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
+                            },
+                            onMoveSelection: { delta in model.moveSelection(by: delta) },
+                            onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
+                            onBeginInlineEditing: { model.beginInlineEditing() },
+                            onChangeInlineText: { value in model.updateEditorText(value) },
+                            onCommitInlineEditing: { model.commitEditorText() },
+                            onCancelInlineEditing: { model.cancelInlineEditing() }
+                        )
+                        .background(NihoPalette.pdfStage)
+                    }
 
                     inspector
                         .frame(width: 370)
@@ -36,6 +58,10 @@ struct EditorScreen: View {
         .foregroundStyle(NihoPalette.ink)
         .tint(NihoPalette.green)
         .preferredColorScheme(.light)
+        .onChange(of: zoomState.scale) { _, newScale in
+            guard !zoomInputIsFocused else { return }
+            zoomInput = String(Int((newScale * 100).rounded()))
+        }
         .sheet(isPresented: $model.isShowingMergeSheet) {
             PDFMergeSheet()
         }
@@ -110,6 +136,68 @@ struct EditorScreen: View {
         .background(NihoPalette.canvas)
     }
 
+    private var zoomToolbar: some View {
+        HStack(spacing: 8) {
+            zoomButton("minus.magnifyingglass", help: "縮小") { zoomState.zoomOut() }
+            TextField("倍率", text: $zoomInput)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 48)
+                .multilineTextAlignment(.trailing)
+                .focused($zoomInputIsFocused)
+                .onSubmit {
+                    zoomState.setPercent(Double(zoomInput) ?? Double(zoomState.scale * 100))
+                    zoomInputIsFocused = false
+                }
+            Text("%")
+                .font(.custom("Avenir Next", size: 11).weight(.medium))
+                .foregroundStyle(NihoPalette.muted)
+            zoomButton("plus.magnifyingglass", help: "拡大") { zoomState.zoomIn() }
+
+            Menu {
+                Button("ページ全体に合わせる") { zoomState.fitPage() }
+                Button("ページ幅に合わせる") { zoomState.fitWidth() }
+                Button("実寸（100%）") { zoomState.actualSize() }
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .frame(width: 30, height: 28)
+            }
+            .menuStyle(.borderlessButton)
+            .help("ページの表示倍率")
+
+            NihoDivider()
+                .frame(height: 20)
+
+            Button {
+                zoomState.toggleMagnifier()
+            } label: {
+                Image(systemName: zoomState.magnifierIsActive ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
+                    .frame(width: 30, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(zoomState.magnifierIsActive ? NihoPalette.green : NihoPalette.ink)
+            .help(zoomState.magnifierIsActive ? "虫眼鏡を終了（Esc）" : "ポインター付近を拡大")
+            .accessibilityLabel(zoomState.magnifierIsActive ? "虫眼鏡を終了" : "虫眼鏡")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8).stroke(NihoPalette.line, lineWidth: 1)
+        }
+        .padding(.top, 10)
+        .zIndex(1)
+    }
+
+    private func zoomButton(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .frame(width: 30, height: 28)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
     private var inspector: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
@@ -129,11 +217,11 @@ struct EditorScreen: View {
                 .labelsHidden()
                 .padding(.vertical, 8)
 
-                Text(model.mode == .replacement ? "既存の文字をクリック・ドラッグ" : "PDF上をクリックして配置")
+                Text(model.mode == .replacement ? "既存の文字を選択して編集" : "PDF上をクリックして配置")
                     .font(.custom("Hiragino Sans", size: 21).weight(.semibold))
                     .foregroundStyle(NihoPalette.heading)
                 Text(model.mode == .replacement
-                    ? "括弧を含む範囲は先頭から末尾までドラッグして選べます。"
+                    ? "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
                     : "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。")
                     .font(.custom("Hiragino Sans", size: 12))
                     .foregroundStyle(NihoPalette.muted)
@@ -169,43 +257,70 @@ struct EditorScreen: View {
                     .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
                 }
 
-                fieldLabel(model.mode == .replacement ? "置換後の文字" : "追加する文字")
-                ReplacementTextField(
-                    text: Binding(
-                        get: { model.replacementText },
-                        set: { newText in model.updateEditorText(newText) }
-                    ),
-                    isEnabled: model.canEditText,
-                    focusRequest: model.replacementFocusRequest,
-                    onSubmit: { model.commitEditorText() }
-                )
-                    .frame(minHeight: 20)
-                    .padding(14)
-                    .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
+                if model.mode == .insertion {
+                    fieldLabel("追加する文字")
+                    ReplacementTextField(
+                        text: Binding(
+                            get: { model.replacementText },
+                            set: { newText in model.updateEditorText(newText) }
+                        ),
+                        isEnabled: model.canEditText,
+                        focusRequest: model.replacementFocusRequest,
+                        onSubmit: { model.commitEditorText() }
+                    )
+                        .frame(minHeight: 20)
+                        .padding(14)
+                        .background(NihoPalette.canvas, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(model.canEditText ? accentColor.opacity(0.7) : NihoPalette.line, lineWidth: 1)
+                        }
+                }
+
+                if model.mode == .replacement {
+                    ReplacementStylePanel(model: model)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Button(action: model.importFontFromPanel) {
+                            Label("フォントファイルを読み込む", systemImage: "textformat")
+                                .font(.custom("Hiragino Sans", size: 12).weight(.medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(NihoPalette.green)
+                        Text("一致するフォントは置換に使われます。読み込んだフォントはアプリ終了まで有効です。")
+                            .font(.custom("Hiragino Sans", size: 10))
+                            .foregroundStyle(NihoPalette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !model.importedFontFamilies.isEmpty {
+                            Text("読み込み済み: \(model.importedFontFamilies.joined(separator: "、"))")
+                                .font(.custom("Hiragino Sans", size: 10))
+                                .foregroundStyle(NihoPalette.green)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                }
 
                 if model.mode == .insertion {
                     InsertionStylePanel(model: model)
                 }
 
-                Button(action: model.commitEditorText) {
-                    HStack {
-                        Text(model.mode == .replacement ? "この位置で置換" : "この文字を追加")
-                        Spacer()
-                        Image(systemName: "arrow.right")
+                if model.mode == .insertion {
+                    Button(action: model.commitEditorText) {
+                        HStack {
+                            Text("この文字を追加")
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 46)
+                        .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .font(.custom("Hiragino Sans", size: 14).weight(.semibold))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 16)
-                    .frame(height: 46)
-                    .background(accentColor, in: RoundedRectangle(cornerRadius: 8))
+                    .buttonStyle(.plain)
+                    .disabled(!model.canCommit)
+                    .opacity(model.canCommit ? 1 : 0.42)
                 }
-                .buttonStyle(.plain)
-                .disabled(!model.canCommit)
-                .opacity(model.canCommit ? 1 : 0.42)
 
                 if model.mode == .replacement {
                     Button("選択文字を表示から削除", action: model.deleteSelection)
@@ -362,7 +477,7 @@ private struct InsertionStylePanel: View {
                 label("フォント")
                 Spacer()
                 Picker("フォント", selection: fontChoice) {
-                    ForEach(InsertionFontChoice.allCases) { choice in
+                    ForEach(InsertionFontChoice.allCases.filter { $0 != .custom || !model.importedFontFamilies.isEmpty }) { choice in
                         Text(choice.title).tag(choice)
                     }
                 }
@@ -371,10 +486,17 @@ private struct InsertionStylePanel: View {
                 .frame(maxWidth: 210)
             }
 
+            if model.insertionFontChoice == .custom {
+                ImportedFontPicker(model: model)
+            }
+
             if model.hasInsertionLocation {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("検出: \(model.detectedFontName ?? "なし")")
                     Text("使用: \(model.effectiveInsertionFontName)")
+                    if let reason = model.insertionFontPreviewReason {
+                        Text(reason).foregroundStyle(.orange)
+                    }
                 }
                 .font(.custom("Avenir Next", size: 10))
                 .foregroundStyle(NihoPalette.muted)
@@ -404,5 +526,84 @@ private struct InsertionStylePanel: View {
         Text(text)
             .font(.custom("Hiragino Sans", size: 11).weight(.medium))
             .foregroundStyle(NihoPalette.muted)
+    }
+}
+
+private struct ReplacementStylePanel: View {
+    @ObservedObject var model: EditorModel
+
+    private var fontChoice: Binding<InsertionFontChoice> {
+        Binding(get: { model.replacementFontChoice }, set: { model.setReplacementFontChoice($0) })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("選択文字のフォント")
+                .font(.custom("Hiragino Sans", size: 11).weight(.medium))
+                .foregroundStyle(NihoPalette.muted)
+            if let target = model.selectedTarget {
+                let detail = model.selectedFontDescription
+                Text("PDF指定: \(detail?.pdfName ?? "取得不可")")
+                Text("形式: \(detail?.subtype ?? "不明")\(detail?.descendantSubtype.map { "/" + $0 } ?? "") / \(detail?.encoding ?? "標準または辞書指定")\(detail?.isSubset == true ? " / サブセット" : "")")
+                Text("\(Int(target.fontSize.rounded())) pt  ·  \(detail?.hasEmbeddedProgram == true ? "埋め込みあり" : "埋め込みなし")  ·  \(detail?.installedFamily.map { "ローカル: " + $0 } ?? "同名フォント未導入")")
+                HStack(spacing: 5) {
+                    Text("色: \(colorCode(target.fontColor))")
+                    Circle().fill(Color(nsColor: target.fontColor)).frame(width: 12, height: 12)
+                }
+            } else {
+                Text("文字を選ぶとPDF内の書体情報を表示します。")
+            }
+
+            HStack {
+                Text("置換に使うフォント")
+                Spacer()
+                Picker("置換に使うフォント", selection: fontChoice) {
+                    ForEach(InsertionFontChoice.allCases.filter { $0 != .custom || !model.importedFontFamilies.isEmpty }) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: 190)
+            }
+            if model.replacementFontChoice == .custom {
+                ImportedFontPicker(model: model)
+            }
+            if let preview = model.replacementFontPreview {
+                Text("使用予定: \(preview.familyName)\(preview.isExact ? "（PDF埋め込み）" : "")")
+                if let reason = preview.reason { Text(reason).foregroundStyle(.orange) }
+            }
+        }
+        .font(.custom("Hiragino Sans", size: 10))
+        .foregroundStyle(NihoPalette.ink)
+        .padding(12)
+        .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8).stroke(NihoPalette.line, lineWidth: 1)
+        }
+    }
+
+    private func colorCode(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return "不明" }
+        return String(format: "#%02X%02X%02X",
+                      Int((rgb.redComponent * 255).rounded()),
+                      Int((rgb.greenComponent * 255).rounded()),
+                      Int((rgb.blueComponent * 255).rounded()))
+    }
+}
+
+private struct ImportedFontPicker: View {
+    @ObservedObject var model: EditorModel
+
+    var body: some View {
+        Picker("読み込み済み", selection: Binding(
+            get: { model.customFontName ?? model.importedFontFamilies.first ?? "" },
+            set: { model.setCustomFontName($0) }
+        )) {
+            ForEach(model.importedFontFamilies, id: \.self) { family in
+                Text(family).tag(family)
+            }
+        }
+        .pickerStyle(.menu)
     }
 }

@@ -83,6 +83,64 @@ struct TextTarget: Equatable {
     let coverBounds: CGRect
     /// 右隣のグリフまでの使用可能幅。
     let maxWidth: CGFloat
+    /// 置換する際、見た目で連続する同一行の後続文字を右へ移し、
+    /// 文字数増加分を行末の空きへ逃がすための情報。
+    let lineLayout: TextRunLayout?
+
+    init(
+        pageIndex: Int,
+        bounds: CGRect,
+        baseline: CGFloat,
+        originalText: String,
+        fontSize: CGFloat,
+        fontColor: NSColor,
+        fontKey: String?,
+        fontIsExact: Bool,
+        coverBounds: CGRect,
+        maxWidth: CGFloat,
+        lineLayout: TextRunLayout? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.bounds = bounds
+        self.baseline = baseline
+        self.originalText = originalText
+        self.fontSize = fontSize
+        self.fontColor = fontColor
+        self.fontKey = fontKey
+        self.fontIsExact = fontIsExact
+        self.coverBounds = coverBounds
+        self.maxWidth = maxWidth
+        self.lineLayout = lineLayout
+    }
+}
+
+struct TextRunLayout: Equatable {
+    struct Glyph: Equatable {
+        let text: String
+        let offsetX: CGFloat
+        let advance: CGFloat
+    }
+
+    let glyphs: [Glyph]
+    let selectedRange: Range<Int>
+    let lineStartX: CGFloat
+    let lineWidth: CGFloat
+    let maxWidth: CGFloat
+    let coverBounds: CGRect
+
+    var selectedStartX: CGFloat {
+        glyphs[selectedRange.lowerBound].offsetX
+    }
+
+    var selectedAdvance: CGFloat {
+        glyphs[selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
+    }
+
+    func text(replacingWith replacement: String) -> String {
+        let prefix = glyphs[..<selectedRange.lowerBound].map(\.text).joined()
+        let suffix = glyphs[selectedRange.upperBound...].map(\.text).joined()
+        return prefix + replacement + suffix
+    }
 }
 
 /// 1 ページ分の走査結果。クリック/ドラッグ判定はすべてここを介して行う。
@@ -242,6 +300,15 @@ struct PageTextIndex {
             maxWidth = max(bounds.width * 4, 200)
         }
 
+        let lineLayout = makeLineLayout(
+            for: run,
+            selectedRange: range,
+            sameLineRuns: sameLineRuns,
+            pageBounds: pageBounds,
+            coverMinY: coverMinY,
+            coverMaxY: coverMaxY
+        )
+
         return TextTarget(
             pageIndex: pageIndex,
             bounds: bounds,
@@ -252,8 +319,134 @@ struct PageTextIndex {
             fontKey: fontKey,
             fontIsExact: fontHasEmbeddedProgram[fontKey] ?? false,
             coverBounds: coverBounds,
-            maxWidth: maxWidth
+            maxWidth: maxWidth,
+            lineLayout: lineLayout
         )
+    }
+
+    private func makeLineLayout(
+        for run: ScannedRun,
+        selectedRange: Range<Int>,
+        sameLineRuns: [ScannedRun],
+        pageBounds: CGRect,
+        coverMinY: CGFloat,
+        coverMaxY: CGFloat
+    ) -> TextRunLayout? {
+        guard !run.glyphs.isEmpty,
+              selectedRange.lowerBound >= 0,
+              selectedRange.upperBound <= run.glyphs.count,
+              run.glyphs.allSatisfy({ !$0.text.isEmpty && $0.advance >= 0 }),
+              zip(run.glyphs, run.glyphs.dropFirst()).allSatisfy({ $0.advanceBox.minX <= $1.advanceBox.minX })
+        else { return nil }
+
+        // PDF 内ではフォントリソースが切り替わるたびに run が分かれる。
+        // 見た目でつながる字だけを x 順に連結し、大きな空白では列・別ブロックとみなして止める。
+        guard let selectedRunIndex = sameLineRuns.firstIndex(where: { isSameRun($0, run) }) else { return nil }
+        struct Candidate {
+            let runIndex: Int
+            let glyphIndex: Int
+            let glyph: ScannedGlyph
+        }
+        var candidates: [Candidate] = []
+        for (runIndex, candidateRun) in sameLineRuns.enumerated() {
+            for (glyphIndex, glyph) in candidateRun.glyphs.enumerated() {
+                guard !glyph.text.isEmpty, glyph.advance >= 0 else { continue }
+                guard abs(glyph.baseline - run.baseline) <= max(0.8, run.fontSize * 0.15) else { continue }
+                guard glyph.fontSize >= run.fontSize * 0.72,
+                      glyph.fontSize <= run.fontSize * 1.38 else { continue }
+                candidates.append(Candidate(runIndex: runIndex, glyphIndex: glyphIndex, glyph: glyph))
+            }
+        }
+        candidates.sort { lhs, rhs in
+            lhs.glyph.advanceBox.minX == rhs.glyph.advanceBox.minX
+                ? lhs.runIndex < rhs.runIndex
+                : lhs.glyph.advanceBox.minX < rhs.glyph.advanceBox.minX
+        }
+        let selectedPositions = candidates.indices.filter {
+            candidates[$0].runIndex == selectedRunIndex && selectedRange.contains(candidates[$0].glyphIndex)
+        }
+        guard selectedPositions.count == selectedRange.count,
+              let firstSelected = selectedPositions.first,
+              let lastSelected = selectedPositions.last,
+              lastSelected - firstSelected + 1 == selectedPositions.count else { return nil }
+
+        let selectedStyle = candidates[firstSelected].glyph
+        guard selectedPositions.allSatisfy({ sameRenderingStyle(candidates[$0].glyph, selectedStyle) }) else {
+            return nil
+        }
+
+        let joinGap = max(1.5, run.fontSize * 0.28)
+        var first = firstSelected
+        var last = lastSelected
+        while first > 0 {
+            let previous = candidates[first - 1].glyph
+            guard sameRenderingStyle(previous, selectedStyle) else { break }
+            let gap = candidates[first].glyph.advanceBox.minX - previous.advanceBox.maxX
+            guard gap >= -0.5, gap <= joinGap else { break }
+            first -= 1
+        }
+        while last + 1 < candidates.count {
+            let next = candidates[last + 1].glyph
+            guard sameRenderingStyle(next, selectedStyle) else { break }
+            let gap = next.advanceBox.minX - candidates[last].glyph.advanceBox.maxX
+            guard gap >= -0.5, gap <= joinGap else { break }
+            last += 1
+        }
+        let connected = Array(candidates[first...last])
+        guard let firstGlyph = connected.first?.glyph, let lastGlyph = connected.last?.glyph else { return nil }
+        let lineStartX = firstGlyph.advanceBox.minX
+        let lineWidth = lastGlyph.advanceBox.maxX - lineStartX
+        guard lineWidth > 0 else { return nil }
+        let lineEndX = lastGlyph.advanceBox.maxX
+        let overlapsDifferentStyle = sameLineRuns.flatMap(\.glyphs).contains { glyph in
+            !sameRenderingStyle(glyph, selectedStyle)
+                && glyph.advanceBox.minX < lineEndX - 0.01
+                && glyph.advanceBox.maxX > lineStartX + 0.01
+        }
+        guard !overlapsDifferentStyle else { return nil }
+        let nextBlockStart = sameLineRuns
+            .flatMap(\.glyphs)
+            .map(\.advanceBox.minX)
+            .filter { $0 >= lineEndX - 0.01 }
+            .min()
+        let rightBoundary = nextBlockStart
+            ?? (pageBounds.width > 0 ? pageBounds.maxX : lineStartX + max(lineWidth * 4, 200))
+        let maxWidth = rightBoundary - lineStartX
+        guard maxWidth >= lineWidth else { return nil }
+        let glyphs = connected.map {
+            TextRunLayout.Glyph(
+                text: $0.glyph.text,
+                offsetX: $0.glyph.advanceBox.minX - lineStartX,
+                advance: $0.glyph.advance
+            )
+        }
+        let coverBounds = CGRect(
+            x: lineStartX,
+            y: coverMinY,
+            width: lineWidth,
+            height: max(coverMaxY - coverMinY, 0)
+        )
+        return TextRunLayout(
+            glyphs: glyphs,
+            selectedRange: (firstSelected - first)..<(lastSelected - first + 1),
+            lineStartX: lineStartX,
+            lineWidth: lineWidth,
+            maxWidth: maxWidth,
+            coverBounds: coverBounds
+        )
+    }
+
+    private func isSameRun(_ lhs: ScannedRun, _ rhs: ScannedRun) -> Bool {
+        lhs.fontKey == rhs.fontKey
+            && lhs.text == rhs.text
+            && lhs.box == rhs.box
+            && abs(lhs.baseline - rhs.baseline) < 0.01
+    }
+
+    private func sameRenderingStyle(_ lhs: ScannedGlyph, _ rhs: ScannedGlyph) -> Bool {
+        lhs.fontKey == rhs.fontKey
+            && abs(lhs.fontSize - rhs.fontSize) < 0.05
+            && lhs.fillColor.isEqual(rhs.fillColor)
     }
 
     /// フォントキーごとに「埋め込みフォントプログラムが存在したか」を保持する
