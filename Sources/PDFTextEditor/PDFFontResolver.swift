@@ -17,6 +17,16 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .markup: return "注釈・署名"
         }
     }
+
+    /// 編集方法の切替に出す短い名前。
+    var shortTitle: String {
+        switch self {
+        case .replacement: return "置換"
+        case .insertion: return "追加"
+        case .redaction: return "墨消し"
+        case .markup: return "注釈"
+        }
+    }
 }
 
 enum InsertionFontChoice: String, CaseIterable, Identifiable {

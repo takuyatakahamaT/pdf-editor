@@ -30,6 +30,28 @@ struct PDFZoomStateTests {
         #expect(state.commandRevision == 2)
     }
 
+    @Test("page navigation is delivered as commands and page reports are clamped")
+    @MainActor
+    func deliversPageNavigationCommands() {
+        let state = PDFZoomState()
+
+        state.nextPage()
+        #expect(state.command == .nextPage)
+        #expect(state.commandRevision == 1)
+
+        state.previousPage()
+        #expect(state.command == .previousPage)
+        #expect(state.commandRevision == 2)
+
+        state.reportPage(index: 4, count: 3)
+        #expect(state.currentPageIndex == 2)
+        #expect(state.pageCount == 3)
+
+        state.reportPage(index: 0, count: 0)
+        #expect(state.currentPageIndex == 0)
+        #expect(state.pageCount == 0)
+    }
+
     @Test("magnifier can be dismissed without changing zoom")
     @MainActor
     func togglesMagnifierIndependently() {

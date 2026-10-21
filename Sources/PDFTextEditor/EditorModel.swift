@@ -69,6 +69,9 @@ final class EditorModel: ObservableObject {
     @Published var signatureText = UserDefaults.standard.string(forKey: "PDFEditor.SignatureText") ?? ""
     @Published private(set) var revision = 0
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
+    /// 失敗・拒否の文言。画面の下に数秒だけ出す。
+    @Published private(set) var noticeMessage: String?
+    @Published private(set) var noticeRevision = 0
     @Published var isShowingMergeSheet = false
     @Published var isShowingPageOrganizerSheet = false
     @Published var isShowingResizeSheet = false
@@ -188,6 +191,17 @@ final class EditorModel: ObservableObject {
         return requested
     }
 
+    /// 失敗・拒否を画面に短く知らせる。下のステータス行を撤去したぶん、帯で見せる。
+    private func notice(_ message: String) {
+        statusMessage = message
+        noticeMessage = message
+        noticeRevision += 1
+    }
+
+    func dismissNotice() {
+        noticeMessage = nil
+    }
+
     func openFromPanel() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
@@ -220,13 +234,13 @@ final class EditorModel: ObservableObject {
                 ? "フォントファイルを読み込みました。"
                 : "フォントを読み込みました: \(families.joined(separator: "、"))。フォント欄から選べます。"
         } catch {
-            statusMessage = "フォントを読み込めませんでした: \(error.localizedDescription)"
+            notice("フォントを読み込めませんでした: \(error.localizedDescription)")
         }
     }
 
     func showMergeSheet() {
         guard !hasPendingEditorInput else {
-            statusMessage = "墨消し範囲をプレビュー中は結合できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            notice("墨消し範囲をプレビュー中は結合できません。範囲を外すか、墨消し済みPDFを作成してください。")
             return
         }
         isShowingMergeSheet = true
@@ -235,11 +249,11 @@ final class EditorModel: ObservableObject {
     func showPageOrganizerSheet() {
         guard let document, sourceURL != nil else { return }
         guard !hasPendingEditorInput else {
-            statusMessage = "入力中の文字を確定してからページを整理してください。"
+            notice("入力中の文字を確定してからページを整理してください。")
             return
         }
         guard document.allowsCopying && document.allowsDocumentAssembly else {
-            statusMessage = "このPDFはページのコピーまたは組み替えが許可されていません。"
+            notice("このPDFはページのコピーまたは組み替えが許可されていません。")
             return
         }
         isShowingPageOrganizerSheet = true
@@ -248,7 +262,7 @@ final class EditorModel: ObservableObject {
     func showResizeSheet() {
         guard document != nil else { return }
         guard !hasPendingEditorInput else {
-            statusMessage = "墨消し範囲をプレビュー中はページサイズを変更できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            notice("墨消し範囲をプレビュー中はページサイズを変更できません。範囲を外すか、墨消し済みPDFを作成してください。")
             return
         }
         isShowingResizeSheet = true
@@ -257,7 +271,7 @@ final class EditorModel: ObservableObject {
     func showCompressionSheet() {
         guard document != nil else { return }
         guard !hasPendingEditorInput else {
-            statusMessage = "入力中の文字を確定してからPDFを圧縮してください。"
+            notice("入力中の文字を確定してからPDFを圧縮してください。")
             return
         }
         isShowingCompressionSheet = true
@@ -303,7 +317,7 @@ final class EditorModel: ObservableObject {
     func focusSearchResult(_ result: PDFSearchHit) {
         guard searchResults.contains(where: { $0.id == result.id }) else { return }
         guard !isInlineEditing else {
-            statusMessage = "編集中の文字を確定またはキャンセルしてから検索結果を選んでください。"
+            notice("編集中の文字を確定またはキャンセルしてから検索結果を選んでください。")
             return
         }
 
@@ -334,15 +348,15 @@ final class EditorModel: ObservableObject {
 
     func load(url: URL) {
         guard url.pathExtension.lowercased() == "pdf" else {
-            statusMessage = "PDFファイルを指定してください。"
+            notice("PDFファイルを指定してください。")
             return
         }
         guard FileManager.default.fileExists(atPath: url.path) else {
-            statusMessage = "指定されたPDFが見つかりません。"
+            notice("指定されたPDFが見つかりません。")
             return
         }
         guard let loadedDocument = PDFDocument(url: url), loadedDocument.pageCount > 0 else {
-            statusMessage = "PDFを読み込めませんでした。破損または未対応の形式です。"
+            notice("PDFを読み込めませんでした。破損または未対応の形式です。")
             return
         }
 
@@ -377,7 +391,7 @@ final class EditorModel: ObservableObject {
         guard canStartOCR, let sourceURL, let document else { return }
         let selected: [Int]
         do { selected = try PDFCropEngine.pageIndices(from: pageSpecification, pageCount: document.pageCount) }
-        catch { statusMessage = error.localizedDescription; return }
+        catch { notice(error.localizedDescription); return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
@@ -387,7 +401,7 @@ final class EditorModel: ObservableObject {
         panel.message = "OCR済みPDFを別名で保存します。元のPDFは変更しません。"
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
         guard !PDFOCREngine.sameFile(sourceURL, outputURL) else {
-            statusMessage = PDFOCRError.sameFile.localizedDescription
+            notice(PDFOCRError.sameFile.localizedDescription)
             return
         }
         ocrIsRunning = true
@@ -409,7 +423,7 @@ final class EditorModel: ObservableObject {
                 ocrProgress = "処理が完了しました。"
                 statusMessage = "OCR済みPDFを保存しました。検索・選択・コピーできます。"
             } catch {
-                statusMessage = error.localizedDescription
+                notice(error.localizedDescription)
                 ocrProgress = error.localizedDescription
             }
             ocrIsRunning = false
@@ -427,7 +441,7 @@ final class EditorModel: ObservableObject {
         panel.message = "OCR層を除いたPDFを別名で保存します。"
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
         guard !PDFOCREngine.sameFile(sourceURL, outputURL) else {
-            statusMessage = PDFOCRError.sameFile.localizedDescription
+            notice(PDFOCRError.sameFile.localizedDescription)
             return
         }
         ocrIsRunning = true
@@ -440,7 +454,7 @@ final class EditorModel: ObservableObject {
                 load(url: outputURL)
                 statusMessage = "OCR層を削除したPDFを保存しました。"
             } catch {
-                statusMessage = error.localizedDescription
+                notice(error.localizedDescription)
                 ocrProgress = error.localizedDescription
             }
             ocrIsRunning = false
@@ -491,7 +505,7 @@ final class EditorModel: ObservableObject {
     func saveSignatureLocally() {
         let value = signatureText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
-            statusMessage = "保存する署名を入力してください。"
+            notice("保存する署名を入力してください。")
             return
         }
         signatureText = value
@@ -502,7 +516,7 @@ final class EditorModel: ObservableObject {
     func applySelectedTextMarkup() {
         guard mode == .markup, selectedMarkupTool.isTextMarkup,
               let target = selectedTarget else {
-            statusMessage = "先に注釈を付ける文字を選択してください。"
+            notice("先に注釈を付ける文字を選択してください。")
             return
         }
         addMarkup(pageIndex: target.pageIndex, bounds: target.bounds, points: [], text: "")
@@ -515,11 +529,11 @@ final class EditorModel: ObservableObject {
         if tool == .note { annotationText = markupText.trimmingCharacters(in: .whitespacesAndNewlines) }
         if tool == .signature { annotationText = signatureText.trimmingCharacters(in: .whitespacesAndNewlines) }
         if tool.usesTextInput && annotationText.isEmpty {
-            statusMessage = tool == .note ? "メモの内容を入力してください。" : "署名する名前を入力してください。"
+            notice(tool == .note ? "メモの内容を入力してください。" : "署名する名前を入力してください。")
             return
         }
         guard bounds.width >= 1, bounds.height >= 1 else {
-            statusMessage = "注釈の範囲が小さすぎます。"
+            notice("注釈の範囲が小さすぎます。")
             return
         }
         let edit = PDFMarkupEdit(
@@ -580,7 +594,7 @@ final class EditorModel: ObservableObject {
               let document, let page = document.page(at: activeMarkupEdits[index].pageIndex) else { return }
         if activeMarkupEdits[index].tool == .signature,
            text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            statusMessage = "署名は空にできません。文字を入力してください。"
+            notice("署名は空にできません。文字を入力してください。")
             return
         }
         let previous = activeMarkupEdits[index]
@@ -651,7 +665,7 @@ final class EditorModel: ObservableObject {
 
     func addSelectedRedactionRegion() {
         guard mode == .redaction, let target = selectedTarget else {
-            statusMessage = "先に墨消しする文字をPDF上で選択してください。"
+            notice("先に墨消しする文字をPDF上で選択してください。")
             return
         }
         addRedactionRegion(pageIndex: target.pageIndex, bounds: target.bounds, text: target.originalText)
@@ -663,18 +677,18 @@ final class EditorModel: ObservableObject {
               let page = document?.page(at: pageIndex),
               bounds.width > 0, bounds.height > 0,
               !bounds.isNull, !bounds.isInfinite else {
-            statusMessage = "PDFページ内の範囲を指定してください。"
+            notice("PDFページ内の範囲を指定してください。")
             return
         }
         let clippedBounds = bounds.intersection(page.bounds(for: .cropBox))
         guard !clippedBounds.isNull, !clippedBounds.isEmpty else {
-            statusMessage = "墨消し範囲がページ内にありません。"
+            notice("墨消し範囲がページ内にありません。")
             return
         }
         guard !redactionRegions.contains(where: {
             $0.pageIndex == pageIndex && $0.bounds == clippedBounds
         }) else {
-            statusMessage = "この範囲はすでに墨消し対象へ追加されています。"
+            notice("この範囲はすでに墨消し対象へ追加されています。")
             return
         }
         redactionRegions.append(PDFRedactionRegion(pageIndex: pageIndex, bounds: clippedBounds, text: text))
@@ -700,7 +714,7 @@ final class EditorModel: ObservableObject {
 
     func applyRedactionsFromPanel() {
         guard let sourceURL, !redactionRegions.isEmpty else {
-            statusMessage = "先に墨消し対象を追加してください。"
+            notice("先に墨消し対象を追加してください。")
             return
         }
 
@@ -740,7 +754,7 @@ final class EditorModel: ObservableObject {
             selectedTarget = nil
             revision += 1
         } catch {
-            statusMessage = "安全な墨消しを完了できませんでした: \(error.localizedDescription)"
+            notice("安全な墨消しを完了できませんでした: \(error.localizedDescription)")
         }
     }
 
@@ -836,7 +850,7 @@ final class EditorModel: ObservableObject {
               let page = document.page(at: target.pageIndex) else { return }
         let normalized = replacementText.trimmingCharacters(in: .newlines)
         guard !normalized.isEmpty else {
-            statusMessage = "置換後の文字を入力してください。"
+            notice("置換後の文字を入力してください。")
             return
         }
         let previewReason = replacementFontPreview?.reason
@@ -950,7 +964,7 @@ final class EditorModel: ObservableObject {
         guard let draft = insertionDraft else { return }
         let normalized = replacementText.trimmingCharacters(in: .newlines)
         guard !normalized.isEmpty else {
-            statusMessage = "追加する文字を入力してください。"
+            notice("追加する文字を入力してください。")
             return
         }
         let id = UUID()
@@ -1021,7 +1035,7 @@ final class EditorModel: ObservableObject {
     func exportFromPanel() {
         guard document != nil, let sourceURL else { return }
         guard redactionRegions.isEmpty else {
-            statusMessage = "墨消し範囲をプレビュー中は通常書き出しできません。範囲を外すか、墨消し済みPDFを作成してください。"
+            notice("墨消し範囲をプレビュー中は通常書き出しできません。範囲を外すか、墨消し済みPDFを作成してください。")
             return
         }
         let panel = NSSavePanel()
@@ -1033,7 +1047,7 @@ final class EditorModel: ObservableObject {
         panel.message = "元のPDFは上書きせず、編集済みPDFを別名で保存します"
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
         guard outputURL.standardizedFileURL != sourceURL.standardizedFileURL else {
-            statusMessage = "元のPDFとは別のファイル名を指定してください。"
+            notice("元のPDFとは別のファイル名を指定してください。")
             return
         }
         do {
@@ -1045,7 +1059,7 @@ final class EditorModel: ObservableObject {
             )
             statusMessage = "保存しました: \(outputURL.lastPathComponent)"
         } catch {
-            statusMessage = "PDFの保存に失敗しました。"
+            notice("PDFの保存に失敗しました。")
         }
     }
 
@@ -1053,15 +1067,15 @@ final class EditorModel: ObservableObject {
     func resizeFromPanel(size: PDFPageSize, label: String) -> Bool {
         guard let sourceURL, let document else { return false }
         guard size.isValid else {
-            statusMessage = PDFPageResizeError.invalidSize.localizedDescription
+            notice(PDFPageResizeError.invalidSize.localizedDescription)
             return false
         }
         guard document.allowsCopying && document.allowsDocumentAssembly else {
-            statusMessage = "このPDFは内容のコピーまたはページの変更が許可されていません。"
+            notice("このPDFは内容のコピーまたはページの変更が許可されていません。")
             return false
         }
         guard !hasPendingEditorInput else {
-            statusMessage = "入力中の文字を確定してからページサイズを変更してください。"
+            notice("入力中の文字を確定してからページサイズを変更してください。")
             return false
         }
 
@@ -1102,7 +1116,7 @@ final class EditorModel: ObservableObject {
             statusMessage = "ページサイズを変更して保存しました: \(outputURL.lastPathComponent)"
             return true
         } catch {
-            statusMessage = error.localizedDescription
+            notice(error.localizedDescription)
             return false
         }
     }
@@ -1121,21 +1135,21 @@ final class EditorModel: ObservableObject {
     func cropFromPanel(margins: PDFCropMargins, pageSpecification: String) -> Bool {
         guard let sourceURL, let document else { return false }
         guard margins.isValid else {
-            statusMessage = PDFCropError.invalidMargins.localizedDescription
+            notice(PDFCropError.invalidMargins.localizedDescription)
             return false
         }
         guard !hasPendingEditorInput else {
-            statusMessage = "入力中の文字を確定してから切り抜いてください。"
+            notice("入力中の文字を確定してから切り抜いてください。")
             return false
         }
         do {
             _ = try PDFCropEngine.pageIndices(from: pageSpecification, pageCount: document.pageCount)
         } catch {
-            statusMessage = error.localizedDescription
+            notice(error.localizedDescription)
             return false
         }
         guard document.allowsCopying && document.allowsDocumentAssembly else {
-            statusMessage = "このPDFは内容のコピーまたはページの変更が許可されていません。"
+            notice("このPDFは内容のコピーまたはページの変更が許可されていません。")
             return false
         }
 
@@ -1166,7 +1180,7 @@ final class EditorModel: ObservableObject {
             statusMessage = "切り抜いて保存しました: \(outputURL.lastPathComponent)"
             return true
         } catch {
-            statusMessage = error.localizedDescription
+            notice(error.localizedDescription)
             return false
         }
     }
@@ -1174,7 +1188,7 @@ final class EditorModel: ObservableObject {
     func printFromPanel() {
         guard let sourceURL else { return }
         guard redactionRegions.isEmpty else {
-            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            notice("墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。")
             return
         }
 
@@ -1198,7 +1212,7 @@ final class EditorModel: ObservableObject {
             }
             guard resolvePendingPrintInput(decision) else {
                 if decision == .commit {
-                    statusMessage = "入力を確定できませんでした。内容を確認してから印刷してください。"
+                    notice("入力を確定できませんでした。内容を確認してから印刷してください。")
                 } else {
                     statusMessage = "印刷をキャンセルしました。"
                 }
@@ -1218,7 +1232,7 @@ final class EditorModel: ObservableObject {
                 scalingMode: .pageScaleDownToFit,
                 autoRotate: true
             ) else {
-                statusMessage = "標準の印刷ダイアログを準備できませんでした。"
+                notice("標準の印刷ダイアログを準備できませんでした。")
                 return
             }
             operation.showsPrintPanel = true
@@ -1227,14 +1241,14 @@ final class EditorModel: ObservableObject {
                 ? "印刷ジョブを送信しました。"
                 : "印刷をキャンセルしました。"
         } catch {
-            statusMessage = "印刷の準備に失敗しました: \(error.localizedDescription)"
+            notice("印刷の準備に失敗しました: \(error.localizedDescription)")
         }
     }
 
     @discardableResult
     func resolvePendingPrintInput(_ decision: PendingPrintInputDecision) -> Bool {
         guard redactionRegions.isEmpty else {
-            statusMessage = "墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。"
+            notice("墨消し範囲をプレビュー中は印刷できません。範囲を外すか、墨消し済みPDFを作成してください。")
             return false
         }
         guard hasPendingEditorInput else { return decision != .cancel }
