@@ -259,6 +259,88 @@ struct PDFMarkupEngineTests {
         } == true)
     }
 
+    @Test("export remaps internal link destinations to output pages")
+    func exportRemapsInternalLinkDestinations() throws {
+        let source = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R /Annots [8 0 R] >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 12 Tf 20 120 Td (FIRST) Tj ET"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 12 Tf 20 120 Td (SECOND) Tj ET"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            "<< /Type /Annot /Subtype /Link /Rect [20 100 100 118] /Border [0 0 0] /Dest [5 0 R /XYZ 42 64 1.25] >>"
+        ])
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-links-output-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        let sourceDocument = try #require(PDFDocument(url: source))
+        let firstPage = try #require(sourceDocument.page(at: 0))
+        let secondPage = try #require(sourceDocument.page(at: 1))
+        let sourceLink = try #require(firstPage.annotations.first {
+            $0.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        })
+        let sourceDestination = try #require(sourceLink.destination)
+        #expect(sourceDestination.page === secondPage)
+        let destinationPoint = CGPoint(x: 42, y: 64)
+
+        let markup = PDFMarkupEdit(
+            pageIndex: 1,
+            tool: .note,
+            bounds: CGRect(x: 100, y: 30, width: 24, height: 24),
+            text: "Target page"
+        )
+        let linkRemapHelperURL = ProcessInfo.processInfo.environment["PDF_EDITOR_LINK_REMAP_HELPER"]
+            .map { URL(fileURLWithPath: $0) }
+        try PDFExportEngine.export(
+            sourceURL: source,
+            edits: [],
+            markups: [markup],
+            to: output,
+            linkRemapHelperURL: linkRemapHelperURL
+        )
+        let exported = try #require(PDFDocument(url: output))
+        let exportedFirstPage = try #require(exported.page(at: 0))
+        let exportedSecondPage = try #require(exported.page(at: 1))
+        let exportedLink = try #require(exportedFirstPage.annotations.first {
+            $0.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        })
+        let exportedDestination = try #require(exportedLink.destination)
+        #expect(exportedDestination.page === exportedSecondPage)
+        #expect(exportedDestination.point == destinationPoint)
+        #expect(exportedDestination.zoom == 1.25)
+    }
+
+    @Test("signature text cannot be cleared by updating an existing annotation")
+    @MainActor
+    func emptySignatureUpdateIsRejected() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.markup)
+        model.setMarkupTool(.signature)
+        model.setSignatureText("Existing signature")
+        model.addMarkup(pageIndex: 0, bounds: CGRect(x: 30, y: 40, width: 140, height: 40))
+        let signatureID = try #require(model.selectedMarkupID)
+        let revision = model.revision
+
+        model.updateSelectedMarkupText(" \n ")
+
+        #expect(model.activeMarkupEdits.first(where: { $0.id == signatureID })?.text == "Existing signature")
+        #expect(model.document?.page(at: 0)?.annotations.first(where: {
+            $0.userName == PDFMarkupEngine.markerPrefix + signatureID.uuidString
+        })?.contents == "Existing signature")
+        #expect(model.revision == revision)
+        #expect(model.statusMessage == "署名は空にできません。文字を入力してください。")
+    }
+
     @Test("markup add, update, delete, undo and redo keep model and page in sync")
     @MainActor
     func modelMarkupHistory() throws {

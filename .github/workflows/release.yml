@@ -21,10 +21,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.4'
+      - name: Test PDF link remapper
+        run: go -C Tools/pdf-link-remap test ./...
+      - name: Build PDF link remapper
+        run: go -C Tools/pdf-link-remap build -trimpath -o "$RUNNER_TEMP/pdf-link-remap" .
       - name: Release build and acceptance tests
         run: |
           swift build -c release
-          swift test
+          PDF_EDITOR_LINK_REMAP_HELPER="$RUNNER_TEMP/pdf-link-remap" swift test
           python3 scripts/check-update-security.py
       - name: Build, notarize, sign updates, and publish
         run: scripts/publish-release.sh

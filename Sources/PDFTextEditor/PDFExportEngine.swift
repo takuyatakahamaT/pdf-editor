@@ -218,16 +218,53 @@ enum PDFExportError: Error {
     case cannotCreateContext
 }
 
+private struct PDFInternalLinkRemap: Encodable {
+    let pageIndex: Int
+    let linkIndex: Int
+    let bounds: [CGFloat]
+    let destinationPageIndex: Int
+    let destinationPoint: [CGFloat]
+    let destinationZoom: CGFloat?
+}
+
 enum PDFExportEngine {
     static func export(
         sourceURL: URL,
         edits: [ReplacementEdit],
         markups: [PDFMarkupEdit] = [],
-        to outputURL: URL
+        to outputURL: URL,
+        linkRemapHelperURL: URL? = nil
     ) throws {
         guard let document = PDFDocument(url: sourceURL),
               let firstPage = document.page(at: 0) else {
             throw PDFExportError.unreadableSource
+        }
+
+        var internalLinkRemaps: [PDFInternalLinkRemap] = []
+        for sourcePageIndex in 0..<document.pageCount {
+            guard let sourcePage = document.page(at: sourcePageIndex) else { continue }
+            var linkIndex = 0
+            for annotation in sourcePage.annotations
+                where annotation.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
+                let sourceLinkIndex = linkIndex
+                linkIndex += 1
+                guard let destination = annotation.destination
+                        ?? (annotation.action as? PDFActionGoTo)?.destination,
+                      let destinationPage = destination.page else { continue }
+                let destinationPageIndex = document.index(for: destinationPage)
+                if (0..<document.pageCount).contains(destinationPageIndex) {
+                    let bounds = annotation.bounds
+                    let zoom = destination.zoom
+                    internalLinkRemaps.append(PDFInternalLinkRemap(
+                        pageIndex: sourcePageIndex + 1,
+                        linkIndex: sourceLinkIndex,
+                        bounds: [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY],
+                        destinationPageIndex: destinationPageIndex + 1,
+                        destinationPoint: [destination.point.x, destination.point.y],
+                        destinationZoom: zoom.isFinite && zoom > 0 && zoom != kPDFDestinationUnspecifiedValue ? zoom : nil
+                    ))
+                }
+            }
         }
 
         var initialBox = firstPage.bounds(for: .mediaBox)
@@ -286,11 +323,95 @@ enum PDFExportEngine {
         let stagedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-markup-export-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: stagedURL) }
-        guard annotatedDocument.write(to: stagedURL), let data = try? Data(contentsOf: stagedURL) else {
+        guard annotatedDocument.write(to: stagedURL) else {
             throw PDFExportError.cannotCreateContext
         }
+        let data = try remappedLinkData(
+            stagedURL,
+            mappings: internalLinkRemaps,
+            helperURL: linkRemapHelperURL,
+            expectedPageCount: document.pageCount
+        )
         do { try data.write(to: outputURL, options: .atomic) }
         catch { throw PDFExportError.cannotCreateContext }
+    }
+
+    private static func remappedLinkData(
+        _ stagedURL: URL,
+        mappings: [PDFInternalLinkRemap],
+        helperURL: URL?,
+        expectedPageCount: Int
+    ) throws -> Data {
+        guard !mappings.isEmpty else {
+            guard let data = try? Data(contentsOf: stagedURL) else { throw PDFExportError.cannotCreateContext }
+            return data
+        }
+        let helper = helperURL
+            ?? ProcessInfo.processInfo.environment["PDF_EDITOR_LINK_REMAP_HELPER"].map { URL(fileURLWithPath: $0) }
+            ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/pdf-link-remap")
+        guard FileManager.default.isExecutableFile(atPath: helper.path),
+              let mappingData = try? JSONEncoder().encode(mappings) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        let mappingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-mappings-\(UUID().uuidString).json")
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-remapped-\(UUID().uuidString).pdf")
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-remap-log-\(UUID().uuidString).txt")
+        defer {
+            try? FileManager.default.removeItem(at: mappingURL)
+            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: logURL)
+        }
+        do { try mappingData.write(to: mappingURL, options: .atomic) }
+        catch { throw PDFExportError.cannotCreateContext }
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        guard let logHandle = FileHandle(forWritingAtPath: logURL.path) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = [stagedURL.path, outputURL.path, mappingURL.path]
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        do {
+            try process.run()
+            process.waitUntilExit()
+            try? logHandle.close()
+        } catch {
+            try? logHandle.close()
+            throw PDFExportError.cannotCreateContext
+        }
+        guard process.terminationStatus == 0,
+              let output = PDFDocument(url: outputURL),
+              output.pageCount == expectedPageCount else {
+            throw PDFExportError.cannotCreateContext
+        }
+        for mapping in mappings {
+            guard let page = output.page(at: mapping.pageIndex - 1) else {
+                throw PDFExportError.cannotCreateContext
+            }
+            let links = page.annotations.filter {
+                $0.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            guard links.indices.contains(mapping.linkIndex),
+                  let destination = links[mapping.linkIndex].destination,
+                  let destinationPage = destination.page,
+                  output.index(for: destinationPage) == mapping.destinationPageIndex - 1,
+                  abs(destination.point.x - mapping.destinationPoint[0]) < 0.01,
+                  abs(destination.point.y - mapping.destinationPoint[1]) < 0.01 else {
+                throw PDFExportError.cannotCreateContext
+            }
+            if let expectedZoom = mapping.destinationZoom,
+               abs(destination.zoom - expectedZoom) >= 0.0001 {
+                throw PDFExportError.cannotCreateContext
+            }
+        }
+        guard let data = try? Data(contentsOf: outputURL) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        return data
     }
 
     /// 印刷用の一時PDFを作る。無編集なら元PDFをそのまま複製する。編集がある場合は

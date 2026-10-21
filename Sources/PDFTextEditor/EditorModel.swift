@@ -563,6 +563,11 @@ final class EditorModel: ObservableObject {
               let index = activeMarkupEdits.firstIndex(where: { $0.id == id }),
               activeMarkupEdits[index].tool == .note || activeMarkupEdits[index].tool == .signature,
               let document, let page = document.page(at: activeMarkupEdits[index].pageIndex) else { return }
+        if activeMarkupEdits[index].tool == .signature,
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            statusMessage = "署名は空にできません。文字を入力してください。"
+            return
+        }
         let previous = activeMarkupEdits[index]
         var updated = previous
         updated.text = text
