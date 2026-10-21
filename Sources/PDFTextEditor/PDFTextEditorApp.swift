@@ -68,6 +68,12 @@ struct PDFTextEditorApp: App {
                 }
                 .keyboardShortcut("z")
                 .disabled(!model.canUndo)
+
+                Button("やり直す") {
+                    model.redoLastEdit()
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+                .disabled(!model.canRedo)
             }
 
             CommandGroup(replacing: .printItem) {
@@ -76,6 +82,19 @@ struct PDFTextEditorApp: App {
                 }
                 .keyboardShortcut("p")
                 .disabled(!model.canPrint)
+            }
+
+            CommandGroup(after: .appInfo) {
+                Button("アップデートを確認…") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.isConfigured)
+
+                if updater.isRestartPending {
+                    Button("更新して再起動…") {
+                        updater.restartToUpdate()
+                    }
+                }
             }
         }
     }

@@ -40,8 +40,8 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
     func checkForUpdates() {
         guard let controller else {
             let alert = NSAlert()
-            alert.messageText = "自動更新はまだ設定されていません"
-            alert.informativeText = "署名付き更新の公開鍵が設定されると、このメニューから更新できます。"
+            alert.messageText = "署名付きアップデートを利用できません"
+            alert.informativeText = "このアプリに有効な更新公開鍵が設定されていません。"
             alert.runModal()
             return
         }
@@ -83,7 +83,12 @@ final class AppUpdateController: NSObject, ObservableObject, SPUUpdaterDelegate 
             guard panel.runModal() == .OK, let outputURL = panel.url,
                   outputURL.standardizedFileURL != sourceURL.standardizedFileURL else { return }
             do {
-                try PDFExportEngine.export(sourceURL: sourceURL, edits: model.activeReplacements, to: outputURL)
+                try PDFExportEngine.export(
+                    sourceURL: sourceURL,
+                    edits: model.activeReplacements,
+                    markups: model.activeMarkupEdits,
+                    to: outputURL
+                )
                 reopenURL = outputURL
             } catch {
                 let failure = NSAlert(error: error)

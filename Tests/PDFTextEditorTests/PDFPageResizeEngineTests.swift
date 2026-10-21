@@ -24,6 +24,13 @@ struct PDFPageResizeEngineTests {
         )
         annotation.contents = "test note"
         page.addAnnotation(annotation)
+        let managedMarkup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .note,
+            bounds: CGRect(x: 500, y: 700, width: 120, height: 40),
+            text: "editable note"
+        )
+        page.addAnnotation(PDFMarkupEngine.makeAnnotation(for: managedMarkup))
         #expect(source.write(to: sourceURL))
         let sourceBytes = try Data(contentsOf: sourceURL)
 
@@ -40,7 +47,10 @@ struct PDFPageResizeEngineTests {
         #expect(abs(bounds.width - PDFPageSize.jisB5.widthPoints) < 0.1)
         #expect(abs(bounds.height - PDFPageSize.jisB5.heightPoints) < 0.1)
         #expect(resultPage.string?.contains("B5 SAMPLE") == true)
-        #expect(resultPage.annotations.count == 1)
+        #expect(resultPage.annotations.count == 2)
+        let restoredMarkup = try #require(PDFMarkupEngine.edits(in: result).first)
+        #expect(restoredMarkup.id == managedMarkup.id)
+        #expect(restoredMarkup.text == "editable note")
         let annotationBounds = try #require(resultPage.annotations.first?.bounds)
         #expect(abs(annotationBounds.minX - 182 * PDFPageSize.jisB5.widthPoints / 1_820) < 0.5)
         #expect(try Data(contentsOf: sourceURL) == sourceBytes)

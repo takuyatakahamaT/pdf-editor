@@ -27,8 +27,10 @@ struct EditorScreen: View {
                             document: document,
                             revision: model.revision,
                             mode: model.mode,
+                            markupTool: model.selectedMarkupTool,
                             selectedTarget: model.selectedTarget,
                             redactionRegions: model.redactionRegions,
+                            selectedMarkupID: model.selectedMarkupID,
                             highlightedSearchSelections: model.highlightedSearchSelections,
                             focusedSearchSelection: model.focusedSearchSelection,
                             searchHighlightRevision: model.searchHighlightRevision,
@@ -42,6 +44,11 @@ struct EditorScreen: View {
                             },
                             onMoveSelection: { delta in model.moveSelection(by: delta) },
                             onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
+                            onMarkupCreate: { pageIndex, bounds, points in
+                                model.addMarkup(pageIndex: pageIndex, bounds: bounds, points: points)
+                            },
+                            onSelectMarkup: { id in model.selectMarkup(id) },
+                            onMoveMarkup: { id, bounds in model.moveMarkup(id: id, to: bounds) },
                             onBeginInlineEditing: { model.beginInlineEditing() },
                             onChangeInlineText: { value in model.updateEditorText(value) },
                             onCommitInlineEditing: { model.commitEditorText() },
@@ -317,6 +324,10 @@ struct EditorScreen: View {
                         }
                 }
 
+                if model.mode == .markup {
+                    markupControls
+                }
+
                 if model.mode == .replacement {
                     ReplacementStylePanel(model: model)
                     VStack(alignment: .leading, spacing: 5) {
@@ -372,11 +383,37 @@ struct EditorScreen: View {
                         .disabled(!model.hasSelection)
                 }
 
-                Button("直前の変更を取り消す", action: model.undoLastEdit)
-                    .buttonStyle(.plain)
-                    .font(.custom("Hiragino Sans", size: 12).weight(.medium))
-                    .foregroundStyle(model.canUndo ? NihoPalette.muted : NihoPalette.muted.opacity(0.45))
-                    .disabled(!model.canUndo)
+                if model.mode == .markup, model.selectedMarkupID != nil {
+                    if let selected = model.selectedMarkup, selected.tool == .note || selected.tool == .signature {
+                        fieldLabel(selected.tool == .note ? "メモの内容" : "署名の文字")
+                        TextField(selected.tool == .note ? "メモを入力" : "署名を入力", text: Binding(
+                            get: { selected.tool == .note ? model.markupText : model.signatureText },
+                            set: { value in
+                                if selected.tool == .note { model.setMarkupText(value) }
+                                else { model.setSignatureText(value) }
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        Button("注釈の文字を更新", action: model.commitSelectedMarkupText)
+                            .buttonStyle(.plain)
+                            .foregroundStyle(NihoPalette.green)
+                    }
+                    Button("選択中の注釈を削除", action: model.deleteSelectedMarkup)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(NihoPalette.ink)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .background(NihoPalette.creamTint, in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                HStack(spacing: 12) {
+                    Button("取り消す", action: model.undoLastEdit)
+                        .disabled(!model.canUndo)
+                    Button("やり直す", action: model.redoLastEdit)
+                        .disabled(!model.canRedo)
+                }
+                .buttonStyle(.plain)
+                .font(.custom("Hiragino Sans", size: 12).weight(.medium))
+                .foregroundStyle(NihoPalette.muted)
             }
             .padding(24)
 
@@ -389,7 +426,9 @@ struct EditorScreen: View {
                     ? "白い背景の帳票向けMVPです。白塗りは元の文字を見えなくするだけで、書き出したPDFのテキスト抽出では元の文字列が残ります。元ファイルは上書きせず、編集済みPDFを別名保存します。"
                     : model.mode == .insertion
                     ? "文字は1行で追加され、書き出し時にベクター化されます。回転・縦書き・複数行は未対応です。"
-                    : "墨消しは全ページを高解像度画像に変換します。元PDFの文書メタデータは引き継ぎません。生成日時やProducer情報は新しいPDFに付く場合があります。")
+                    : model.mode == .redaction
+                    ? "墨消しは全ページを高解像度画像に変換します。元PDFの文書メタデータは引き継ぎません。生成日時やProducer情報は新しいPDFに付く場合があります。"
+                    : "注釈・署名はPDF内の編集可能な注釈として保存します。書き出したPDFを別の編集アプリで開くと、表示が変わる場合があります。")
                     .font(.custom("Hiragino Sans", size: 11))
                     .foregroundStyle(NihoPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -409,6 +448,7 @@ struct EditorScreen: View {
         case .replacement: "既存の文字を選択して編集"
         case .insertion: "PDF上をクリックして配置"
         case .redaction: "選択した文字を安全に墨消し"
+        case .markup: "注釈・署名を追加"
         }
     }
 
@@ -417,6 +457,7 @@ struct EditorScreen: View {
         case .replacement: "クリックで選択、ダブルクリックで直接編集。選択した文字はドラッグで移動できます。"
         case .insertion: "クリックした位置へ文字を追加。確定後は文字をドラッグして移動できます。"
         case .redaction: "墨消しする文字をクリックして対象へ追加。適用前に黒塗り範囲を確認できます。"
+        case .markup: "ツールを選び、文字を選択またはページ上をドラッグして注釈を配置します。"
         }
     }
 
@@ -475,6 +516,53 @@ struct EditorScreen: View {
         .buttonStyle(.plain)
         .disabled(model.redactionRegions.isEmpty)
         .opacity(model.redactionRegions.isEmpty ? 0.42 : 1)
+    }
+
+    @ViewBuilder
+    private var markupControls: some View {
+        Picker("注釈ツール", selection: Binding(
+            get: { model.selectedMarkupTool },
+            set: { model.setMarkupTool($0) }
+        )) {
+            ForEach(PDFMarkupTool.allCases) { tool in
+                Text(tool.title).tag(tool)
+            }
+        }
+        .pickerStyle(.menu)
+
+        if model.selectedMarkupTool.isTextMarkup {
+            fieldLabel("注釈を付ける文字")
+            Text(model.selectedTarget?.originalText ?? "PDF上の文字をクリックしてください")
+                .font(.custom("Hiragino Sans", size: 13))
+                .foregroundStyle(model.selectedTarget == nil ? NihoPalette.muted : NihoPalette.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(NihoPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+            Button("選択範囲に\(model.selectedMarkupTool.title)を適用", action: model.applySelectedTextMarkup)
+                .disabled(model.selectedTarget == nil)
+                .buttonStyle(.borderedProminent)
+        } else if model.selectedMarkupTool == .note {
+            fieldLabel("メモ")
+            TextField("メモの内容", text: Binding(
+                get: { model.markupText }, set: { model.setMarkupText($0) }
+            ))
+            .textFieldStyle(.roundedBorder)
+            Text("PDF上をクリックして配置します。")
+                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
+        } else if model.selectedMarkupTool == .signature {
+            fieldLabel("署名")
+            TextField("署名する名前", text: Binding(
+                get: { model.signatureText }, set: { model.setSignatureText($0) }
+            ))
+            .textFieldStyle(.roundedBorder)
+            Button("このMacに署名を保存", action: model.saveSignatureLocally)
+                .buttonStyle(.plain).foregroundStyle(NihoPalette.green)
+            Text("クリックで配置し、角をドラッグして大きさを調整できます。")
+                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
+        } else {
+            Text("PDF上をドラッグして\(model.selectedMarkupTool.title)を描きます。選択した注釈は移動できます。")
+                .font(.custom("Hiragino Sans", size: 11)).foregroundStyle(NihoPalette.muted)
+        }
     }
 
     private var landing: some View {

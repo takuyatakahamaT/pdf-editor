@@ -181,6 +181,20 @@ enum PDFEmbeddedFontLoader {
                           reason: reason + " 対応する全グリフを持つフォントも見つかりません。")
     }
 
+    /// 行の再描画に使う、Unicode文字列を直接描けるフォントを選ぶ。
+    /// 埋め込みサブセットは ToUnicode→CID→GID で選択文字だけ描ける場合があるが、
+    /// CoreText の文字列描画では同じ対応表を使えず、行末の未編集文字が別書体へ
+    /// フォールバックすることがある。未編集部分の再描画には埋め込みGID経路を使わず、
+    /// 元フォント名に一致し、行全体を Unicode で描けるローカルフォントを使う。
+    static func unicodeFontForLine(fontDict: CGPDFDictionaryRef, size: CGFloat, text: String) -> CTFont {
+        fallbackResolution(
+            fontDict: fontDict,
+            size: size,
+            requiredText: text,
+            reason: "行の文字を描けるローカルフォントが見つかりません。"
+        ).font
+    }
+
     /// 未導入フォントを代替するときは置換後の文字種だけで判断せず、元PDFの書体名を優先する。
     /// たとえば `MS-Gothic` の数字も Helvetica ではなく、近い日本語ゴシックで描画する。
     static func fallbackFontNames(for baseFontName: String?, replacementText: String) -> [String] {
@@ -401,11 +415,21 @@ enum PDFEmbeddedFontLoader {
     }
 
     private static let bundledFontsRegistered: Void = {
-        guard let fontURL = Bundle.module.url(
+        // Packaged app resources live in Contents/Resources. Bundle.module's generated
+        // accessor falls back to the build machine's absolute .build path when its
+        // SwiftPM resource bundle is absent, which makes an installed update machine-
+        // dependent. Prefer the self-contained app resource and use Bundle.module only
+        // for SwiftPM builds and tests.
+        let fontURL = Bundle.main.url(
             forResource: "NotoSansJP-Regular",
             withExtension: "otf",
             subdirectory: "Fonts"
-        ) else { return }
+        ) ?? Bundle.module.url(
+            forResource: "NotoSansJP-Regular",
+            withExtension: "otf",
+            subdirectory: "Fonts"
+        )
+        guard let fontURL else { return }
         _ = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
     }()
 

@@ -22,8 +22,14 @@ jobs:
         run: swift build -c release
       - name: Install Poppler tools for redaction verification
         run: brew list --versions poppler >/dev/null 2>&1 || brew install poppler
+      - name: Test PDF link remapper
+        run: go -C Tools/pdf-link-remap test ./...
+      - name: Build PDF link remapper
+        run: go -C Tools/pdf-link-remap build -trimpath -o "$RUNNER_TEMP/pdf-link-remap" .
       - name: Acceptance tests
         run: swift test
+        env:
+          PDF_EDITOR_LINK_REMAP_HELPER: ${{ runner.temp }}/pdf-link-remap
       - name: Update security acceptance (no private keys)
         run: python3 scripts/check-update-security.py
       - name: Package and verify the app (no release keys)

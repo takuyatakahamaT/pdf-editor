@@ -33,6 +33,10 @@ struct PDFEditingAcceptanceTests {
         model.commitEditorText()
 
         let edit = try #require(model.activeReplacements.first)
+        let previewAnnotation = try #require(
+            page.annotations.compactMap { $0 as? ReplacementTextAnnotation }.first
+        )
+        #expect(!previewAnnotation.shouldDisplay)
         let layout = try #require(edit.lineLayout)
         let font = try #require(edit.resolvedFont)
         let replacementWidth = edit.exactGlyphs.map { glyphs in
@@ -60,8 +64,8 @@ struct PDFEditingAcceptanceTests {
             width: plan.outputEnd - layout.selectedStartX,
             height: layout.coverBounds.height
         )
-        let oneX = try rasterMetrics(page: page, focus: dateBounds, scale: 1)
-        let fourX = try rasterMetrics(page: page, focus: dateBounds, scale: 4)
+        let oneX = try previewRasterMetrics(page: page, focus: dateBounds, scale: 1)
+        let fourX = try previewRasterMetrics(page: page, focus: dateBounds, scale: 4)
         #expect(fourX.pixelWidth >= oneX.pixelWidth * 3)
         #expect(fourX.darkPixels > 0)
         #expect(fourX.antialiasPixels > 0)
@@ -198,6 +202,16 @@ struct PDFEditingAcceptanceTests {
 
         let edit = try #require(model.activeReplacements.first)
         let resolvedFont = try #require(edit.resolvedFont)
+        let lineFont = try #require(edit.lineFont)
+        #expect(PDFEmbeddedFontLoader.missingCharacters(in: date, font: lineFont).isEmpty)
+        let suffix = "30日" as CFString
+        let suffixFont = CTFontCreateForString(
+            lineFont,
+            suffix,
+            CFRange(location: 0, length: CFStringGetLength(suffix))
+        )
+        // 置換で押し出された「30日」を一部だけ別書体へフォールバックさせない。
+        #expect(CTFontCopyPostScriptName(suffixFont) as String == CTFontCopyPostScriptName(lineFont) as String)
         let plan = PDFTextRenderer.reflowPlan(text: "10", font: resolvedFont, layout: lineLayout)
         #expect(edit.replacement == "10")
         #expect(CTFontGetSize(resolvedFont) == digit.fontSize)
@@ -212,7 +226,7 @@ struct PDFEditingAcceptanceTests {
             width: plan.outputEnd,
             height: lineLayout.coverBounds.height
         )
-        let preview = try rasterMetrics(page: page, focus: focus, scale: 4)
+        let preview = try previewRasterMetrics(page: page, focus: focus, scale: 4)
         #expect(preview.darkPixels > 0)
         #expect(preview.antialiasPixels > 0)
         #expect(preview.edgeTransitions > 100)
@@ -318,10 +332,12 @@ struct PDFEditingAcceptanceTests {
         #expect(page.annotations.count == 2)
         #expect(textAnnotation.bounds == edit.displayedTextBounds)
         #expect(coverAnnotation.bounds == edit.coverBounds)
+        #expect(!textAnnotation.shouldDisplay)
+        #expect(!coverAnnotation.shouldDisplay)
         #expect(textAnnotation.bounds.width < page.bounds(for: .mediaBox).width / 2)
 
         let movedBounds = edit.displayedTextBounds
-        let raster = try rasterMetrics(page: page, focus: movedBounds, scale: 4)
+        let raster = try previewRasterMetrics(page: page, focus: movedBounds, scale: 4)
         #expect(raster.darkPixels > 0)
         #expect(raster.antialiasPixels > 0)
 
@@ -359,6 +375,37 @@ struct PDFEditingAcceptanceTests {
         let image = page.thumbnail(of: size, for: .mediaBox)
         let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        return measure(bitmap: bitmap, mediaBox: mediaBox, focus: focus)
+    }
+
+    private func previewRasterMetrics(page: PDFPage, focus: CGRect, scale: CGFloat) throws -> RasterMetrics {
+        let mediaBox = page.bounds(for: .mediaBox)
+        let width = max(Int(ceil(mediaBox.width * scale)), 1)
+        let height = max(Int(ceil(mediaBox.height * scale)), 1)
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.union(
+            CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        )
+        let context = try #require(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: bitmapInfo.rawValue
+        ))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -mediaBox.minX, y: -mediaBox.minY)
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(mediaBox)
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+        ReplacementPreviewRenderer.draw(on: page, in: context)
+        let image = try #require(context.makeImage())
+        return measure(bitmap: NSBitmapImageRep(cgImage: image), mediaBox: mediaBox, focus: focus)
+    }
+
+    private func measure(bitmap: NSBitmapImageRep, mediaBox: CGRect, focus: CGRect) -> RasterMetrics {
         let sx = CGFloat(bitmap.pixelsWide) / mediaBox.width
         let sy = CGFloat(bitmap.pixelsHigh) / mediaBox.height
         let x0 = max(0, Int((focus.minX - mediaBox.minX) * sx))

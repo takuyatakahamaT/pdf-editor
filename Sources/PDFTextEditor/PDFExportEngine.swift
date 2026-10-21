@@ -32,7 +32,7 @@ struct TextRunReplacement {
 /// 1 件の編集（置換 or 追加）。書き出し (`PDFExportEngine`) は元 PDF を再度開き直して
 /// 描画するため、置換に必要なフォント解決結果 (`resolvedFont`/`fontIsExact`) は
 /// 選択・置換確定時 (`PDFEditEngine.applyReplacement`) に一度だけ行い、ここへ焼き込む。
-/// プレビュー (`ReplacementTextAnnotation`) と書き出しは同じ `ReplacementEdit` を使うため、
+/// プレビューオーバーレイと書き出しは同じ `ReplacementEdit` を使うため、
 /// フォント解決がぶれることはない。
 struct ReplacementEdit {
     let id: UUID
@@ -218,19 +218,63 @@ enum PDFExportError: Error {
     case cannotCreateContext
 }
 
+private struct PDFInternalLinkRemap: Encodable {
+    let pageIndex: Int
+    let linkIndex: Int
+    let bounds: [CGFloat]
+    let destinationPageIndex: Int
+}
+
 enum PDFExportEngine {
+    static func annotationsToCopy(from annotations: [PDFAnnotation]) -> [PDFAnnotation] {
+        let popupAnnotationIDs = Set(annotations.compactMap(\.popup).map(ObjectIdentifier.init))
+        return annotations.filter { annotation in
+            annotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) != true
+                && !popupAnnotationIDs.contains(ObjectIdentifier(annotation))
+        }
+    }
+
     static func export(
         sourceURL: URL,
         edits: [ReplacementEdit],
-        to outputURL: URL
+        markups: [PDFMarkupEdit] = [],
+        to outputURL: URL,
+        linkRemapHelperURL: URL? = nil
     ) throws {
         guard let document = PDFDocument(url: sourceURL),
               let firstPage = document.page(at: 0) else {
             throw PDFExportError.unreadableSource
         }
 
+        var internalLinkRemaps: [PDFInternalLinkRemap] = []
+        for sourcePageIndex in 0..<document.pageCount {
+            guard let sourcePage = document.page(at: sourcePageIndex) else { continue }
+            var linkIndex = 0
+            for annotation in sourcePage.annotations
+                where annotation.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
+                let sourceLinkIndex = linkIndex
+                linkIndex += 1
+                guard let destination = annotation.destination
+                        ?? (annotation.action as? PDFActionGoTo)?.destination,
+                      let destinationPage = destination.page else { continue }
+                let destinationPageIndex = document.index(for: destinationPage)
+                if (0..<document.pageCount).contains(destinationPageIndex) {
+                    let bounds = annotation.bounds
+                    internalLinkRemaps.append(PDFInternalLinkRemap(
+                        pageIndex: sourcePageIndex + 1,
+                        linkIndex: sourceLinkIndex,
+                        bounds: [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY],
+                        destinationPageIndex: destinationPageIndex + 1
+                    ))
+                }
+            }
+        }
+
+        let renderedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-rendered-export-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: renderedURL) }
         var initialBox = firstPage.bounds(for: .mediaBox)
-        guard let consumer = CGDataConsumer(url: outputURL as CFURL),
+        guard let consumer = CGDataConsumer(url: renderedURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &initialBox, nil) else {
             throw PDFExportError.cannotCreateContext
         }
@@ -239,9 +283,16 @@ enum PDFExportEngine {
             guard let page = document.page(at: pageIndex) else { continue }
             let pageBounds = page.bounds(for: .mediaBox)
             let pageInfo = [
-                kCGPDFContextMediaBox as String: pageBounds
+                kCGPDFContextMediaBox as String: pageBounds,
+                kCGPDFContextCropBox as String: page.bounds(for: .cropBox),
+                kCGPDFContextBleedBox as String: page.bounds(for: .bleedBox),
+                kCGPDFContextTrimBox as String: page.bounds(for: .trimBox),
+                kCGPDFContextArtBox as String: page.bounds(for: .artBox)
             ] as CFDictionary
 
+            let originalRotation = page.rotation
+            page.rotation = 0
+            defer { page.rotation = originalRotation }
             context.beginPDFPage(pageInfo)
             context.saveGState()
             page.draw(with: .mediaBox, to: context)
@@ -260,6 +311,120 @@ enum PDFExportEngine {
         }
 
         context.closePDF()
+        guard let annotatedDocument = PDFDocument(url: renderedURL) else {
+            throw PDFExportError.unreadableSource
+        }
+        let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)
+        for pageIndex in 0..<document.pageCount {
+            guard let sourcePage = document.page(at: pageIndex),
+                  let outputPage = annotatedDocument.page(at: pageIndex) else {
+                throw PDFExportError.unreadableSource
+            }
+            restorePageGeometry(from: sourcePage, to: outputPage)
+            for sourceAnnotation in annotationsToCopy(from: sourcePage.annotations) {
+                guard let copiedAnnotation = PDFMarkupEngine.duplicateAnnotation(sourceAnnotation) else {
+                    throw PDFExportError.cannotCreateContext
+                }
+                outputPage.addAnnotation(copiedAnnotation)
+            }
+            PDFMarkupEngine.replaceManagedAnnotations(on: outputPage, with: markupsByPage[pageIndex] ?? [])
+        }
+        let stagedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-markup-export-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
+        guard annotatedDocument.write(to: stagedURL) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        let data = try remappedLinkData(
+            sourceURL,
+            stagedURL,
+            mappings: internalLinkRemaps,
+            helperURL: linkRemapHelperURL,
+            expectedPageCount: document.pageCount
+        )
+        do { try data.write(to: outputURL, options: .atomic) }
+        catch { throw PDFExportError.cannotCreateContext }
+    }
+
+    private static func restorePageGeometry(from sourcePage: PDFPage, to outputPage: PDFPage) {
+        let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
+        for box in boxes {
+            outputPage.setBounds(sourcePage.bounds(for: box), for: box)
+        }
+        outputPage.rotation = sourcePage.rotation
+    }
+
+    private static func remappedLinkData(
+        _ sourceURL: URL,
+        _ stagedURL: URL,
+        mappings: [PDFInternalLinkRemap],
+        helperURL: URL?,
+        expectedPageCount: Int
+    ) throws -> Data {
+        guard !mappings.isEmpty else {
+            guard let data = try? Data(contentsOf: stagedURL) else { throw PDFExportError.cannotCreateContext }
+            return data
+        }
+        let helper = helperURL
+            ?? ProcessInfo.processInfo.environment["PDF_EDITOR_LINK_REMAP_HELPER"].map { URL(fileURLWithPath: $0) }
+            ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/pdf-link-remap")
+        guard FileManager.default.isExecutableFile(atPath: helper.path),
+              let mappingData = try? JSONEncoder().encode(mappings) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        let mappingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-mappings-\(UUID().uuidString).json")
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-remapped-\(UUID().uuidString).pdf")
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-link-remap-log-\(UUID().uuidString).txt")
+        defer {
+            try? FileManager.default.removeItem(at: mappingURL)
+            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: logURL)
+        }
+        do { try mappingData.write(to: mappingURL, options: .atomic) }
+        catch { throw PDFExportError.cannotCreateContext }
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        guard let logHandle = FileHandle(forWritingAtPath: logURL.path) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = [sourceURL.path, stagedURL.path, outputURL.path, mappingURL.path]
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        do {
+            try process.run()
+            process.waitUntilExit()
+            try? logHandle.close()
+        } catch {
+            try? logHandle.close()
+            throw PDFExportError.cannotCreateContext
+        }
+        guard process.terminationStatus == 0,
+              let output = PDFDocument(url: outputURL),
+              output.pageCount == expectedPageCount else {
+            throw PDFExportError.cannotCreateContext
+        }
+        for mapping in mappings {
+            guard let page = output.page(at: mapping.pageIndex - 1) else {
+                throw PDFExportError.cannotCreateContext
+            }
+            let links = page.annotations.filter {
+                $0.type == PDFAnnotationSubtype.link.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            guard links.indices.contains(mapping.linkIndex),
+                  let destination = links[mapping.linkIndex].destination,
+                  let destinationPage = destination.page,
+                  output.index(for: destinationPage) == mapping.destinationPageIndex - 1 else {
+                throw PDFExportError.cannotCreateContext
+            }
+        }
+        guard let data = try? Data(contentsOf: outputURL) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        return data
     }
 
     /// 印刷用の一時PDFを作る。無編集なら元PDFをそのまま複製する。編集がある場合は
@@ -268,9 +433,14 @@ enum PDFExportEngine {
     static func exportForPrinting(
         sourceURL: URL,
         edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit] = [],
         to outputURL: URL
     ) throws {
-        if edits.isEmpty {
+        guard let sourceDocument = PDFDocument(url: sourceURL), sourceDocument.pageCount > 0 else {
+            throw PDFExportError.unreadableSource
+        }
+        let sourceHasManagedMarkups = PDFMarkupEngine.hasManagedAnnotations(in: sourceDocument)
+        if edits.isEmpty && markups.isEmpty && !sourceHasManagedMarkups {
             do {
                 let sourceData = try Data(contentsOf: sourceURL)
                 try sourceData.write(to: outputURL, options: .atomic)
@@ -280,17 +450,17 @@ enum PDFExportEngine {
             }
         }
 
-        guard let sourceDocument = PDFDocument(url: sourceURL), sourceDocument.pageCount > 0 else {
-            throw PDFExportError.unreadableSource
-        }
         let printDocument = PDFDocument()
         let editsByPage = Dictionary(grouping: edits, by: \.pageIndex)
+        let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)
         for pageIndex in 0..<sourceDocument.pageCount {
             guard let sourcePage = sourceDocument.page(at: pageIndex),
                   let copiedPage = sourcePage.copy() as? PDFPage else {
                 throw PDFExportError.unreadableSource
             }
-            if let pageEdits = editsByPage[pageIndex], !pageEdits.isEmpty {
+            PDFMarkupEngine.replaceManagedAnnotations(on: copiedPage, with: markupsByPage[pageIndex] ?? [])
+            let pageEdits = editsByPage[pageIndex] ?? []
+            if !pageEdits.isEmpty || !(markupsByPage[pageIndex] ?? []).isEmpty {
                 let renderedPage = try renderPrintPage(copiedPage, edits: pageEdits)
                 printDocument.insert(renderedPage, at: pageIndex)
             } else {
@@ -341,6 +511,9 @@ enum PDFExportEngine {
             case .insertion:
                 drawInsertion(edit, in: context)
             }
+        }
+        for annotation in page.annotations where annotation.shouldPrint {
+            annotation.draw(with: .mediaBox, in: context)
         }
         context.endPDFPage()
         context.closePDF()

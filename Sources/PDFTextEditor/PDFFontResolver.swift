@@ -5,6 +5,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     case replacement
     case insertion
     case redaction
+    case markup
 
     var id: String { rawValue }
 
@@ -13,6 +14,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .replacement: return "既存文字を置換"
         case .insertion: return "テキストを追加"
         case .redaction: return "墨消し"
+        case .markup: return "注釈・署名"
         }
     }
 }

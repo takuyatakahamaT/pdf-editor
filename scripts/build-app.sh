@@ -34,6 +34,10 @@ GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cm
     cd "$APP_DIR/Tools/pdf-compress"
     "$GO_COMMAND" build -trimpath -o "$APP_DIR/.build/tools/pdf-compress" .
 )
+(
+    cd "$APP_DIR/Tools/pdf-link-remap"
+    "$GO_COMMAND" build -trimpath -o "$APP_DIR/.build/tools/pdf-link-remap" .
+)
 /usr/bin/install -m 755 \
     "$APP_DIR/.build/release/PDFTextEditor" \
     "$CONTENTS_DIR/MacOS/PDFTextEditor"
@@ -43,6 +47,9 @@ GOBIN="$APP_DIR/.build/tools" "$GO_COMMAND" install "github.com/pdfcpu/pdfcpu/cm
 /usr/bin/install -m 755 \
     "$APP_DIR/.build/tools/pdf-compress" \
     "$CONTENTS_DIR/Helpers/pdf-compress"
+/usr/bin/install -m 755 \
+    "$APP_DIR/.build/tools/pdf-link-remap" \
+    "$CONTENTS_DIR/Helpers/pdf-link-remap"
 /bin/cp "$APP_DIR/Resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 if [[ -n "${PDF_EDITOR_BUILD_VERSION:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $PDF_EDITOR_BUILD_VERSION" "$CONTENTS_DIR/Info.plist"
@@ -54,13 +61,20 @@ fi
 /usr/bin/ditto "$SPARKLE_FRAMEWORK" "$CONTENTS_DIR/Frameworks/Sparkle.framework"
 /usr/bin/install -m 644 "$SPARKLE_DIR/LICENSE" "$CONTENTS_DIR/Resources/ThirdParty/Sparkle-LICENSE.txt"
 /bin/cp "$APP_DIR/Resources/AppIcon.icns" "$CONTENTS_DIR/Resources/AppIcon.icns"
-RESOURCE_BUNDLE="$APP_DIR/.build/release/PDFTextEditor_PDFTextEditor.bundle"
-if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
-    echo "SwiftPMのフォントリソースが見つかりません: $RESOURCE_BUNDLE" >&2
+FONT_RESOURCE="$APP_DIR/Sources/PDFTextEditor/Resources/Fonts/NotoSansJP-Regular.otf"
+FONT_RESOURCE_DEST="$CONTENTS_DIR/Resources/Fonts/NotoSansJP-Regular.otf"
+/bin/rm -rf "$CONTENTS_DIR/PDFTextEditor_PDFTextEditor.bundle"
+/bin/rm -rf "$CONTENTS_DIR/Resources/PDFTextEditor_PDFTextEditor.bundle"
+if [[ ! -f "$FONT_RESOURCE" ]]; then
+    echo "アプリ同梱フォントが見つかりません: $FONT_RESOURCE" >&2
     exit 1
 fi
-/bin/rm -rf "$CONTENTS_DIR/Resources/PDFTextEditor_PDFTextEditor.bundle"
-/bin/cp -R "$RESOURCE_BUNDLE" "$CONTENTS_DIR/Resources/PDFTextEditor_PDFTextEditor.bundle"
+/bin/mkdir -p "${FONT_RESOURCE_DEST:h}"
+/usr/bin/install -m 644 "$FONT_RESOURCE" "$FONT_RESOURCE_DEST"
+if [[ ! -s "$FONT_RESOURCE_DEST" ]]; then
+    echo "アプリ同梱フォントを配置できません: $FONT_RESOURCE_DEST" >&2
+    exit 1
+fi
 /bin/rm -f "$CONTENTS_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt"
 /usr/bin/install -m 644 \
     "$APP_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt" \

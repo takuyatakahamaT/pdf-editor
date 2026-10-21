@@ -6,8 +6,29 @@ import UniformTypeIdentifiers
 struct AppliedEdit {
     let pageIndex: Int
     let annotations: [PDFAnnotation]
-    var replacement: ReplacementEdit
+    var replacement: ReplacementEdit?
     var restoredAnnotations: [PDFAnnotation] = []
+    var markupChange: MarkupChange?
+
+    init(
+        pageIndex: Int,
+        annotations: [PDFAnnotation],
+        replacement: ReplacementEdit? = nil,
+        restoredAnnotations: [PDFAnnotation] = [],
+        markupChange: MarkupChange? = nil
+    ) {
+        self.pageIndex = pageIndex
+        self.annotations = annotations
+        self.replacement = replacement
+        self.restoredAnnotations = restoredAnnotations
+        self.markupChange = markupChange
+    }
+}
+
+enum MarkupChange {
+    case added(PDFMarkupEdit)
+    case changed(before: PDFMarkupEdit, after: PDFMarkupEdit)
+    case deleted(PDFMarkupEdit)
 }
 
 struct InsertionDraft {
@@ -41,6 +62,11 @@ final class EditorModel: ObservableObject {
     @Published private(set) var importedFontFamilies: [String] = []
     @Published private(set) var edits: [AppliedEdit] = []
     @Published private(set) var redactionRegions: [PDFRedactionRegion] = []
+    @Published private(set) var activeMarkupEdits: [PDFMarkupEdit] = []
+    @Published private(set) var selectedMarkupTool: PDFMarkupTool = .highlight
+    @Published private(set) var selectedMarkupID: UUID?
+    @Published var markupText = ""
+    @Published var signatureText = UserDefaults.standard.string(forKey: "PDFEditor.SignatureText") ?? ""
     @Published private(set) var revision = 0
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
     @Published var isShowingMergeSheet = false
@@ -62,17 +88,26 @@ final class EditorModel: ObservableObject {
     @Published private(set) var searchHighlightRevision = 0
     @Published private(set) var searchNavigationRevision = 0
 
+    private var redoEdits: [AppliedEdit] = []
+
     init(initialURL: URL?) {
         importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
         if let initialURL { load(url: initialURL) }
     }
 
     var canUndo: Bool { !edits.isEmpty }
+    var canRedo: Bool { !redoEdits.isEmpty }
     var activeReplacements: [ReplacementEdit] {
-        let latestIndexByID = Dictionary(edits.enumerated().map { ($0.element.replacement.id, $0.offset) },
-                                         uniquingKeysWith: { _, latest in latest })
+        let latestIndexByID = Dictionary(
+            edits.enumerated().compactMap { index, applied in
+                applied.replacement.map { ($0.id, index) }
+            },
+            uniquingKeysWith: { _, latest in latest }
+        )
         let latestEdits = edits.enumerated().compactMap { index, applied -> (Int, ReplacementEdit)? in
-            latestIndexByID[applied.replacement.id] == index ? (index, applied.replacement) : nil
+            guard let replacement = applied.replacement,
+                  latestIndexByID[replacement.id] == index else { return nil }
+            return (index, replacement)
         }
         var visible: [(Int, ReplacementEdit)] = []
         for item in latestEdits {
@@ -94,11 +129,16 @@ final class EditorModel: ObservableObject {
     var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil || !redactionRegions.isEmpty }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
+    var selectedMarkup: PDFMarkupEdit? {
+        guard let selectedMarkupID else { return nil }
+        return activeMarkupEdits.first(where: { $0.id == selectedMarkupID })
+    }
     var canEditText: Bool {
         switch mode {
         case .replacement: hasSelection
         case .insertion: hasInsertionLocation
         case .redaction: false
+        case .markup: hasSelection && selectedMarkupTool.isTextMarkup
         }
     }
     var canCommit: Bool {
@@ -307,6 +347,10 @@ final class EditorModel: ObservableObject {
         ocrLowConfidenceLines = []
         ocrProcessedPages = []
         ocrProgress = ""
+        redoEdits = []
+        activeMarkupEdits = PDFMarkupEngine.edits(in: loadedDocument)
+        selectedMarkupID = nil
+        markupText = ""
         searchResults = []
         highlightedSearchSelections = []
         focusedSearchSelection = nil
@@ -396,6 +440,7 @@ final class EditorModel: ObservableObject {
         discardInsertionDraft()
         mode = newMode
         selectedTarget = nil
+        selectedMarkupID = nil
         isInlineEditing = false
         replacementFontChoice = .automatic
         replacementText = ""
@@ -403,8 +448,174 @@ final class EditorModel: ObservableObject {
         statusMessage = statusForMode(newMode)
     }
 
+    func setMarkupTool(_ tool: PDFMarkupTool) {
+        selectedMarkupTool = tool
+        selectedTarget = nil
+        selectedMarkupID = nil
+        revision += 1
+        statusMessage = tool.isTextMarkup
+            ? "注釈を付ける文字をクリックして選択してください。"
+            : "PDF上をクリックまたはドラッグして「\(tool.title)」を配置してください。"
+    }
+
+    func selectMarkup(_ id: UUID?) {
+        selectedTarget = nil
+        isInlineEditing = false
+        selectedMarkupID = id
+        guard let id, let edit = activeMarkupEdits.first(where: { $0.id == id }) else { return }
+        if edit.tool == .note { markupText = edit.text }
+        if edit.tool == .signature { signatureText = edit.text }
+        statusMessage = "\(edit.tool.title)を選択しました。移動・削除できます。"
+    }
+
+    func setMarkupText(_ text: String) {
+        markupText = text
+    }
+
+    func setSignatureText(_ text: String) {
+        signatureText = text
+    }
+
+    func saveSignatureLocally() {
+        let value = signatureText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            statusMessage = "保存する署名を入力してください。"
+            return
+        }
+        signatureText = value
+        UserDefaults.standard.set(value, forKey: "PDFEditor.SignatureText")
+        statusMessage = "署名をこのMacに保存しました。"
+    }
+
+    func applySelectedTextMarkup() {
+        guard mode == .markup, selectedMarkupTool.isTextMarkup,
+              let target = selectedTarget else {
+            statusMessage = "先に注釈を付ける文字を選択してください。"
+            return
+        }
+        addMarkup(pageIndex: target.pageIndex, bounds: target.bounds, points: [], text: "")
+    }
+
+    func addMarkup(pageIndex: Int, bounds: CGRect, points: [CGPoint] = [], text: String? = nil) {
+        guard mode == .markup, let document, let page = document.page(at: pageIndex) else { return }
+        let tool = selectedMarkupTool
+        var annotationText = text ?? ""
+        if tool == .note { annotationText = markupText.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if tool == .signature { annotationText = signatureText.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if tool.usesTextInput && annotationText.isEmpty {
+            statusMessage = tool == .note ? "メモの内容を入力してください。" : "署名する名前を入力してください。"
+            return
+        }
+        guard bounds.width >= 1, bounds.height >= 1 else {
+            statusMessage = "注釈の範囲が小さすぎます。"
+            return
+        }
+        let edit = PDFMarkupEdit(
+            pageIndex: pageIndex,
+            tool: tool,
+            bounds: bounds,
+            points: points,
+            text: annotationText
+        )
+        let annotation = PDFMarkupEngine.makeAnnotation(for: edit)
+        page.addAnnotation(annotation)
+        activeMarkupEdits.append(edit)
+        selectedMarkupID = edit.id
+        recordEdit(AppliedEdit(
+            pageIndex: pageIndex,
+            annotations: [annotation],
+            markupChange: .added(edit)
+        ))
+        selectedTarget = nil
+        revision += 1
+        statusMessage = "\(tool.title)を追加しました。保存後もPDF内で編集できます。"
+    }
+
+    func moveMarkup(id: UUID, to bounds: CGRect) {
+        guard mode == .markup, let document,
+              let index = activeMarkupEdits.firstIndex(where: { $0.id == id }),
+              let page = document.page(at: activeMarkupEdits[index].pageIndex) else { return }
+        let previous = activeMarkupEdits[index]
+        var updated = previous
+        updated.bounds = bounds
+        updated.points = previous.points.map { point in
+            CGPoint(
+                x: bounds.minX + (point.x - previous.bounds.minX) / max(previous.bounds.width, 1) * bounds.width,
+                y: bounds.minY + (point.y - previous.bounds.minY) / max(previous.bounds.height, 1) * bounds.height
+            )
+        }
+        let newAnnotation = PDFMarkupEngine.makeAnnotation(for: updated)
+        let existingAnnotation = page.annotations.first(where: { $0.userName == PDFMarkupEngine.markerPrefix + id.uuidString })
+        let oldAnnotation = existingAnnotation ?? PDFMarkupEngine.makeAnnotation(for: previous)
+        oldAnnotation.bounds = previous.bounds
+        if existingAnnotation != nil { page.removeAnnotation(oldAnnotation) }
+        page.addAnnotation(newAnnotation)
+        activeMarkupEdits[index] = updated
+        recordEdit(AppliedEdit(
+            pageIndex: updated.pageIndex,
+            annotations: [newAnnotation],
+            restoredAnnotations: [oldAnnotation],
+            markupChange: .changed(before: previous, after: updated)
+        ))
+        revision += 1
+        statusMessage = "\(updated.tool.title)を移動しました。"
+    }
+
+    func updateSelectedMarkupText(_ text: String) {
+        guard let id = selectedMarkupID,
+              let index = activeMarkupEdits.firstIndex(where: { $0.id == id }),
+              activeMarkupEdits[index].tool == .note || activeMarkupEdits[index].tool == .signature,
+              let document, let page = document.page(at: activeMarkupEdits[index].pageIndex) else { return }
+        if activeMarkupEdits[index].tool == .signature,
+           text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            statusMessage = "署名は空にできません。文字を入力してください。"
+            return
+        }
+        let previous = activeMarkupEdits[index]
+        var updated = previous
+        updated.text = text
+        let newAnnotation = PDFMarkupEngine.makeAnnotation(for: updated)
+        let oldAnnotation = page.annotations.first(where: { $0.userName == PDFMarkupEngine.markerPrefix + id.uuidString })
+            ?? PDFMarkupEngine.makeAnnotation(for: previous)
+        if page.annotations.contains(where: { $0 === oldAnnotation }) { page.removeAnnotation(oldAnnotation) }
+        page.addAnnotation(newAnnotation)
+        activeMarkupEdits[index] = updated
+        recordEdit(AppliedEdit(
+            pageIndex: updated.pageIndex,
+            annotations: [newAnnotation],
+            restoredAnnotations: [oldAnnotation],
+            markupChange: .changed(before: previous, after: updated)
+        ))
+        revision += 1
+    }
+
+    func commitSelectedMarkupText() {
+        guard let selectedMarkup else { return }
+        updateSelectedMarkupText(selectedMarkup.tool == .note ? markupText : signatureText)
+    }
+
+    func deleteSelectedMarkup() {
+        guard let id = selectedMarkupID,
+              let index = activeMarkupEdits.firstIndex(where: { $0.id == id }),
+              let document, let page = document.page(at: activeMarkupEdits[index].pageIndex) else { return }
+        let deleted = activeMarkupEdits.remove(at: index)
+        let annotation = page.annotations.first(where: { $0.userName == PDFMarkupEngine.markerPrefix + id.uuidString })
+        if let annotation { page.removeAnnotation(annotation) }
+        recordEdit(AppliedEdit(
+            pageIndex: deleted.pageIndex,
+            annotations: [],
+            restoredAnnotations: annotation.map { [$0] } ?? [PDFMarkupEngine.makeAnnotation(for: deleted)],
+            markupChange: .deleted(deleted)
+        ))
+        selectedMarkupID = nil
+        revision += 1
+        statusMessage = "注釈を削除しました。Undoで戻せます。"
+    }
+
     func select(_ target: TextTarget?) {
-        guard mode == .replacement || mode == .redaction else { return }
+        guard mode == .replacement || mode == .redaction
+                || (mode == .markup && selectedMarkupTool.isTextMarkup) else { return }
+        selectedMarkupID = nil
         selectedTarget = target
         isInlineEditing = false
         if mode == .replacement {
@@ -414,11 +625,15 @@ final class EditorModel: ObservableObject {
         if let target {
             statusMessage = mode == .replacement
                 ? "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
-                : "\(target.pageIndex + 1)ページ目の文字を選択しました。墨消し対象に追加できます。"
+                : mode == .redaction
+                ? "\(target.pageIndex + 1)ページ目の文字を選択しました。墨消し対象に追加できます。"
+                : "\(target.pageIndex + 1)ページ目の文字を選択しました。注釈を適用できます。"
         } else {
             statusMessage = mode == .replacement
                 ? "文字のない場所です。既存の文字をクリックしてください。"
-                : "文字のない場所です。墨消しする文字をクリックしてください。"
+                : mode == .redaction
+                ? "文字のない場所です。墨消しする文字をクリックしてください。"
+                : "文字のない場所です。注釈を付ける文字をクリックしてください。"
         }
     }
 
@@ -580,6 +795,7 @@ final class EditorModel: ObservableObject {
         case .replacement: applyReplacement()
         case .insertion: applyInsertion()
         case .redaction: addSelectedRedactionRegion()
+        case .markup: applySelectedTextMarkup()
         }
     }
 
@@ -617,7 +833,7 @@ final class EditorModel: ObservableObject {
             annotation = ReplacementTextAnnotation(edit: replacement)
             page.addAnnotation(annotation)
         }
-        edits.append(AppliedEdit(
+        recordEdit(AppliedEdit(
             pageIndex: target.pageIndex,
             annotations: [annotation],
             replacement: replacement
@@ -646,7 +862,7 @@ final class EditorModel: ObservableObject {
             target: target,
             destination: CGPoint(x: x, y: y)
         )
-        edits.append(AppliedEdit(pageIndex: target.pageIndex, annotations: result.annotations, replacement: result.edit))
+        recordEdit(AppliedEdit(pageIndex: target.pageIndex, annotations: result.annotations, replacement: result.edit))
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
@@ -656,12 +872,12 @@ final class EditorModel: ObservableObject {
 
     func moveExistingEdit(id: UUID, by delta: CGPoint) {
         guard let document,
-              let previous = edits.last(where: { $0.replacement.id == id }),
+              let previous = edits.last(where: { $0.replacement?.id == id }),
               let page = document.page(at: previous.pageIndex),
-              previous.replacement.kind == .replacement,
-              !previous.replacement.replacement.isEmpty,
+              let edit = previous.replacement,
+              edit.kind == .replacement,
+              !edit.replacement.isEmpty,
               !previous.annotations.isEmpty else { return }
-        let edit = previous.replacement
         let oldAnnotations = previous.annotations
         let currentOrigin = edit.destinationOrigin ?? CGPoint(x: edit.bounds.minX, y: edit.baseline)
         let displayedBounds = edit.displayedTextBounds
@@ -673,8 +889,8 @@ final class EditorModel: ObservableObject {
         let movedEdit = edit.movingSelection(to: CGPoint(x: x, y: y))
         for annotation in oldAnnotations { page.removeAnnotation(annotation) }
         let annotations = PDFEditEngine.addMovementAnnotations(for: movedEdit, to: page)
-        edits.append(AppliedEdit(pageIndex: edit.pageIndex, annotations: annotations,
-                                 replacement: movedEdit, restoredAnnotations: oldAnnotations))
+        recordEdit(AppliedEdit(pageIndex: edit.pageIndex, annotations: annotations,
+                               replacement: movedEdit, restoredAnnotations: oldAnnotations))
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
@@ -686,7 +902,7 @@ final class EditorModel: ObservableObject {
         guard mode == .replacement, let document, let target = selectedTarget,
               let page = document.page(at: target.pageIndex) else { return }
         let result = PDFEditEngine.applyDeletion(to: page, target: target)
-        edits.append(AppliedEdit(
+        recordEdit(AppliedEdit(
             pageIndex: target.pageIndex,
             annotations: [result.annotation],
             replacement: result.edit
@@ -718,7 +934,7 @@ final class EditorModel: ObservableObject {
             fontColor: insertionFontColor,
             id: id
         )
-        edits.append(AppliedEdit(pageIndex: draft.pageIndex, annotations: [draft.annotation], replacement: edit))
+        recordEdit(AppliedEdit(pageIndex: draft.pageIndex, annotations: [draft.annotation], replacement: edit))
         insertionDraft = nil
         replacementText = ""
         revision += 1
@@ -734,8 +950,12 @@ final class EditorModel: ObservableObject {
         }
         let rawID = String(marker.dropFirst(PDFEditEngine.annotationMarkerPrefix.count))
         guard let id = UUID(uuidString: rawID),
-              let index = edits.lastIndex(where: { $0.pageIndex == pageIndex && $0.replacement.id == id }) else { return }
-        edits[index].replacement = edits[index].replacement.moved(to: bounds)
+              let index = edits.lastIndex(where: { $0.pageIndex == pageIndex && $0.replacement?.id == id }),
+              let replacement = edits[index].replacement else { return }
+        if replacement.bounds != bounds {
+            edits[index].replacement = replacement.moved(to: bounds)
+            redoEdits.removeAll()
+        }
         revision += 1
         statusMessage = "追加したテキストの位置を移動しました。"
     }
@@ -745,11 +965,25 @@ final class EditorModel: ObservableObject {
               let page = document.page(at: edit.pageIndex) else { return }
         for annotation in edit.annotations.reversed() { page.removeAnnotation(annotation) }
         for annotation in edit.restoredAnnotations { page.addAnnotation(annotation) }
+        if let change = edit.markupChange { undoMarkupState(change) }
+        redoEdits.append(edit)
+        selectedMarkupID = nil
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
         revision += 1
         statusMessage = "直前の変更を取り消しました。"
+    }
+
+    func redoLastEdit() {
+        guard let document, let edit = redoEdits.popLast(),
+              let page = document.page(at: edit.pageIndex) else { return }
+        for annotation in edit.restoredAnnotations.reversed() { page.removeAnnotation(annotation) }
+        for annotation in edit.annotations { page.addAnnotation(annotation) }
+        if let change = edit.markupChange { redoMarkupState(change) }
+        edits.append(edit)
+        revision += 1
+        statusMessage = "変更をやり直しました。"
     }
 
     func exportFromPanel() {
@@ -767,7 +1001,12 @@ final class EditorModel: ObservableObject {
             return
         }
         do {
-            try PDFExportEngine.export(sourceURL: sourceURL, edits: activeReplacements, to: outputURL)
+            try PDFExportEngine.export(
+                sourceURL: sourceURL,
+                edits: activeReplacements,
+                markups: activeMarkupEdits,
+                to: outputURL
+            )
             statusMessage = "保存しました: \(outputURL.lastPathComponent)"
         } catch {
             statusMessage = "PDFの保存に失敗しました。"
@@ -810,9 +1049,10 @@ final class EditorModel: ObservableObject {
             if edits.isEmpty {
                 resizeSourceURL = sourceURL
             } else {
-                try PDFExportEngine.exportForPrinting(
+                try PDFExportEngine.export(
                     sourceURL: sourceURL,
                     edits: activeReplacements,
+                    markups: activeMarkupEdits,
                     to: preparedURL
                 )
                 resizeSourceURL = preparedURL
@@ -929,7 +1169,8 @@ final class EditorModel: ObservableObject {
         do {
             let prepared = try PDFPrintPreparationEngine.prepare(
                 sourceURL: sourceURL,
-                edits: activeReplacements
+                edits: activeReplacements,
+                markups: activeMarkupEdits
             )
             defer { prepared.cleanup() }
             guard let operation = prepared.document.printOperation(
@@ -962,6 +1203,41 @@ final class EditorModel: ObservableObject {
             return true
         case .cancel:
             return false
+        }
+    }
+
+    private func recordEdit(_ edit: AppliedEdit) {
+        edits.append(edit)
+        redoEdits.removeAll()
+    }
+
+    private func undoMarkupState(_ change: MarkupChange) {
+        switch change {
+        case .added(let edit):
+            activeMarkupEdits.removeAll { $0.id == edit.id }
+        case .changed(let before, _):
+            if let index = activeMarkupEdits.firstIndex(where: { $0.id == before.id }) {
+                activeMarkupEdits[index] = before
+            }
+        case .deleted(let edit):
+            if !activeMarkupEdits.contains(where: { $0.id == edit.id }) {
+                activeMarkupEdits.append(edit)
+            }
+        }
+    }
+
+    private func redoMarkupState(_ change: MarkupChange) {
+        switch change {
+        case .added(let edit):
+            if !activeMarkupEdits.contains(where: { $0.id == edit.id }) {
+                activeMarkupEdits.append(edit)
+            }
+        case .changed(_, let after):
+            if let index = activeMarkupEdits.firstIndex(where: { $0.id == after.id }) {
+                activeMarkupEdits[index] = after
+            }
+        case .deleted(let edit):
+            activeMarkupEdits.removeAll { $0.id == edit.id }
         }
     }
 
@@ -998,6 +1274,7 @@ final class EditorModel: ObservableObject {
         case .replacement: "変更したい文字をクリックしてください。"
         case .insertion: "PDF上の追加したい位置をクリックしてください。"
         case .redaction: "墨消し対象の文字を選択して、範囲をプレビューしてください。"
+        case .markup: "注釈・署名の種類を選び、PDF上に配置してください。"
         }
     }
 }
