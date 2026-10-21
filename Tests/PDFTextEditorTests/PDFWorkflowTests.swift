@@ -171,7 +171,7 @@ struct PDFWorkflowTests {
 
         let prepared = try PDFPrintPreparationEngine.prepare(sourceURL: source, edits: [edit])
         let editedPage = try #require(prepared.document.page(at: 0))
-        #expect(!InkScanner.scan(page: editedPage).isEmpty)
+        #expect(editedPage.string?.contains("PRINT") == true)
         #expect(editedPage.bounds(for: .mediaBox).size == CGSize(width: 240, height: 160))
         #expect(editedPage.rotation == 270)
         let untouchedPage = try #require(prepared.document.page(at: 1))
