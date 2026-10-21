@@ -150,6 +150,16 @@ struct PDFEditEngineTests {
         #expect(CTFontCopyFamilyName(CTFontCreateWithName("Noto Sans JP" as CFString, 12, nil)) as String == "Noto Sans JP")
     }
 
+    @Test("local Office MS Gothic is registered when its font file is available")
+    func registersLocalMSGothicWhenAvailable() {
+        let officeFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msgothic.ttc"
+        guard FileManager.default.fileExists(atPath: officeFont) else { return }
+
+        let families = PDFEmbeddedFontLoader.registerLocalFontFamilies()
+        #expect(families.contains { $0.replacingOccurrences(of: " ", with: "").lowercased() == "msgothic" })
+        #expect(PDFEmbeddedFontLoader.availableFont(named: "MS Gothic", size: 12) != nil)
+    }
+
     @Test("embedded-font replacement reflows instead of shrinking when it exceeds the selection width")
     func widerEmbeddedFontReplacementRequestsLineReflow() {
         #expect(PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: 9))
