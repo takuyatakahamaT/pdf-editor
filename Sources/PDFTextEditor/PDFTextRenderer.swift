@@ -13,8 +13,8 @@ enum PDFTextRenderer {
         context.saveGState()
         defer { context.restoreGState() }
 
-        if let destination = edit.destinationOrigin {
-            drawMoved(edit, at: destination, in: context)
+        if edit.destinationOrigin != nil {
+            drawMoved(edit, in: context)
             return
         }
 
@@ -49,9 +49,18 @@ enum PDFTextRenderer {
         drawGlyphOutlines(for: plan.line, in: context)
     }
 
-    private static func drawMoved(_ edit: ReplacementEdit, at destination: CGPoint, in context: CGContext) {
+    private static func drawMoved(_ edit: ReplacementEdit, in context: CGContext) {
+        drawMovedCover(edit, in: context)
+        drawMovedText(edit, in: context)
+    }
+
+    static func drawMovedCover(_ edit: ReplacementEdit, in context: CGContext) {
         context.setFillColor(NSColor.white.cgColor)
         context.fill(edit.coverBounds)
+    }
+
+    static func drawMovedText(_ edit: ReplacementEdit, in context: CGContext) {
+        guard let destination = edit.destinationOrigin else { return }
         guard !edit.replacement.isEmpty else { return }
         let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
         let line = makeLine(text: edit.replacement, font: font, color: edit.fontColor)
@@ -293,10 +302,13 @@ enum PDFTextRenderer {
 /// 画面プレビューと書き出し (`PDFExportEngine`) が完全に同じ描画コードを通る。
 final class ReplacementTextAnnotation: PDFAnnotation {
     let edit: ReplacementEdit
+    private let drawsMovedTextOnly: Bool
 
-    init(edit: ReplacementEdit) {
+    init(edit: ReplacementEdit, drawsMovedTextOnly: Bool = false) {
         self.edit = edit
-        super.init(bounds: edit.annotationBounds, forType: .square, withProperties: nil)
+        self.drawsMovedTextOnly = drawsMovedTextOnly
+        let bounds = drawsMovedTextOnly ? edit.displayedTextBounds : edit.annotationBounds
+        super.init(bounds: bounds, forType: .square, withProperties: nil)
         color = .clear
         interiorColor = nil
         let border = PDFBorder()
@@ -311,6 +323,36 @@ final class ReplacementTextAnnotation: PDFAnnotation {
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        PDFTextRenderer.draw(edit, in: context)
+        if drawsMovedTextOnly, edit.destinationOrigin != nil {
+            PDFTextRenderer.drawMovedText(edit, in: context)
+        } else {
+            PDFTextRenderer.draw(edit, in: context)
+        }
+    }
+}
+
+/// 移動後の文字注釈とは分離して、元の位置だけを白で覆う。
+/// 2つを一つの注釈 bounds にまとめると、離れた位置への移動で巨大な注釈になり、
+/// PDFKit の画面表示キャッシュが粗くなるため、小さい独立範囲で描画する。
+final class ReplacementCoverAnnotation: PDFAnnotation {
+    private let edit: ReplacementEdit
+
+    init(edit: ReplacementEdit) {
+        self.edit = edit
+        super.init(bounds: edit.coverBounds, forType: .square, withProperties: nil)
+        color = .clear
+        interiorColor = nil
+        let border = PDFBorder()
+        border.lineWidth = 0
+        self.border = border
+        userName = PDFEditEngine.annotationMarkerPrefix + "cover:" + edit.id.uuidString
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        PDFTextRenderer.drawMovedCover(edit, in: context)
     }
 }

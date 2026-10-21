@@ -290,7 +290,7 @@ final class EditorModel: ObservableObject {
             target: target,
             destination: CGPoint(x: x, y: y)
         )
-        edits.append(AppliedEdit(pageIndex: target.pageIndex, annotations: [result.annotation], replacement: result.edit))
+        edits.append(AppliedEdit(pageIndex: target.pageIndex, annotations: result.annotations, replacement: result.edit))
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
@@ -304,8 +304,9 @@ final class EditorModel: ObservableObject {
               let page = document.page(at: previous.pageIndex),
               previous.replacement.kind == .replacement,
               !previous.replacement.replacement.isEmpty,
-              let oldAnnotation = previous.annotations.first else { return }
+              !previous.annotations.isEmpty else { return }
         let edit = previous.replacement
+        let oldAnnotations = previous.annotations
         let currentOrigin = edit.destinationOrigin ?? CGPoint(x: edit.bounds.minX, y: edit.baseline)
         let displayedBounds = edit.displayedTextBounds
         let pageBounds = page.bounds(for: .mediaBox)
@@ -314,11 +315,10 @@ final class EditorModel: ObservableObject {
         let y = min(max(currentOrigin.y + delta.y, pageBounds.minY + edit.baseline - edit.bounds.minY),
                     max(pageBounds.maxY - (edit.bounds.maxY - edit.baseline), pageBounds.minY))
         let movedEdit = edit.movingSelection(to: CGPoint(x: x, y: y))
-        let annotation = ReplacementTextAnnotation(edit: movedEdit)
-        page.removeAnnotation(oldAnnotation)
-        page.addAnnotation(annotation)
-        edits.append(AppliedEdit(pageIndex: edit.pageIndex, annotations: [annotation],
-                                 replacement: movedEdit, restoredAnnotations: [oldAnnotation]))
+        for annotation in oldAnnotations { page.removeAnnotation(annotation) }
+        let annotations = PDFEditEngine.addMovementAnnotations(for: movedEdit, to: page)
+        edits.append(AppliedEdit(pageIndex: edit.pageIndex, annotations: annotations,
+                                 replacement: movedEdit, restoredAnnotations: oldAnnotations))
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
