@@ -280,10 +280,14 @@ enum PDFEmbeddedFontLoader {
         for character in text {
             guard let code = info.unicodeToCode[String(character)],
                   code > 0, code <= Int(CGGlyph.max),
-                  CTFontCreatePathForGlyph(font, CGGlyph(code), nil) != nil else { return nil }
+                  isValidGlyphID(code, in: font) else { return nil }
             result.append((CGGlyph(code), info.width(for: code)))
         }
         return result
+    }
+
+    static func isValidGlyphID(_ code: Int, in font: CTFont) -> Bool {
+        code > 0 && code < CTFontGetGlyphCount(font)
     }
 
     /// 元の FontDescriptor に埋め込みフォントプログラムが存在するかどうかだけを判定する

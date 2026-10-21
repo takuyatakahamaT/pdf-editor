@@ -160,6 +160,34 @@ struct PDFEditEngineTests {
         #expect(PDFEmbeddedFontLoader.availableFont(named: "MS Gothic", size: 12) != nil)
     }
 
+    @Test("valid embedded glyph IDs do not require a visible outline")
+    func validEmbeddedGlyphIDAllowsWhitespaceWithoutOutline() {
+        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
+        var characters = Array(" ".utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+        #expect(CTFontGetGlyphsForCharacters(font, &characters, &glyphs, characters.count))
+        #expect(glyphs[0] > 0)
+        #expect(PDFEmbeddedFontLoader.isValidGlyphID(Int(glyphs[0]), in: font))
+    }
+
+    @Test("line reflow stops before a differently colored suffix")
+    func lineReflowPreservesDifferentlyColoredSuffix() throws {
+        let url = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 200, height: 100),
+            contentStream: "BT /F1 12 Tf 1 0 0 1 20 50 Tm (A) Tj 1 0 0 rg (B) Tj 0 g (C) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "ABC" })
+        let target = try #require(index.target(in: run, range: 0..<1, pageIndex: 0))
+        let layout = try #require(target.lineLayout)
+
+        #expect(layout.glyphs.map(\.text) == ["A"])
+        #expect(layout.maxWidth <= run.glyphs[1].advanceBox.minX - layout.lineStartX + 0.01)
+    }
+
     @Test("embedded-font replacement reflows instead of shrinking when it exceeds the selection width")
     func widerEmbeddedFontReplacementRequestsLineReflow() {
         #expect(PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: 9))
@@ -300,8 +328,8 @@ struct PDFEditEngineTests {
         #expect(embeddedPlan.outputEnd > layout.lineWidth)
     }
 
-    @Test("replacement uses visually connected glyphs across font resource runs")
-    func replacementReflowsAcrossRuns() throws {
+    @Test("line reflow stops at a different font resource")
+    func replacementDoesNotReflowAcrossFontResources() throws {
         let baseline: CGFloat = 60
         func makeRun(_ pieces: [(String, CGFloat, CGFloat)], key: String) -> ScannedRun {
             let glyphs = pieces.map { text, x, width in
@@ -321,13 +349,13 @@ struct PDFEditEngineTests {
                                   pageBounds: CGRect(x: 0, y: 0, width: 260, height: 120))
         let target = try #require(index.target(in: digit, range: 0..<1, pageIndex: 0))
         let layout = try #require(target.lineLayout)
-        #expect(layout.glyphs.map(\.text).joined() == "9月30日")
+        #expect(layout.glyphs.map(\.text).joined() == "9")
         #expect(layout.selectedRange == 0..<1)
-        #expect(layout.lineStartX + layout.maxWidth == 190)
+        #expect(layout.lineStartX + layout.maxWidth == 107)
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
         let plan = PDFTextRenderer.reflowPlan(text: "11", font: font, layout: layout)
         #expect(plan.shift > 0)
-        #expect(plan.scale == 1)
+        #expect(plan.scale < 1)
     }
 
     @Test("moved replacement bounds include the full replacement width")
