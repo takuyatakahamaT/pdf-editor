@@ -28,6 +28,10 @@ struct EditorScreen: View {
                             revision: model.revision,
                             mode: model.mode,
                             selectedTarget: model.selectedTarget,
+                            highlightedSearchSelections: model.highlightedSearchSelections,
+                            focusedSearchSelection: model.focusedSearchSelection,
+                            searchHighlightRevision: model.searchHighlightRevision,
+                            searchNavigationRevision: model.searchNavigationRevision,
                             isInlineEditing: model.isInlineEditing,
                             zoomState: zoomState,
                             onSelection: { target in model.select(target) },
@@ -73,6 +77,10 @@ struct EditorScreen: View {
             PDFCompressionSheet()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.isShowingSearchSheet, onDismiss: model.closeSearchSheet) {
+            PDFSearchSheet()
+                .environmentObject(model)
+        }
     }
 
     private var topBar: some View {
@@ -102,6 +110,16 @@ struct EditorScreen: View {
             Text(model.pageCountText)
                 .font(.custom("Avenir Next", size: 12).weight(.medium))
                 .foregroundStyle(NihoPalette.muted)
+
+            Button(action: model.showSearchSheet) {
+                Image(systemName: "magnifyingglass")
+                    .frame(width: 32, height: 34)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("PDF内を検索（⌘F）")
+            .accessibilityLabel("PDF内を検索")
+            .disabled(model.document == nil)
 
             actionButton("PDFを開く", icon: "folder", emphasized: false) {
                 model.openFromPanel()
