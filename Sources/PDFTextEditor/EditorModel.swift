@@ -45,6 +45,7 @@ final class EditorModel: ObservableObject {
     @Published var isShowingCompressionSheet = false
 
     init(initialURL: URL?) {
+        importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
         if let initialURL { load(url: initialURL) }
     }
 

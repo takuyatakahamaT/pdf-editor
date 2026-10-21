@@ -19,6 +19,7 @@ enum InsertionFontChoice: String, CaseIterable, Identifiable {
     case automatic
     case hiraginoSans
     case hiraginoMincho
+    case msGothic
     case helveticaNeue
     case arial
     case timesNewRoman
@@ -31,6 +32,7 @@ enum InsertionFontChoice: String, CaseIterable, Identifiable {
         case .automatic: return "自動（周囲に合わせる）"
         case .hiraginoSans: return "ヒラギノ角ゴ"
         case .hiraginoMincho: return "ヒラギノ明朝"
+        case .msGothic: return "MS ゴシック"
         case .helveticaNeue: return "Helvetica Neue"
         case .arial: return "Arial"
         case .timesNewRoman: return "Times New Roman"
@@ -43,6 +45,7 @@ enum InsertionFontChoice: String, CaseIterable, Identifiable {
         case .automatic: return nil
         case .hiraginoSans: return "Hiragino Sans"
         case .hiraginoMincho: return "Hiragino Mincho ProN"
+        case .msGothic: return "MS Gothic"
         case .helveticaNeue: return "Helvetica Neue"
         case .arial: return "Arial"
         case .timesNewRoman: return "Times New Roman"

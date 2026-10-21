@@ -89,9 +89,17 @@ enum PDFEmbeddedFontLoader {
     }
 
     /// アプリに同梱した OFL フォントをこのプロセス内だけで登録する。
+    /// Microsoft Office にある MS Gothic も、配布用にコピーせずこのプロセス内だけで登録する。
     /// ユーザーのフォント設定やシステム全体のフォント一覧は変更しない。
     static func registerBundledFonts() {
         _ = bundledFontsRegistered
+        _ = localMSGothicRegistered
+    }
+
+    /// この Mac にある Microsoft Office の MS Gothic 系フォントを登録し、利用可能なファミリー名を返す。
+    static func registerLocalFontFamilies() -> [String] {
+        registerBundledFonts()
+        return localMSGothicRegistered
     }
 
     /// 利用者が選んだフォントファイルをアプリ終了までの間だけ登録する。
@@ -220,7 +228,7 @@ enum PDFEmbeddedFontLoader {
     /// `CTFontCreateWithName` は未知の名前でも別フォントを返すため、要求した書体と
     /// 実際に返った書体の family / PostScript 名が一致する場合だけ採用する。
     private static func installedFont(named name: String, size: CGFloat) -> CTFont? {
-        _ = bundledFontsRegistered
+        registerBundledFonts()
         let font = CTFontCreateWithName(name as CFString, size, nil)
         let requestedName = normalizedFontName(name)
         let actualNames = [
@@ -242,6 +250,22 @@ enum PDFEmbeddedFontLoader {
             subdirectory: "Fonts"
         ) else { return }
         _ = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+    }()
+
+    /// Office のインストール先は `/Applications` に置かれたアプリの symlink も解決する。
+    /// フォント本体をリポジトリや PDF editor.app に複製せず、ローカルの Office から直接読む。
+    private static let localMSGothicRegistered: [String] = {
+        let fontRelativePath = "Contents/Resources/DFonts/msgothic.ttc"
+        let candidates = [
+            URL(fileURLWithPath: "/Applications/Microsoft Word.app"),
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/Microsoft Word.app")
+        ].map { $0.appendingPathComponent(fontRelativePath) }
+
+        guard let fontURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            return []
+        }
+        return (try? registerFontFile(at: fontURL)) ?? []
     }()
 
     private static func containsJapanese(_ text: String) -> Bool {
