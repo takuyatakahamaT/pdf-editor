@@ -1,8 +1,14 @@
 import CoreGraphics
+import CoreText
 import Foundation
 
 /// フォントリソース辞書 (`/Font` 配下の 1 エントリ) から `PDFFontInfo` を組み立てる。
 enum PDFFontInfoLoader {
+    private struct StandardEncodingInfo {
+        let baseEncodingName: String
+        let overriddenCodes: Set<Int>
+    }
+
     static func load(from fontDict: CGPDFDictionaryRef) -> PDFFontInfo {
         let subtype = name(in: fontDict, key: "Subtype") ?? ""
 
@@ -120,15 +126,25 @@ enum PDFFontInfoLoader {
                 }
             }
         }
+        // PDF標準14フォントのうちCoreTextで一致確認できる12書体は、/Widths を省略できます。
+        // 一律0.5emで扱うと、PDFKitの実描画と選択・墨消し範囲が行に沿ってずれていきます。
+        for (code, width) in standardCoreTextWidths(in: fontDict) where widths[code] == nil {
+            widths[code] = width
+        }
 
         var ascent: CGFloat = 0.8
         var descent: CGFloat = -0.2
         var hasEmbedded = false
+        var defaultWidth: CGFloat = 0.5
         var descriptorDict: CGPDFDictionaryRef?
         if CGPDFDictionaryGetDictionary(fontDict, "FontDescriptor", &descriptorDict), let descriptorDict {
             var a: CGPDFReal = 0, d: CGPDFReal = 0
             if CGPDFDictionaryGetNumber(descriptorDict, "Ascent", &a) { ascent = a / 1000 }
             if CGPDFDictionaryGetNumber(descriptorDict, "Descent", &d) { descent = d / 1000 }
+            var missingWidth: CGPDFReal = 0
+            if CGPDFDictionaryGetNumber(descriptorDict, "MissingWidth", &missingWidth) {
+                defaultWidth = CGFloat(missingWidth) / 1000
+            }
             hasEmbedded = fontFileStream(in: descriptorDict) != nil
         }
 
@@ -147,7 +163,7 @@ enum PDFFontInfoLoader {
         return PDFFontInfo(
             bytesPerCode: 1,
             widthTable: widths,
-            defaultWidth: 0.5,
+            defaultWidth: defaultWidth,
             toUnicode: toUnicode,
             explicitToUnicodeCodes: explicitToUnicodeCodes,
             ascent: ascent,
@@ -168,6 +184,116 @@ enum PDFFontInfoLoader {
         if CGPDFDictionaryGetStream(descriptor, "FontFile3", &stream), let stream { return stream }
         if CGPDFDictionaryGetStream(descriptor, "FontFile", &stream), let stream { return stream }
         return nil
+    }
+
+    /// 既知の標準エンコーディングを使う標準14 Type1フォントについて、印字可能ASCIIの幅を返す。
+    /// CoreTextの標準フォントはPDFのAFM幅に対応する。/Differencesで変更されたコードは除外する。
+    private static func standardCoreTextWidths(in fontDict: CGPDFDictionaryRef) -> [Int: CGFloat] {
+        guard name(in: fontDict, key: "Subtype") == "Type1",
+              !hasExplicitStandardFontMetrics(in: fontDict),
+              let baseFontName = name(in: fontDict, key: "BaseFont"),
+              let postScriptName = standardCoreTextPostScriptName(baseFontName),
+              let encoding = standardEncodingInfo(in: fontDict) else { return [:] }
+
+        let font = CTFontCreateWithName(postScriptName as CFString, 1000, nil)
+        guard CTFontCopyPostScriptName(font) as String == postScriptName else { return [:] }
+
+        var widths: [Int: CGFloat] = [:]
+        for code in 32...126 where !encoding.overriddenCodes.contains(code) {
+            let unicodeCode = encoding.baseEncodingName == "StandardEncoding"
+                ? standardEncodingUnicodeCode(for: code)
+                : code
+            var character = UniChar(unicodeCode)
+            var glyph: CGGlyph = 0
+            guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0 else { continue }
+            var advance = CGSize.zero
+            guard CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1) > 0,
+                  advance.width.isFinite, advance.width > 0 else { continue }
+            widths[code] = advance.width / 1000
+        }
+        return widths
+    }
+
+    /// Base-14の明示メトリクス一式がある場合は、PDFの幅指定とMissingWidthを使い、CoreTextで穴埋めしない。
+    private static func hasExplicitStandardFontMetrics(in fontDict: CGPDFDictionaryRef) -> Bool {
+        ["FirstChar", "LastChar", "Widths", "FontDescriptor"].contains { key in
+            var value: CGPDFObjectRef?
+            return CGPDFDictionaryGetObject(fontDict, key, &value)
+        }
+    }
+
+    private static func standardCoreTextPostScriptName(_ baseFontName: String) -> String? {
+        let unprefixedName: String
+        let components = baseFontName.split(separator: "+", maxSplits: 1)
+        if components.count == 2,
+           components[0].count == 6,
+           components[0].allSatisfy({ $0 >= "A" && $0 <= "Z" }) {
+            unprefixedName = String(components[1])
+        } else {
+            unprefixedName = baseFontName
+        }
+
+        let standard14Names: Set<String> = [
+            "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+            "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
+            "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"
+        ]
+        return standard14Names.contains(unprefixedName) ? unprefixedName : nil
+    }
+
+    /// /Encoding省略時のType1既定値はStandardEncoding。辞書形式は基底エンコーディングが既知の場合だけ扱う。
+    private static func standardEncodingInfo(in fontDict: CGPDFDictionaryRef) -> StandardEncodingInfo? {
+        var encodingNamePtr: UnsafePointer<Int8>?
+        if CGPDFDictionaryGetName(fontDict, "Encoding", &encodingNamePtr), let encodingNamePtr {
+            let name = String(cString: encodingNamePtr)
+            return supportedStandardEncoding(name)
+                ? StandardEncodingInfo(baseEncodingName: name, overriddenCodes: [])
+                : nil
+        }
+
+        var encodingDict: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(fontDict, "Encoding", &encodingDict), let encodingDict else {
+            return StandardEncodingInfo(baseEncodingName: "StandardEncoding", overriddenCodes: [])
+        }
+
+        var baseEncodingName = "StandardEncoding"
+        var baseEncodingPtr: UnsafePointer<Int8>?
+        if CGPDFDictionaryGetName(encodingDict, "BaseEncoding", &baseEncodingPtr), let baseEncodingPtr {
+            baseEncodingName = String(cString: baseEncodingPtr)
+            guard supportedStandardEncoding(baseEncodingName) else { return nil }
+        }
+
+        var differences: CGPDFArrayRef?
+        guard CGPDFDictionaryGetArray(encodingDict, "Differences", &differences), let differences else {
+            return StandardEncodingInfo(baseEncodingName: baseEncodingName, overriddenCodes: [])
+        }
+        var code: Int?
+        var overriddenCodes = Set<Int>()
+        for index in 0..<CGPDFArrayGetCount(differences) {
+            var integer: CGPDFInteger = 0
+            if CGPDFArrayGetInteger(differences, index, &integer) {
+                code = Int(integer)
+                continue
+            }
+            var glyphNamePtr: UnsafePointer<Int8>?
+            if CGPDFArrayGetName(differences, index, &glyphNamePtr), glyphNamePtr != nil, let current = code {
+                if (32...126).contains(current) { overriddenCodes.insert(current) }
+                code = current < 255 ? current + 1 : nil
+            }
+        }
+        return StandardEncodingInfo(baseEncodingName: baseEncodingName, overriddenCodes: overriddenCodes)
+    }
+
+    private static func standardEncodingUnicodeCode(for code: Int) -> Int {
+        switch code {
+        case 39: return 0x2019 // quoteright
+        case 96: return 0x2018 // quoteleft
+        default: return code
+        }
+    }
+
+    private static func supportedStandardEncoding(_ name: String) -> Bool {
+        ["StandardEncoding", "WinAnsiEncoding", "MacRomanEncoding"].contains(name)
     }
 
     private static func name(in dict: CGPDFDictionaryRef, key: String) -> String? {
