@@ -345,7 +345,7 @@ final class EditorModel: ObservableObject {
         ocrProcessedPages = []
         ocrProgress = ""
         redoEdits = []
-        activeMarkupEdits = []
+        activeMarkupEdits = PDFMarkupEngine.edits(in: loadedDocument)
         selectedMarkupID = nil
         markupText = ""
         searchResults = []

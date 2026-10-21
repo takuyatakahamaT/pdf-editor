@@ -122,6 +122,56 @@ struct PDFMarkupEngineTests {
         #expect(model.activeMarkupEdits.first?.text == "First note")
     }
 
+    @Test("reopened PDFs restore editor markups for editing")
+    @MainActor
+    func reloadRestoresEditableMarkups() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-reopen-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        let original = EditorModel(initialURL: source)
+        original.setMode(.markup)
+        original.setMarkupTool(.note)
+        original.setMarkupText("Saved note")
+        original.addMarkup(pageIndex: 0, bounds: CGRect(x: 20, y: 30, width: 40, height: 24))
+        let noteID = try #require(original.selectedMarkupID)
+
+        original.setMarkupTool(.arrow)
+        original.addMarkup(pageIndex: 0, bounds: CGRect(x: 60, y: 70, width: 50, height: 40),
+                           points: [CGPoint(x: 65, y: 72), CGPoint(x: 105, y: 105)])
+        let arrowID = try #require(original.selectedMarkupID)
+
+        original.setMarkupTool(.ink)
+        original.addMarkup(pageIndex: 0, bounds: CGRect(x: 120, y: 20, width: 40, height: 36),
+                           points: [CGPoint(x: 122, y: 22), CGPoint(x: 140, y: 38), CGPoint(x: 158, y: 54)])
+        let inkID = try #require(original.selectedMarkupID)
+
+        try PDFExportEngine.export(sourceURL: source, edits: [], markups: original.activeMarkupEdits, to: output)
+        let reopened = EditorModel(initialURL: output)
+        #expect(reopened.activeMarkupEdits.count == 3)
+        #expect(reopened.activeMarkupEdits.first(where: { $0.id == noteID })?.text == "Saved note")
+        #expect(reopened.activeMarkupEdits.first(where: { $0.id == arrowID })?.points == [
+            CGPoint(x: 65, y: 72), CGPoint(x: 105, y: 105)
+        ])
+        #expect(reopened.activeMarkupEdits.first(where: { $0.id == inkID })?.points == [
+            CGPoint(x: 122, y: 22), CGPoint(x: 140, y: 38), CGPoint(x: 158, y: 54)
+        ])
+
+        reopened.setMode(.markup)
+        reopened.selectMarkup(noteID)
+        reopened.updateSelectedMarkupText("Updated after reopening")
+        let reopenedPage = try #require(reopened.document?.page(at: 0))
+        #expect(markedAnnotations(on: reopenedPage).first(where: { $0.userName == PDFMarkupEngine.markerPrefix + noteID.uuidString })?.contents
+            == "Updated after reopening")
+    }
+
     @Test("moving and resizing ink and arrows updates their paths and undo restores the old geometry")
     @MainActor
     func moveAndResizeMarkupGeometry() throws {

@@ -76,6 +76,88 @@ struct PDFMarkupEdit {
 enum PDFMarkupEngine {
     static let markerPrefix = "PDFEditorMarkup:"
 
+    static func edits(in document: PDFDocument) -> [PDFMarkupEdit] {
+        (0..<document.pageCount).flatMap { pageIndex in
+            document.page(at: pageIndex)?.annotations.compactMap {
+                edit(from: $0, pageIndex: pageIndex)
+            } ?? []
+        }
+    }
+
+    static func edit(from annotation: PDFAnnotation, pageIndex: Int) -> PDFMarkupEdit? {
+        guard let marker = annotation.userName, marker.hasPrefix(markerPrefix),
+              let id = UUID(uuidString: String(marker.dropFirst(markerPrefix.count))),
+              let annotationType = annotation.type else { return nil }
+
+        let tool: PDFMarkupTool
+        switch annotationType {
+        case PDFAnnotationSubtype.highlight.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .highlight
+        case PDFAnnotationSubtype.underline.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .underline
+        case PDFAnnotationSubtype.strikeOut.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .strikeOut
+        case PDFAnnotationSubtype.text.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .note
+        case PDFAnnotationSubtype.square.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .rectangle
+        case PDFAnnotationSubtype.circle.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .ellipse
+        case PDFAnnotationSubtype.line.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .arrow
+        case PDFAnnotationSubtype.ink.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .ink
+        case PDFAnnotationSubtype.freeText.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")):
+            tool = .signature
+        default:
+            return nil
+        }
+
+        let bounds = annotation.bounds
+        let points: [CGPoint]
+        switch tool {
+        case .arrow:
+            points = [
+                CGPoint(x: bounds.minX + annotation.startPoint.x, y: bounds.minY + annotation.startPoint.y),
+                CGPoint(x: bounds.minX + annotation.endPoint.x, y: bounds.minY + annotation.endPoint.y)
+            ]
+        case .ink:
+            points = (annotation.paths ?? []).flatMap { path in
+                var pathPoints: [CGPoint] = []
+                for index in 0..<path.elementCount {
+                    var coordinates = [CGPoint](repeating: .zero, count: 3)
+                    let element = path.element(at: index, associatedPoints: &coordinates)
+                    if element == .moveTo || element == .lineTo {
+                        pathPoints.append(CGPoint(
+                            x: bounds.minX + coordinates[0].x,
+                            y: bounds.minY + coordinates[0].y
+                        ))
+                    } else if element == .cubicCurveTo {
+                        pathPoints.append(CGPoint(
+                            x: bounds.minX + coordinates[2].x,
+                            y: bounds.minY + coordinates[2].y
+                        ))
+                    }
+                }
+                return pathPoints
+            }
+        default:
+            points = []
+        }
+
+        let color = ((tool == .signature ? annotation.fontColor : annotation.color) ?? tool.color)
+            .withAlphaComponent(1)
+        return PDFMarkupEdit(
+            id: id,
+            pageIndex: pageIndex,
+            tool: tool,
+            bounds: bounds,
+            points: points,
+            text: annotation.contents ?? "",
+            color: color
+        )
+    }
+
     static func makeAnnotation(for edit: PDFMarkupEdit) -> PDFAnnotation {
         let type: PDFAnnotationSubtype
         switch edit.tool {
