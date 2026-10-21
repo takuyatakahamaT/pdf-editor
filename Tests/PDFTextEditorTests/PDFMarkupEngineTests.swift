@@ -21,6 +21,14 @@ struct PDFMarkupEngineTests {
             minimumSize: CGSize(width: 8, height: 8)
         )
         #expect(oversizedResize == pageBounds)
+
+        let edgeResize = PDFMarkupEngine.clampedResizeBounds(
+            CGRect(x: 190, y: 60, width: 50, height: 40),
+            anchoredAt: CGPoint(x: 190, y: 60),
+            to: pageBounds,
+            minimumSize: CGSize(width: 8, height: 8)
+        )
+        #expect(edgeResize == CGRect(x: 190, y: 60, width: 22, height: 40))
     }
 
     @Test("markup tools produce editable PDF annotations")

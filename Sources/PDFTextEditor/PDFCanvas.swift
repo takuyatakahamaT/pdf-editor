@@ -450,20 +450,26 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         let pagePoint = convert(viewPoint, to: page)
         if editorMode == .markup, let id = draggedMarkupID {
             var bounds = dragStartBounds
+            let pageBounds = page.bounds(for: .mediaBox)
             if resizingMarkup {
                 bounds.size.width = dragStartBounds.width + pagePoint.x - dragStartPoint.x
                 bounds.size.height = dragStartBounds.height + pagePoint.y - dragStartPoint.y
+                bounds = PDFMarkupEngine.clampedResizeBounds(
+                    bounds,
+                    anchoredAt: dragStartBounds.origin,
+                    to: pageBounds,
+                    minimumSize: CGSize(width: 8, height: 8)
+                )
             } else {
                 let delta = CGPoint(x: pagePoint.x - dragStartPoint.x, y: pagePoint.y - dragStartPoint.y)
                 bounds.origin.x += delta.x
                 bounds.origin.y += delta.y
+                bounds = PDFMarkupEngine.clampedBounds(
+                    bounds,
+                    to: pageBounds,
+                    minimumSize: CGSize(width: 8, height: 8)
+                )
             }
-            let pageBounds = page.bounds(for: .mediaBox)
-            bounds = PDFMarkupEngine.clampedBounds(
-                bounds,
-                to: pageBounds,
-                minimumSize: CGSize(width: 8, height: 8)
-            )
             annotation.bounds = bounds
             markupDidMove = true
             needsDisplay = true

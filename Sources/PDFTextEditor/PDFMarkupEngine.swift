@@ -91,6 +91,24 @@ enum PDFMarkupEngine {
         return CGRect(x: originX, y: originY, width: width, height: height)
     }
 
+    static func clampedResizeBounds(
+        _ bounds: CGRect,
+        anchoredAt origin: CGPoint,
+        to pageBounds: CGRect,
+        minimumSize: CGSize = .zero
+    ) -> CGRect {
+        let pageBounds = pageBounds.standardized
+        let anchor = CGPoint(
+            x: min(max(origin.x, pageBounds.minX), pageBounds.maxX),
+            y: min(max(origin.y, pageBounds.minY), pageBounds.maxY)
+        )
+        let availableWidth = max(0, pageBounds.maxX - anchor.x)
+        let availableHeight = max(0, pageBounds.maxY - anchor.y)
+        let width = min(max(bounds.width, min(max(0, minimumSize.width), availableWidth)), availableWidth)
+        let height = min(max(bounds.height, min(max(0, minimumSize.height), availableHeight)), availableHeight)
+        return CGRect(origin: anchor, size: CGSize(width: width, height: height))
+    }
+
     static func edits(in document: PDFDocument) -> [PDFMarkupEdit] {
         (0..<document.pageCount).flatMap { pageIndex in
             document.page(at: pageIndex)?.annotations.compactMap {
