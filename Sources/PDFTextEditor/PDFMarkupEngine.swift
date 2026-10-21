@@ -76,6 +76,14 @@ struct PDFMarkupEdit {
 enum PDFMarkupEngine {
     static let markerPrefix = "PDFEditorMarkup:"
 
+    static func clampedPoint(_ point: CGPoint, to pageBounds: CGRect) -> CGPoint {
+        let pageBounds = pageBounds.standardized
+        return CGPoint(
+            x: min(max(point.x, pageBounds.minX), pageBounds.maxX),
+            y: min(max(point.y, pageBounds.minY), pageBounds.maxY)
+        )
+    }
+
     static func clampedBounds(
         _ bounds: CGRect,
         to pageBounds: CGRect,
@@ -107,6 +115,48 @@ enum PDFMarkupEngine {
         let width = min(max(bounds.width, min(max(0, minimumSize.width), availableWidth)), availableWidth)
         let height = min(max(bounds.height, min(max(0, minimumSize.height), availableHeight)), availableHeight)
         return CGRect(origin: anchor, size: CGSize(width: width, height: height))
+    }
+
+    static func hitTest(_ point: CGPoint, in edit: PDFMarkupEdit, tolerance: CGFloat = 6) -> Bool {
+        let bounds = edit.bounds.standardized
+        switch edit.tool {
+        case .rectangle:
+            let outer = bounds.insetBy(dx: -tolerance, dy: -tolerance)
+            guard outer.contains(point) else { return false }
+            let borderDistance = min(
+                min(abs(point.x - bounds.minX), abs(point.x - bounds.maxX)),
+                min(abs(point.y - bounds.minY), abs(point.y - bounds.maxY))
+            )
+            return borderDistance <= tolerance
+        case .ellipse:
+            guard bounds.width > 0, bounds.height > 0 else { return false }
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            let radiusX = bounds.width / 2
+            let radiusY = bounds.height / 2
+            let normalizedDistance = hypot((point.x - center.x) / radiusX, (point.y - center.y) / radiusY)
+            return abs(normalizedDistance - 1) * min(radiusX, radiusY) <= tolerance
+        case .arrow:
+            guard let start = edit.points.first, let end = edit.points.last else { return bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(point) }
+            return distance(from: point, toSegmentFrom: start, to: end) <= tolerance
+        case .ink:
+            guard let first = edit.points.first else { return false }
+            if edit.points.count == 1 { return hypot(point.x - first.x, point.y - first.y) <= tolerance }
+            return zip(edit.points, edit.points.dropFirst()).contains {
+                distance(from: point, toSegmentFrom: $0.0, to: $0.1) <= tolerance
+            }
+        default:
+            return bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(point)
+        }
+    }
+
+    private static func distance(from point: CGPoint, toSegmentFrom start: CGPoint, to end: CGPoint) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else { return hypot(point.x - start.x, point.y - start.y) }
+        let projection = min(max(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0), 1)
+        let closest = CGPoint(x: start.x + projection * dx, y: start.y + projection * dy)
+        return hypot(point.x - closest.x, point.y - closest.y)
     }
 
     static func edits(in document: PDFDocument) -> [PDFMarkupEdit] {

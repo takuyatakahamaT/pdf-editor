@@ -8,6 +8,7 @@ struct PDFMarkupEngineTests {
     @Test("markup and signature bounds stay inside the page")
     func clampsMarkupBoundsToPage() {
         let pageBounds = CGRect(x: 12, y: 18, width: 200, height: 100)
+        #expect(PDFMarkupEngine.clampedPoint(CGPoint(x: 240, y: -20), to: pageBounds) == CGPoint(x: 212, y: 18))
         let signature = PDFMarkupEngine.clampedBounds(
             CGRect(x: 205, y: 112, width: 140, height: 40),
             to: pageBounds,
@@ -29,6 +30,35 @@ struct PDFMarkupEngineTests {
             minimumSize: CGSize(width: 8, height: 8)
         )
         #expect(edgeResize == CGRect(x: 190, y: 60, width: 22, height: 40))
+    }
+
+    @Test("transparent markup interiors allow new markup while outlines stay selectable")
+    func hitTestsOnlyVisibleShapeAreas() {
+        let rectangle = PDFMarkupEdit(
+            pageIndex: 0, tool: .rectangle, bounds: CGRect(x: 20, y: 30, width: 100, height: 60)
+        )
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 60), in: rectangle))
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 21, y: 60), in: rectangle))
+
+        let ellipse = PDFMarkupEdit(
+            pageIndex: 0, tool: .ellipse, bounds: CGRect(x: 20, y: 30, width: 100, height: 60)
+        )
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 60), in: ellipse))
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 119, y: 60), in: ellipse))
+
+        let arrow = PDFMarkupEdit(
+            pageIndex: 0, tool: .arrow, bounds: CGRect(x: 20, y: 30, width: 100, height: 60),
+            points: [CGPoint(x: 20, y: 30), CGPoint(x: 120, y: 90)]
+        )
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 60), in: arrow))
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 20, y: 90), in: arrow))
+
+        let ink = PDFMarkupEdit(
+            pageIndex: 0, tool: .ink, bounds: CGRect(x: 20, y: 30, width: 100, height: 60),
+            points: [CGPoint(x: 20, y: 60), CGPoint(x: 120, y: 60)]
+        )
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 62), in: ink))
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 35), in: ink))
     }
 
     @Test("markup tools produce editable PDF annotations")

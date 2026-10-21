@@ -429,7 +429,10 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
         if editorMode == .markup, let page = markupDrawingPage {
             let viewPoint = convert(event.locationInWindow, from: nil)
-            let pagePoint = convert(viewPoint, to: page)
+            let pagePoint = PDFMarkupEngine.clampedPoint(
+                convert(viewPoint, to: page),
+                to: page.bounds(for: .mediaBox)
+            )
             let points: [CGPoint]
             if markupTool == .ink {
                 markupDrawingPoints.append(pagePoint)
@@ -541,10 +544,17 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
         if editorMode == .markup, let page = markupDrawingPage, let pageIndex = markupDrawingPageIndex {
             let viewPoint = convert(event.locationInWindow, from: nil)
-            let endPoint = convert(viewPoint, to: page)
+            let endPoint = PDFMarkupEngine.clampedPoint(
+                convert(viewPoint, to: page),
+                to: page.bounds(for: .mediaBox)
+            )
             var points = markupTool == .ink ? markupDrawingPoints : [markupDrawingStart, endPoint]
-            if markupTool == .ink, points.count == 1 { points.append(endPoint) }
-            let bounds = markupBounds(for: points, tool: markupTool)
+            if markupTool == .ink, points.last != endPoint { points.append(endPoint) }
+            let bounds = PDFMarkupEngine.clampedBounds(
+                markupBounds(for: points, tool: markupTool),
+                to: page.bounds(for: .mediaBox),
+                minimumSize: CGSize(width: 8, height: 8)
+            )
             if let markupPreviewAnnotation { page.removeAnnotation(markupPreviewAnnotation) }
             markupPreviewAnnotation = nil
             markupDrawingPage = nil
@@ -686,13 +696,14 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private func handleMarkupMouseDown(_ event: NSEvent) -> Bool {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: false), let document else { return true }
-        let pagePoint = convert(viewPoint, to: page)
-        if let annotation = page.annotations.reversed().first(where: {
-            $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true && $0.bounds.contains(pagePoint)
-        }), let rawID = annotation.userName.map({ String($0.dropFirst(PDFMarkupEngine.markerPrefix.count)) }),
-           let id = UUID(uuidString: rawID) {
-            selectMarkupHandler?(id)
-            draggedMarkupID = id
+        let pagePoint = PDFMarkupEngine.clampedPoint(convert(viewPoint, to: page), to: page.bounds(for: .mediaBox))
+        let pageIndex = document.index(for: page)
+        if let annotation = page.annotations.reversed().first(where: { annotation in
+            guard let edit = PDFMarkupEngine.edit(from: annotation, pageIndex: pageIndex) else { return false }
+            return PDFMarkupEngine.hitTest(pagePoint, in: edit)
+        }), let edit = PDFMarkupEngine.edit(from: annotation, pageIndex: pageIndex) {
+            selectMarkupHandler?(edit.id)
+            draggedMarkupID = edit.id
             draggedAnnotation = annotation
             draggedPage = page
             dragStartPoint = pagePoint
@@ -733,7 +744,11 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
     private func updateMarkupPreview(on page: PDFPage, points: [CGPoint]) {
         if let markupPreviewAnnotation { page.removeAnnotation(markupPreviewAnnotation) }
-        let bounds = markupBounds(for: points, tool: markupTool)
+        let bounds = PDFMarkupEngine.clampedBounds(
+            markupBounds(for: points, tool: markupTool),
+            to: page.bounds(for: .mediaBox),
+            minimumSize: CGSize(width: 8, height: 8)
+        )
         let preview = PDFMarkupEngine.makeAnnotation(for: PDFMarkupEdit(
             pageIndex: 0, tool: markupTool, bounds: bounds, points: points,
             text: markupTool == .signature ? "署名" : ""
