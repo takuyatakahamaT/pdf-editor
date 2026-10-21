@@ -125,10 +125,11 @@ enum PDFRedactionEngine {
         regions: [PDFRedactionRegion],
         edits: [ReplacementEdit],
         markups: [PDFMarkupEdit],
+        forcePrepareSource: Bool = false,
         to outputURL: URL
     ) throws {
         guard !PDFOCREngine.sameFile(sourceURL, outputURL) else { throw PDFRedactionError.sameFile }
-        guard !edits.isEmpty || !markups.isEmpty else {
+        guard forcePrepareSource || !edits.isEmpty || !markups.isEmpty else {
             try export(sourceURL: sourceURL, regions: regions, to: outputURL)
             return
         }

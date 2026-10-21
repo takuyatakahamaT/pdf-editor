@@ -729,6 +729,7 @@ final class EditorModel: ObservableObject {
                 regions: redactionRegions,
                 edits: activeReplacements,
                 markups: activeMarkupEdits,
+                forcePrepareSource: !edits.isEmpty,
                 to: outputURL
             )
             statusMessage = "墨消し済みPDFを保存しました。ページ本文を画像化し、元PDFの文書メタデータは引き継いでいません: \(outputURL.lastPathComponent)"

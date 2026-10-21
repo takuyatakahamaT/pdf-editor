@@ -121,6 +121,59 @@ struct PDFRedactionEngineTests {
         #expect(!extracted.contains("SECRET"))
     }
 
+    @Test("redaction preserves deletion of the last managed annotation")
+    @MainActor
+    func redactionKeepsLastMarkupDeletion() throws {
+        let base = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (KEEP) Tj ET"
+        )
+        let source = temporaryPDF()
+        let prepared = temporaryPDF()
+        let edited = temporaryPDF()
+        defer { remove([base, source, prepared, edited]) }
+        let markup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .rectangle,
+            bounds: CGRect(x: 120, y: 35, width: 70, height: 50)
+        )
+        try PDFExportEngine.export(sourceURL: base, edits: [], markups: [markup], to: source)
+        let model = EditorModel(initialURL: source)
+        let sourceMarkup = try #require(model.activeMarkupEdits.first)
+        model.selectMarkup(sourceMarkup.id)
+        model.deleteSelectedMarkup()
+        model.setMode(.redaction)
+        model.addRedactionRegion(
+            pageIndex: 0,
+            bounds: CGRect(x: 195, y: 10, width: 20, height: 20)
+        )
+        #expect(model.activeMarkupEdits.isEmpty)
+        #expect(model.edits.contains(where: { $0.markupChange != nil }))
+        #expect(PDFMarkupEngine.hasManagedAnnotations(in: try #require(PDFDocument(url: source))))
+
+        try PDFExportEngine.export(
+            sourceURL: source,
+            edits: model.activeReplacements,
+            markups: model.activeMarkupEdits,
+            to: prepared
+        )
+        #expect(!PDFMarkupEngine.hasManagedAnnotations(in: try #require(PDFDocument(url: prepared))))
+
+        try PDFRedactionEngine.export(
+            sourceURL: source,
+            regions: model.redactionRegions,
+            edits: model.activeReplacements,
+            markups: model.activeMarkupEdits,
+            forcePrepareSource: !model.edits.isEmpty,
+            to: edited
+        )
+
+        let editedPage = try #require(PDFDocument(url: edited)?.page(at: 0))
+        #expect(editedPage.annotations.isEmpty)
+        let extracted = try runTool("pdftotext", arguments: ["-layout", edited.path, "-"])
+        #expect(!extracted.contains("KEEP"))
+    }
+
     @Test("redaction preserves the crop box and removes content hidden outside it")
     func cropBoxHidesAreNotRevealed() throws {
         let cropBox = CGRect(x: 50, y: 40, width: 140, height: 80)
