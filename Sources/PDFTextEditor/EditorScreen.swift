@@ -69,6 +69,11 @@ struct EditorScreen: View {
         .sheet(isPresented: $model.isShowingMergeSheet) {
             PDFMergeSheet()
         }
+        .sheet(isPresented: $model.isShowingPageOrganizerSheet) {
+            if let document = model.document, let sourceURL = model.sourceURL {
+                PDFPageOrganizerSheet(document: document, sourceURL: sourceURL)
+            }
+        }
         .sheet(isPresented: $model.isShowingResizeSheet) {
             PDFPageResizeSheet()
                 .environmentObject(model)
@@ -128,6 +133,11 @@ struct EditorScreen: View {
             actionButton("結合", icon: "doc.on.doc", emphasized: false) {
                 model.showMergeSheet()
             }
+
+            actionButton("ページ整理", icon: "square.grid.2x2", emphasized: false) {
+                model.showPageOrganizerSheet()
+            }
+            .disabled(model.document == nil)
 
             actionButton("ページサイズ", icon: "arrow.up.left.and.arrow.down.right", emphasized: false) {
                 model.showResizeSheet()

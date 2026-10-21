@@ -43,6 +43,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var revision = 0
     @Published private(set) var statusMessage = "PDFを開いて、変更したい文字をクリックしてください。"
     @Published var isShowingMergeSheet = false
+    @Published var isShowingPageOrganizerSheet = false
     @Published var isShowingResizeSheet = false
     @Published var isShowingCompressionSheet = false
     @Published var isShowingSearchSheet = false
@@ -153,6 +154,19 @@ final class EditorModel: ObservableObject {
 
     func showMergeSheet() {
         isShowingMergeSheet = true
+    }
+
+    func showPageOrganizerSheet() {
+        guard let document, sourceURL != nil else { return }
+        guard !hasPendingEditorInput else {
+            statusMessage = "入力中の文字を確定してからページを整理してください。"
+            return
+        }
+        guard document.allowsCopying && document.allowsDocumentAssembly else {
+            statusMessage = "このPDFはページのコピーまたは組み替えが許可されていません。"
+            return
+        }
+        isShowingPageOrganizerSheet = true
     }
 
     func showResizeSheet() {

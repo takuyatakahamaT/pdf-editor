@@ -5,6 +5,121 @@ import Testing
 @testable import PDFTextEditor
 
 struct PDFWorkflowTests {
+    @Test("page organizer moves a nonadjacent multi selection in document order")
+    @MainActor
+    func pageOrganizerMovesMultiplePages() throws {
+        let inputs = try ["ONE", "TWO", "THREE", "FOUR"].map {
+            try makePDF(label: $0, bounds: CGRect(x: 0, y: 0, width: 200, height: 100))
+        }
+        let source = try makeMultiPagePDF(from: inputs)
+        defer { remove(inputs + [source]) }
+        let document = try #require(PDFDocument(url: source))
+        let model = PDFPageOrganizerModel(document: document, sourceURL: source)
+        let ids = model.pages.map(\.id)
+        model.select(id: ids[0])
+        model.select(id: ids[2], extending: true)
+        #expect(model.move(model.selectedIDs, to: ids[3]))
+        #expect(model.pages.map(\.id) == [ids[1], ids[0], ids[2], ids[3]])
+        #expect(model.selectedIDs == Set([ids[0], ids[2]]))
+        model.undo()
+        #expect(model.pages.map(\.id) == ids)
+
+        #expect(model.move([ids[0]], to: ids[3], after: true))
+        #expect(model.pages.map(\.id) == [ids[1], ids[2], ids[3], ids[0]])
+        model.undo()
+        #expect(model.pages.map(\.id) == ids)
+    }
+
+    @Test("page organizer reorders, rotates, duplicates, deletes, and restores without changing input")
+    @MainActor
+    func pageOrganizerEditsAreStagedAndUndoable() throws {
+        let first = try makePDF(label: "FIRST", bounds: CGRect(x: 0, y: 0, width: 210, height: 120), rotation: 90, withAnnotation: true)
+        let second = try makePDF(label: "SECOND", bounds: CGRect(x: 0, y: 0, width: 330, height: 190), rotation: 270)
+        let source = try makeMultiPagePDF(from: [first, second])
+        let output = temporaryPDFURL(prefix: "organized")
+        defer { remove([first, second, source, output]) }
+        let originalBytes = try Data(contentsOf: source)
+        let document = try #require(PDFDocument(url: source))
+        let firstPage = try #require(document.page(at: 0))
+        firstPage.setBounds(CGRect(x: 8, y: 6, width: 170, height: 95), for: .cropBox)
+        let model = PDFPageOrganizerModel(document: document, sourceURL: source)
+        let ids = model.pages.map(\.id)
+
+        model.select(id: ids[0])
+        model.select(id: ids[1], extending: true)
+        #expect(model.selectedIDs.count == 2)
+        model.rotateSelected(by: 90)
+        #expect(model.pages.map(\.rotation) == [180, 0])
+        model.undo()
+        #expect(model.pages.map(\.rotation) == [90, 270])
+        model.redo()
+        #expect(model.pages.map(\.rotation) == [180, 0])
+        model.select(id: ids[0])
+        model.duplicateSelected()
+        #expect(model.pages.count == 3)
+        #expect(model.selectedIDs.count == 1)
+        model.deleteSelected()
+        #expect(model.pages.count == 2)
+        model.undo()
+        #expect(model.pages.count == 3)
+        model.undo()
+        #expect(model.pages.count == 2)
+        #expect(model.move([ids[1]], to: ids[0]))
+        #expect(model.pages.map(\.id) == [ids[1], ids[0]])
+        #expect(document.page(at: 0)?.rotation == 90)
+        #expect(try Data(contentsOf: source) == originalBytes)
+
+        try model.save(to: output)
+        let result = try #require(PDFDocument(url: output))
+        #expect(result.pageCount == 2)
+        #expect(result.page(at: 0)?.string?.contains("SECOND") == true)
+        let moved = try #require(result.page(at: 1))
+        #expect(moved.string?.contains("FIRST") == true)
+        #expect(moved.rotation == 180)
+        #expect(moved.bounds(for: .mediaBox).size == CGSize(width: 210, height: 120))
+        #expect(moved.bounds(for: .cropBox) == CGRect(x: 8, y: 6, width: 170, height: 95))
+        #expect(moved.annotations.count == firstPage.annotations.count)
+        #expect(try Data(contentsOf: source) == originalBytes)
+    }
+
+    @Test("page organizer inserts and extracts selected pages while protecting all inputs")
+    @MainActor
+    func pageOrganizerInsertExtractAndProtectSources() throws {
+        let first = try makePDF(label: "BASE", bounds: CGRect(x: 0, y: 0, width: 200, height: 100))
+        let imported = try makePDF(label: "IMPORTED", bounds: CGRect(x: 0, y: 0, width: 300, height: 180), rotation: 90, withAnnotation: true)
+        let output = temporaryPDFURL(prefix: "extracted")
+        let alias = temporaryPDFURL(prefix: "organizer-alias")
+        defer { remove([first, imported, output, alias]) }
+        try FileManager.default.linkItem(at: imported, to: alias)
+        let firstBytes = try Data(contentsOf: first)
+        let importedBytes = try Data(contentsOf: imported)
+        let sourceDocument = try #require(PDFDocument(url: first))
+        let model = PDFPageOrganizerModel(document: sourceDocument, sourceURL: first)
+        try model.insert(from: imported)
+        #expect(model.pages.count == 2)
+        #expect(model.selectedPages.count == 1)
+        #expect(throws: PDFPageOrganizerError.self) { try model.save(to: first) }
+        #expect(throws: PDFPageOrganizerError.self) { try model.save(to: alias) }
+        try model.save(to: output, selectedOnly: true)
+        let extracted = try #require(PDFDocument(url: output))
+        let page = try #require(extracted.page(at: 0))
+        #expect(extracted.pageCount == 1)
+        #expect(page.string?.contains("IMPORTED") == true)
+        #expect(page.rotation == 90)
+        #expect(page.bounds(for: .mediaBox).size == CGSize(width: 300, height: 180))
+        let importedPage = try #require(PDFDocument(url: imported)?.page(at: 0))
+        let importedAnnotations = importedPage.annotations.map { $0.contents ?? "" }.sorted()
+        let extractedAnnotations = page.annotations.map { $0.contents ?? "" }.sorted()
+        #expect(importedAnnotations.contains("test note"))
+        #expect(extractedAnnotations == importedAnnotations)
+        #expect(try Data(contentsOf: first) == firstBytes)
+        #expect(try Data(contentsOf: imported) == importedBytes)
+        model.undo()
+        #expect(model.pages.count == 1)
+        model.redo()
+        #expect(model.pages.count == 2)
+    }
+
     @Test("thumbnail reorder preserves duplicate files and drives the saved page order")
     @MainActor
     func thumbnailReorderDrivesMergeOrder() throws {
