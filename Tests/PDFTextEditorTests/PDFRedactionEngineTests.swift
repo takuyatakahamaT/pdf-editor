@@ -6,6 +6,87 @@ import Testing
 @testable import PDFTextEditor
 
 struct PDFRedactionEngineTests {
+    @Test("Base-14 Type1フォント12書体の幅を選択範囲に反映する")
+    func base14CoreTextMetricsCoverAllFaces() throws {
+        let faces: [(name: String, aWidth: CGFloat)] = [
+            ("Helvetica", 667), ("Helvetica-Bold", 722),
+            ("Helvetica-Oblique", 667), ("Helvetica-BoldOblique", 722),
+            ("Times-Roman", 722), ("Times-Bold", 722),
+            ("Times-Italic", 611), ("Times-BoldItalic", 667),
+            ("Courier", 600), ("Courier-Bold", 600),
+            ("Courier-Oblique", 600), ("Courier-BoldOblique", 600)
+        ]
+        var urls: [URL] = []
+        defer { remove(urls) }
+
+        for face in faces {
+            let url = simpleFontPDF(
+                baseFont: face.name,
+                entries: " /Encoding /WinAnsiEncoding",
+                contentStream: "BT /F1 14 Tf 72 50 Td (A) Tj ET"
+            )
+            urls.append(url)
+            let document = try #require(PDFDocument(url: url))
+            let page = try #require(document.page(at: 0))
+            let glyph = try #require(PDFGlyphIndex.makeIndex(for: page).runs.flatMap(\.glyphs).first)
+            #expect(abs(glyph.advance - face.aWidth * 14 / 1000) < 0.02, "\(face.name)")
+        }
+    }
+
+    @Test("StandardEncodingの引用符に対応する字形幅を使う")
+    func standardEncodingUsesCurlyQuoteMetrics() throws {
+        let url = simpleFontPDF(
+            baseFont: "Helvetica",
+            contentStream: "BT /F1 14 Tf 72 50 Td (A'B) Tj ET"
+        )
+        defer { remove([url]) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let glyph = try #require(PDFGlyphIndex.makeIndex(for: page).runs.flatMap(\.glyphs).first { $0.text == "'" })
+
+        // StandardEncodingのコード39はASCII apostropheではなくquoteright（AFM 222 unit）。
+        #expect(abs(glyph.advance - 14 * 222 / 1000) < 0.02)
+    }
+
+    @Test("Differencesで上書きされたコードへ標準幅を推測適用しない")
+    func standardMetricsSkipDifferencesOverrides() throws {
+        let url = simpleFontPDF(
+            baseFont: "Helvetica",
+            entries: " /Encoding << /BaseEncoding /StandardEncoding /Differences [39 /A] >>",
+            contentStream: "BT /F1 14 Tf 72 50 Td (') Tj ET"
+        )
+        defer { remove([url]) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let glyph = try #require(PDFGlyphIndex.makeIndex(for: page).runs.flatMap(\.glyphs).first)
+
+        #expect(abs(glyph.advance - 7) < 0.02)
+    }
+
+    @Test("明示Widthsの範囲外はMissingWidthを使う")
+    func explicitWidthsUseMissingWidthOutsideDeclaredRange() throws {
+        let url = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
+                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding "
+                + "/FirstChar 65 /LastChar 65 /Widths [900] /FontDescriptor 6 0 R >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 14 Tf 72 50 Td (A B) Tj ET"),
+            "<< /Type /FontDescriptor /FontName /Helvetica /Flags 32 /FontBBox [-166 -225 1000 931] "
+                + "/ItalicAngle 0 /Ascent 718 /Descent -207 /CapHeight 718 /StemV 88 /MissingWidth 1000 >>"
+        ])
+        defer { remove([url]) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let glyphs = PDFGlyphIndex.makeIndex(for: page).runs.flatMap(\.glyphs)
+
+        #expect(glyphs.count == 3)
+        #expect(abs(glyphs[0].advance - 12.6) < 0.02) // /Widths: A = 900
+        #expect(abs(glyphs[1].advance - 14) < 0.02) // /MissingWidth: space = 1000
+        #expect(abs(glyphs[2].advance - 14) < 0.02) // /MissingWidth: B = 1000
+    }
+
     @Test("standard Helvetica metrics keep selected text and redaction bounds aligned")
     func standardHelveticaMetricsKeepRedactionBoundsAligned() throws {
         let source = RawPDFBuilder.singlePagePDF(
@@ -385,6 +466,17 @@ struct PDFRedactionEngineTests {
 
     private func temporaryPDF() -> URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("pdf-redaction-\(UUID().uuidString).pdf")
+    }
+
+    private func simpleFontPDF(baseFont: String, entries: String = "", contentStream: String) -> URL {
+        RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
+                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /\(baseFont)\(entries) >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: contentStream)
+        ])
     }
 
     private func runTool(_ command: String, arguments: [String]) throws -> String {

@@ -135,11 +135,16 @@ enum PDFFontInfoLoader {
         var ascent: CGFloat = 0.8
         var descent: CGFloat = -0.2
         var hasEmbedded = false
+        var defaultWidth: CGFloat = 0.5
         var descriptorDict: CGPDFDictionaryRef?
         if CGPDFDictionaryGetDictionary(fontDict, "FontDescriptor", &descriptorDict), let descriptorDict {
             var a: CGPDFReal = 0, d: CGPDFReal = 0
             if CGPDFDictionaryGetNumber(descriptorDict, "Ascent", &a) { ascent = a / 1000 }
             if CGPDFDictionaryGetNumber(descriptorDict, "Descent", &d) { descent = d / 1000 }
+            var missingWidth: CGPDFReal = 0
+            if CGPDFDictionaryGetNumber(descriptorDict, "MissingWidth", &missingWidth) {
+                defaultWidth = CGFloat(missingWidth) / 1000
+            }
             hasEmbedded = fontFileStream(in: descriptorDict) != nil
         }
 
@@ -158,7 +163,7 @@ enum PDFFontInfoLoader {
         return PDFFontInfo(
             bytesPerCode: 1,
             widthTable: widths,
-            defaultWidth: 0.5,
+            defaultWidth: defaultWidth,
             toUnicode: toUnicode,
             explicitToUnicodeCodes: explicitToUnicodeCodes,
             ascent: ascent,
@@ -185,6 +190,7 @@ enum PDFFontInfoLoader {
     /// CoreTextの標準フォントはPDFのAFM幅に対応する。/Differencesで変更されたコードは除外する。
     private static func standardCoreTextWidths(in fontDict: CGPDFDictionaryRef) -> [Int: CGFloat] {
         guard name(in: fontDict, key: "Subtype") == "Type1",
+              !hasExplicitStandardFontMetrics(in: fontDict),
               let baseFontName = name(in: fontDict, key: "BaseFont"),
               let postScriptName = standardCoreTextPostScriptName(baseFontName),
               let encoding = standardEncodingInfo(in: fontDict) else { return [:] }
@@ -206,6 +212,14 @@ enum PDFFontInfoLoader {
             widths[code] = advance.width / 1000
         }
         return widths
+    }
+
+    /// Base-14の明示メトリクス一式がある場合は、PDFの幅指定とMissingWidthを使い、CoreTextで穴埋めしない。
+    private static func hasExplicitStandardFontMetrics(in fontDict: CGPDFDictionaryRef) -> Bool {
+        ["FirstChar", "LastChar", "Widths", "FontDescriptor"].contains { key in
+            var value: CGPDFObjectRef?
+            return CGPDFDictionaryGetObject(fontDict, key, &value)
+        }
     }
 
     private static func standardCoreTextPostScriptName(_ baseFontName: String) -> String? {
