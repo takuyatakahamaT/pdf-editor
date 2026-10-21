@@ -3,8 +3,7 @@ import CoreGraphics
 import CoreText
 import PDFKit
 
-/// プレビュー（`ReplacementTextAnnotation.draw(with:in:)`）と書き出し
-/// （`PDFExportEngine`）の両方から呼ばれる、置換テキストの唯一の描画経路。
+/// 画面プレビュー用のページオーバーレイと書き出し（`PDFExportEngine`）が共有する描画経路。
 /// 段落レイアウトや折り返しは一切使わず、1 行の `CTLine` を
 /// ベースライン固定で描く。置換時は同じ行の後続文字を動かして空き幅を作る。
 /// 行内に空きがない場合も、横だけを細くせず縦横比を保って縮小する。
@@ -420,10 +419,9 @@ enum PDFTextRenderer {
     }
 }
 
-/// 置換のプレビュー annotation。従来の `PDFAnnotation(.freeText)` は自動折り返しを
-/// 起こすため置換には使わない（テキスト追加モードは引き続き freeText を使う）。
-/// `draw(with:in:)` の中で `PDFTextRenderer.draw` を呼ぶことで、
-/// 画面プレビューと書き出し (`PDFExportEngine`) が完全に同じ描画コードを通る。
+/// 置換の状態とヒットテスト範囲をページに保持する注釈。
+/// 画面では PDFKit の注釈キャッシュを避けるため、`ReplacementPreviewPageOverlayView` が描画する。
+/// 書き出しでは `PDFExportEngine` が同じ `PDFTextRenderer` を直接呼ぶ。
 final class ReplacementTextAnnotation: PDFAnnotation {
     let edit: ReplacementEdit
     private let drawsMovedTextOnly: Bool
@@ -435,6 +433,7 @@ final class ReplacementTextAnnotation: PDFAnnotation {
         super.init(bounds: bounds, forType: .square, withProperties: nil)
         color = .clear
         interiorColor = nil
+        shouldDisplay = false
         let border = PDFBorder()
         border.lineWidth = 0
         self.border = border
@@ -447,6 +446,10 @@ final class ReplacementTextAnnotation: PDFAnnotation {
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        drawPreview(in: context)
+    }
+
+    func drawPreview(in context: CGContext) {
         if drawsMovedTextOnly, edit.destinationOrigin != nil {
             PDFTextRenderer.drawMovedText(edit, in: context)
         } else {
@@ -456,8 +459,7 @@ final class ReplacementTextAnnotation: PDFAnnotation {
 }
 
 /// 移動後の文字注釈とは分離して、元の位置だけを白で覆う。
-/// 2つを一つの注釈 bounds にまとめると、離れた位置への移動で巨大な注釈になり、
-/// PDFKit の画面表示キャッシュが粗くなるため、小さい独立範囲で描画する。
+/// 独立範囲で持つことで元位置のヒットテスト範囲と移動先のテキスト範囲を分ける。
 final class ReplacementCoverAnnotation: PDFAnnotation {
     private let edit: ReplacementEdit
 
@@ -466,6 +468,7 @@ final class ReplacementCoverAnnotation: PDFAnnotation {
         super.init(bounds: edit.coverBounds, forType: .square, withProperties: nil)
         color = .clear
         interiorColor = nil
+        shouldDisplay = false
         let border = PDFBorder()
         border.lineWidth = 0
         self.border = border
@@ -477,6 +480,10 @@ final class ReplacementCoverAnnotation: PDFAnnotation {
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        drawPreview(in: context)
+    }
+
+    func drawPreview(in context: CGContext) {
         PDFTextRenderer.drawMovedCover(edit, in: context)
     }
 }
