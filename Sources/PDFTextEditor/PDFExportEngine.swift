@@ -222,6 +222,7 @@ enum PDFExportEngine {
     static func export(
         sourceURL: URL,
         edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit] = [],
         to outputURL: URL
     ) throws {
         guard let document = PDFDocument(url: sourceURL),
@@ -260,6 +261,22 @@ enum PDFExportEngine {
         }
 
         context.closePDF()
+        guard !markups.isEmpty else { return }
+        guard let annotatedDocument = PDFDocument(url: outputURL) else {
+            throw PDFExportError.unreadableSource
+        }
+        for markup in markups {
+            guard let page = annotatedDocument.page(at: markup.pageIndex) else { continue }
+            page.addAnnotation(PDFMarkupEngine.makeAnnotation(for: markup))
+        }
+        let stagedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-markup-export-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
+        guard annotatedDocument.write(to: stagedURL), let data = try? Data(contentsOf: stagedURL) else {
+            throw PDFExportError.cannotCreateContext
+        }
+        do { try data.write(to: outputURL, options: .atomic) }
+        catch { throw PDFExportError.cannotCreateContext }
     }
 
     /// 印刷用の一時PDFを作る。無編集なら元PDFをそのまま複製する。編集がある場合は
@@ -268,9 +285,10 @@ enum PDFExportEngine {
     static func exportForPrinting(
         sourceURL: URL,
         edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit] = [],
         to outputURL: URL
     ) throws {
-        if edits.isEmpty {
+        if edits.isEmpty && markups.isEmpty {
             do {
                 let sourceData = try Data(contentsOf: sourceURL)
                 try sourceData.write(to: outputURL, options: .atomic)
@@ -285,12 +303,17 @@ enum PDFExportEngine {
         }
         let printDocument = PDFDocument()
         let editsByPage = Dictionary(grouping: edits, by: \.pageIndex)
+        let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)
         for pageIndex in 0..<sourceDocument.pageCount {
             guard let sourcePage = sourceDocument.page(at: pageIndex),
                   let copiedPage = sourcePage.copy() as? PDFPage else {
                 throw PDFExportError.unreadableSource
             }
-            if let pageEdits = editsByPage[pageIndex], !pageEdits.isEmpty {
+            if let pageMarkups = markupsByPage[pageIndex] {
+                for markup in pageMarkups { copiedPage.addAnnotation(PDFMarkupEngine.makeAnnotation(for: markup)) }
+            }
+            let pageEdits = editsByPage[pageIndex] ?? []
+            if !pageEdits.isEmpty || !(markupsByPage[pageIndex] ?? []).isEmpty {
                 let renderedPage = try renderPrintPage(copiedPage, edits: pageEdits)
                 printDocument.insert(renderedPage, at: pageIndex)
             } else {
@@ -341,6 +364,9 @@ enum PDFExportEngine {
             case .insertion:
                 drawInsertion(edit, in: context)
             }
+        }
+        for annotation in page.annotations where annotation.shouldPrint {
+            annotation.draw(with: .mediaBox, in: context)
         }
         context.endPDFPage()
         context.closePDF()

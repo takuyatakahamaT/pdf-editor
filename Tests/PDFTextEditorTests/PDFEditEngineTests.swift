@@ -87,14 +87,14 @@ struct PDFEditEngineTests {
         model.select(target)
         model.deleteSelection()
         #expect(model.edits.count == 1)
-        #expect(model.edits[0].replacement.replacement.isEmpty)
-        #expect(model.edits[0].replacement.resolvedFont == nil)
+        #expect(model.edits[0].replacement?.replacement.isEmpty == true)
+        #expect(model.edits[0].replacement?.resolvedFont == nil)
         #expect(model.selectedTarget == nil)
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-text-bench-delete-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: outputURL) }
-        try PDFExportEngine.export(sourceURL: url, edits: model.edits.map(\.replacement), to: outputURL)
+        try PDFExportEngine.export(sourceURL: url, edits: model.edits.compactMap(\.replacement), to: outputURL)
         let outputDocument = try #require(PDFDocument(url: outputURL))
         let outputPage = try #require(outputDocument.page(at: 0))
         let fills = InkScanner.scan(page: outputPage)
@@ -246,7 +246,7 @@ struct PDFEditEngineTests {
         #expect(model.replacementFontPreview?.familyName == "Helvetica Neue")
         #expect(model.replacementFontPreview?.reason == nil)
         model.applyReplacement()
-        #expect(model.edits.first?.replacement.resolvedFont != nil)
+        #expect(model.edits.first?.replacement?.resolvedFont != nil)
     }
 
     private func type0FontFixture(encoding: String, descendantSubtype: String = "CIDFontType2") -> URL {
@@ -484,17 +484,18 @@ struct PDFEditEngineTests {
         model.moveSelection(by: CGPoint(x: 30, y: 20))
 
         let applied = try #require(model.edits.last)
-        let destination = try #require(applied.replacement.destinationOrigin)
+        let replacement = try #require(applied.replacement)
+        let destination = try #require(replacement.destinationOrigin)
         #expect(destination.x == target.bounds.minX + 30)
         #expect(destination.y == target.baseline + 20)
         #expect(page.annotations.count == 2)
-        #expect(applied.replacement.annotationBounds.contains(destination))
+        #expect(replacement.annotationBounds.contains(destination))
         let movedText = try #require(page.annotations.compactMap { $0 as? ReplacementTextAnnotation }.first)
         let movedCover = try #require(page.annotations.compactMap { $0 as? ReplacementCoverAnnotation }.first)
-        #expect(movedText.bounds == applied.replacement.displayedTextBounds)
-        #expect(movedCover.bounds == applied.replacement.coverBounds)
+        #expect(movedText.bounds == replacement.displayedTextBounds)
+        #expect(movedCover.bounds == replacement.coverBounds)
 
-        model.moveExistingEdit(id: applied.replacement.id, by: CGPoint(x: 12, y: -5))
+        model.moveExistingEdit(id: replacement.id, by: CGPoint(x: 12, y: -5))
         #expect(page.annotations.count == 2)
         #expect(model.activeReplacements.count == 1)
         let movedAgain = try #require(model.activeReplacements.first?.destinationOrigin)

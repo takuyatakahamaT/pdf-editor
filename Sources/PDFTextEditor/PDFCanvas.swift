@@ -6,7 +6,9 @@ struct PDFCanvas: NSViewRepresentable {
     let document: PDFDocument
     let revision: Int
     let mode: EditorMode
+    let markupTool: PDFMarkupTool
     let selectedTarget: TextTarget?
+    let selectedMarkupID: UUID?
     let highlightedSearchSelections: [PDFSelection]
     let focusedSearchSelection: PDFSelection?
     let searchHighlightRevision: Int
@@ -18,6 +20,9 @@ struct PDFCanvas: NSViewRepresentable {
     let onMoveInsertion: (String, Int, CGRect) -> Void
     let onMoveSelection: (CGPoint) -> Void
     let onMoveExistingEdit: (UUID, CGPoint) -> Void
+    let onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
+    let onSelectMarkup: (UUID?) -> Void
+    let onMoveMarkup: (UUID, CGRect) -> Void
     let onBeginInlineEditing: () -> Void
     let onChangeInlineText: (String) -> Void
     let onCommitInlineEditing: () -> Void
@@ -30,6 +35,9 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveInsertion: onMoveInsertion,
             onMoveSelection: onMoveSelection,
             onMoveExistingEdit: onMoveExistingEdit,
+            onMarkupCreate: onMarkupCreate,
+            onSelectMarkup: onSelectMarkup,
+            onMoveMarkup: onMoveMarkup,
             onBeginInlineEditing: onBeginInlineEditing,
             onChangeInlineText: onChangeInlineText,
             onCommitInlineEditing: onCommitInlineEditing,
@@ -70,6 +78,9 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onMoveInsertion = onMoveInsertion
         context.coordinator.onMoveSelection = onMoveSelection
         context.coordinator.onMoveExistingEdit = onMoveExistingEdit
+        context.coordinator.onMarkupCreate = onMarkupCreate
+        context.coordinator.onSelectMarkup = onSelectMarkup
+        context.coordinator.onMoveMarkup = onMoveMarkup
         context.coordinator.onBeginInlineEditing = onBeginInlineEditing
         context.coordinator.onChangeInlineText = onChangeInlineText
         context.coordinator.onCommitInlineEditing = onCommitInlineEditing
@@ -77,6 +88,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.scaleChangeHandler = context.coordinator.handleScaleChange
         view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
         configure(view, coordinator: context.coordinator)
+        view.markupTool = markupTool
         if view.document !== document {
             view.resetFitMode()
             view.setMagnifierActive(false)
@@ -105,6 +117,7 @@ struct PDFCanvas: NSViewRepresentable {
         }
         view.selectedTextTarget = selectedTarget
         view.replacementOverlayProvider?.invalidate(revision: revision)
+        view.selectedMarkupID = selectedMarkupID
         view.syncInlineEditor(isEditing: isInlineEditing)
         if selectedTarget == nil {
             view.clearReplacementHighlight()
@@ -118,11 +131,15 @@ struct PDFCanvas: NSViewRepresentable {
 
     private func configure(_ view: ClickablePDFView, coordinator: Coordinator) {
         view.editorMode = mode
+        view.markupTool = markupTool
         view.selectionHandler = coordinator.handleSelection
         view.insertionHandler = coordinator.handleInsertion
         view.moveInsertionHandler = coordinator.handleMoveInsertion
         view.moveSelectionHandler = coordinator.handleMoveSelection
         view.moveExistingEditHandler = coordinator.handleMoveExistingEdit
+        view.markupCreateHandler = coordinator.handleMarkupCreate
+        view.selectMarkupHandler = coordinator.handleSelectMarkup
+        view.moveMarkupHandler = coordinator.handleMoveMarkup
         view.beginInlineEditingHandler = coordinator.handleBeginInlineEditing
         view.changeInlineTextHandler = coordinator.handleChangeInlineText
         view.commitInlineEditingHandler = coordinator.handleCommitInlineEditing
@@ -135,6 +152,9 @@ struct PDFCanvas: NSViewRepresentable {
         var onMoveInsertion: (String, Int, CGRect) -> Void
         var onMoveSelection: (CGPoint) -> Void
         var onMoveExistingEdit: (UUID, CGPoint) -> Void
+        var onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
+        var onSelectMarkup: (UUID?) -> Void
+        var onMoveMarkup: (UUID, CGRect) -> Void
         var onBeginInlineEditing: () -> Void
         var onChangeInlineText: (String) -> Void
         var onCommitInlineEditing: () -> Void
@@ -148,6 +168,9 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveInsertion: @escaping (String, Int, CGRect) -> Void,
             onMoveSelection: @escaping (CGPoint) -> Void,
             onMoveExistingEdit: @escaping (UUID, CGPoint) -> Void,
+            onMarkupCreate: @escaping (Int, CGRect, [CGPoint]) -> Void,
+            onSelectMarkup: @escaping (UUID?) -> Void,
+            onMoveMarkup: @escaping (UUID, CGRect) -> Void,
             onBeginInlineEditing: @escaping () -> Void,
             onChangeInlineText: @escaping (String) -> Void,
             onCommitInlineEditing: @escaping () -> Void,
@@ -160,6 +183,9 @@ struct PDFCanvas: NSViewRepresentable {
             self.onMoveInsertion = onMoveInsertion
             self.onMoveSelection = onMoveSelection
             self.onMoveExistingEdit = onMoveExistingEdit
+            self.onMarkupCreate = onMarkupCreate
+            self.onSelectMarkup = onSelectMarkup
+            self.onMoveMarkup = onMoveMarkup
             self.onBeginInlineEditing = onBeginInlineEditing
             self.onChangeInlineText = onChangeInlineText
             self.onCommitInlineEditing = onCommitInlineEditing
@@ -177,6 +203,11 @@ struct PDFCanvas: NSViewRepresentable {
         }
         func handleMoveSelection(_ delta: CGPoint) { onMoveSelection(delta) }
         func handleMoveExistingEdit(_ id: UUID, _ delta: CGPoint) { onMoveExistingEdit(id, delta) }
+        func handleMarkupCreate(_ pageIndex: Int, _ bounds: CGRect, _ points: [CGPoint]) {
+            onMarkupCreate(pageIndex, bounds, points)
+        }
+        func handleSelectMarkup(_ id: UUID?) { onSelectMarkup(id) }
+        func handleMoveMarkup(_ id: UUID, _ bounds: CGRect) { onMoveMarkup(id, bounds) }
         func handleBeginInlineEditing() { onBeginInlineEditing() }
         func handleChangeInlineText(_ text: String) { onChangeInlineText(text) }
         func handleCommitInlineEditing() { onCommitInlineEditing() }
@@ -187,11 +218,16 @@ struct PDFCanvas: NSViewRepresentable {
 final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var replacementOverlayProvider: ReplacementPreviewOverlayProvider?
     var editorMode: EditorMode = .replacement
+    var markupTool: PDFMarkupTool = .highlight
+    var selectedMarkupID: UUID?
     var selectionHandler: ((TextTarget?) -> Void)?
     var insertionHandler: ((Int, CGPoint) -> Void)?
     var moveInsertionHandler: ((String, Int, CGRect) -> Void)?
     var moveSelectionHandler: ((CGPoint) -> Void)?
     var moveExistingEditHandler: ((UUID, CGPoint) -> Void)?
+    var markupCreateHandler: ((Int, CGRect, [CGPoint]) -> Void)?
+    var selectMarkupHandler: ((UUID?) -> Void)?
+    var moveMarkupHandler: ((UUID, CGRect) -> Void)?
     var beginInlineEditingHandler: (() -> Void)?
     var changeInlineTextHandler: ((String) -> Void)?
     var commitInlineEditingHandler: (() -> Void)?
@@ -221,6 +257,14 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private weak var draggedPage: PDFPage?
     private var dragStartPoint = CGPoint.zero
     private var dragStartBounds = CGRect.zero
+    private var draggedMarkupID: UUID?
+    private var resizingMarkup = false
+    private var markupDidMove = false
+    private var markupDrawingPage: PDFPage?
+    private var markupDrawingPageIndex: Int?
+    private var markupDrawingStart = CGPoint.zero
+    private var markupDrawingPoints: [CGPoint] = []
+    private var markupPreviewAnnotation: PDFAnnotation?
 
     // 置換モードのグリフ単位ドラッグ選択に使う状態。
     // PDFKit のテキスト選択 (`PDFSelection`) はこの PDF の表領域で破綻するため使わない。
@@ -342,7 +386,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if editorMode == .insertion { addCursorRect(bounds, cursor: .crosshair) }
+        if editorMode == .insertion || editorMode == .markup { addCursorRect(bounds, cursor: .crosshair) }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -350,10 +394,19 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             handleInsertionMouseDown(event)
             return
         }
+        if editorMode == .markup {
+            if handleMarkupMouseDown(event) { return }
+            if markupTool.isTextMarkup { handleReplacementMouseDown(event) }
+            return
+        }
         handleReplacementMouseDown(event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if editorMode == .markup, markupTool.isTextMarkup, draggedMarkupID == nil {
+            handleReplacementMouseDragged(event)
+            return
+        }
         if editorMode == .replacement {
             if let edit = movingExistingEdit,
                let page = document?.page(at: edit.pageIndex) {
@@ -374,6 +427,19 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             handleReplacementMouseDragged(event)
             return
         }
+        if editorMode == .markup, let page = markupDrawingPage {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            let pagePoint = convert(viewPoint, to: page)
+            let points: [CGPoint]
+            if markupTool == .ink {
+                markupDrawingPoints.append(pagePoint)
+                points = markupDrawingPoints
+            } else {
+                points = [markupDrawingStart, pagePoint]
+            }
+            updateMarkupPreview(on: page, points: points)
+            return
+        }
         guard let annotation = draggedAnnotation,
               let page = draggedPage,
               let document else {
@@ -382,6 +448,25 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         }
         let viewPoint = convert(event.locationInWindow, from: nil)
         let pagePoint = convert(viewPoint, to: page)
+        if editorMode == .markup, let id = draggedMarkupID {
+            var bounds = dragStartBounds
+            if resizingMarkup {
+                bounds.size.width = max(8, dragStartBounds.width + pagePoint.x - dragStartPoint.x)
+                bounds.size.height = max(8, dragStartBounds.height + pagePoint.y - dragStartPoint.y)
+            } else {
+                let delta = CGPoint(x: pagePoint.x - dragStartPoint.x, y: pagePoint.y - dragStartPoint.y)
+                bounds.origin.x += delta.x
+                bounds.origin.y += delta.y
+            }
+            let pageBounds = page.bounds(for: .mediaBox)
+            bounds.origin.x = min(max(bounds.minX, pageBounds.minX), max(pageBounds.maxX - bounds.width, pageBounds.minX))
+            bounds.origin.y = min(max(bounds.minY, pageBounds.minY), max(pageBounds.maxY - bounds.height, pageBounds.minY))
+            annotation.bounds = bounds
+            markupDidMove = true
+            needsDisplay = true
+            _ = id
+            return
+        }
         let delta = CGPoint(x: pagePoint.x - dragStartPoint.x, y: pagePoint.y - dragStartPoint.y)
         var bounds = dragStartBounds.offsetBy(dx: delta.x, dy: delta.y)
         let pageBounds = page.bounds(for: .mediaBox)
@@ -394,6 +479,30 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if editorMode == .markup, let id = draggedMarkupID, let annotation = draggedAnnotation {
+            if markupDidMove { moveMarkupHandler?(id, annotation.bounds) }
+            draggedMarkupID = nil
+            draggedAnnotation = nil
+            draggedPage = nil
+            resizingMarkup = false
+            markupDidMove = false
+            return
+        }
+        if editorMode == .markup, markupTool.isTextMarkup {
+            if movingExistingEdit != nil || movingSelectionTarget != nil {
+                movingExistingEdit = nil
+                movingSelectionTarget = nil
+                movementDelta = .zero
+                return
+            }
+            if inlineField != nil { return }
+            selectionHandler?(replacementDragTarget)
+            replacementDragTarget = nil
+            replacementDragRun = nil
+            replacementDragAnchorIndex = nil
+            replacementDragPage = nil
+            return
+        }
         if editorMode == .replacement {
             if let edit = movingExistingEdit {
                 if hypot(movementDelta.x, movementDelta.y) > 0.5 {
@@ -419,6 +528,20 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             replacementDragRun = nil
             replacementDragAnchorIndex = nil
             replacementDragPage = nil
+            return
+        }
+        if editorMode == .markup, let page = markupDrawingPage, let pageIndex = markupDrawingPageIndex {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            let endPoint = convert(viewPoint, to: page)
+            var points = markupTool == .ink ? markupDrawingPoints : [markupDrawingStart, endPoint]
+            if markupTool == .ink, points.count == 1 { points.append(endPoint) }
+            let bounds = markupBounds(for: points, tool: markupTool)
+            if let markupPreviewAnnotation { page.removeAnnotation(markupPreviewAnnotation) }
+            markupPreviewAnnotation = nil
+            markupDrawingPage = nil
+            markupDrawingPageIndex = nil
+            markupDrawingPoints = []
+            markupCreateHandler?(pageIndex, bounds, points)
             return
         }
         if draggedAnnotation != nil {
@@ -548,6 +671,75 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
         clearSelection()
         insertionHandler?(document.index(for: page), pagePoint)
+    }
+
+    @discardableResult
+    private func handleMarkupMouseDown(_ event: NSEvent) -> Bool {
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        guard let page = page(for: viewPoint, nearest: false), let document else { return true }
+        let pagePoint = convert(viewPoint, to: page)
+        if let annotation = page.annotations.reversed().first(where: {
+            $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true && $0.bounds.contains(pagePoint)
+        }), let rawID = annotation.userName.map({ String($0.dropFirst(PDFMarkupEngine.markerPrefix.count)) }),
+           let id = UUID(uuidString: rawID) {
+            selectMarkupHandler?(id)
+            draggedMarkupID = id
+            draggedAnnotation = annotation
+            draggedPage = page
+            dragStartPoint = pagePoint
+            dragStartBounds = annotation.bounds
+            resizingMarkup = hypot(pagePoint.x - annotation.bounds.maxX, pagePoint.y - annotation.bounds.maxY) < 10
+            markupDidMove = false
+            return true
+        }
+        guard !markupTool.isTextMarkup else { return false }
+        selectMarkupHandler?(nil)
+        markupDrawingPage = page
+        markupDrawingPageIndex = document.index(for: page)
+        markupDrawingStart = pagePoint
+        markupDrawingPoints = [pagePoint]
+        if markupTool == .note {
+            markupDrawingPoints = []
+            let bounds = CGRect(x: pagePoint.x, y: pagePoint.y, width: 20, height: 20)
+            markupDrawingPage = nil
+            markupDrawingPageIndex = nil
+            markupCreateHandler?(document.index(for: page), bounds, [])
+        } else if markupTool == .signature {
+            markupDrawingPoints = []
+            let bounds = CGRect(x: pagePoint.x, y: pagePoint.y, width: 140, height: 40)
+            markupDrawingPage = nil
+            markupDrawingPageIndex = nil
+            markupCreateHandler?(document.index(for: page), bounds, [])
+        }
+        return true
+    }
+
+    private func updateMarkupPreview(on page: PDFPage, points: [CGPoint]) {
+        if let markupPreviewAnnotation { page.removeAnnotation(markupPreviewAnnotation) }
+        let bounds = markupBounds(for: points, tool: markupTool)
+        let preview = PDFMarkupEngine.makeAnnotation(for: PDFMarkupEdit(
+            pageIndex: 0, tool: markupTool, bounds: bounds, points: points,
+            text: markupTool == .signature ? "署名" : ""
+        ))
+        preview.shouldPrint = false
+        preview.color = markupTool.color.withAlphaComponent(0.65)
+        page.addAnnotation(preview)
+        markupPreviewAnnotation = preview
+    }
+
+    private func markupBounds(for points: [CGPoint], tool: PDFMarkupTool) -> CGRect {
+        guard let first = points.first else { return .zero }
+        guard let last = points.last else { return CGRect(origin: first, size: CGSize(width: 1, height: 1)) }
+        var bounds = CGRect(x: min(first.x, last.x), y: min(first.y, last.y),
+                            width: abs(last.x - first.x), height: abs(last.y - first.y))
+        if tool == .ink, points.count > 2 {
+            for point in points.dropFirst() { bounds = bounds.union(CGRect(origin: point, size: CGSize(width: 0.1, height: 0.1))) }
+        }
+        let minWidth: CGFloat = tool == .signature ? 80 : 8
+        let minHeight: CGFloat = tool == .signature ? 24 : 8
+        if bounds.width < minWidth { bounds.size.width = minWidth }
+        if bounds.height < minHeight { bounds.size.height = minHeight }
+        return bounds
     }
 
     private func handleReplacementMouseDown(_ event: NSEvent) {

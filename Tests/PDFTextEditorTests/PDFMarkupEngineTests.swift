@@ -1,0 +1,159 @@
+import AppKit
+import Foundation
+import PDFKit
+import Testing
+@testable import PDFTextEditor
+
+struct PDFMarkupEngineTests {
+    @Test("markup tools produce editable PDF annotations")
+    func annotationTypesAndPayloads() {
+        let bounds = CGRect(x: 12, y: 18, width: 80, height: 24)
+        let expected: [(PDFMarkupTool, PDFAnnotationSubtype)] = [
+            (.highlight, .highlight), (.underline, .underline), (.strikeOut, .strikeOut),
+            (.note, .text), (.rectangle, .square), (.ellipse, .circle),
+            (.arrow, .line), (.ink, .ink), (.signature, .freeText)
+        ]
+
+        for (tool, subtype) in expected {
+            let edit = PDFMarkupEdit(
+                pageIndex: 0, tool: tool, bounds: bounds,
+                points: [CGPoint(x: 12, y: 18), CGPoint(x: 90, y: 40)],
+                text: tool.usesTextInput ? "Test" : ""
+            )
+            let annotation = PDFMarkupEngine.makeAnnotation(for: edit)
+            #expect(annotation.type == subtype.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+            #expect(annotation.userName == PDFMarkupEngine.markerPrefix + edit.id.uuidString)
+            #expect(annotation.shouldPrint)
+            if tool.usesTextInput { #expect(annotation.contents == "Test") }
+            if tool.isTextMarkup { #expect(annotation.quadrilateralPoints?.count == 4) }
+            if tool == .arrow {
+                #expect(annotation.startPoint == CGPoint.zero)
+                #expect(annotation.endPoint == CGPoint(x: 78, y: 22))
+            }
+        }
+    }
+
+    @Test("annotations survive export as editable PDF objects")
+    func exportRetainsAnnotations() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-export-\(UUID().uuidString).pdf")
+        let printOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-print-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+            try? FileManager.default.removeItem(at: printOutput)
+        }
+
+        let markups = [
+            PDFMarkupEdit(pageIndex: 0, tool: .highlight,
+                          bounds: CGRect(x: 18, y: 112, width: 50, height: 18)),
+            PDFMarkupEdit(pageIndex: 0, tool: .note,
+                          bounds: CGRect(x: 150, y: 80, width: 20, height: 20), text: "Review this")
+        ]
+        try PDFExportEngine.export(sourceURL: source, edits: [], markups: markups, to: output)
+
+        let exported = try #require(PDFDocument(url: output))
+        let page = try #require(exported.page(at: 0))
+        #expect(page.string?.contains("SOURCE") == true)
+        #expect(page.annotations.count == 2)
+        #expect(page.annotations.contains {
+            $0.type == PDFAnnotationSubtype.highlight.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        })
+        #expect(page.annotations.contains { $0.contents == "Review this" })
+        #expect(page.annotations.allSatisfy { $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true })
+
+        try PDFExportEngine.exportForPrinting(sourceURL: source, edits: [], markups: markups, to: printOutput)
+        let preparedForPrint = try #require(PDFDocument(url: printOutput))
+        #expect(preparedForPrint.pageCount == 1)
+        #expect(preparedForPrint.page(at: 0)?.annotations.isEmpty == true)
+    }
+
+    @Test("markup add, update, delete, undo and redo keep model and page in sync")
+    @MainActor
+    func modelMarkupHistory() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.markup)
+        model.setMarkupTool(.note)
+        model.setMarkupText("First note")
+        model.addMarkup(pageIndex: 0, bounds: CGRect(x: 20, y: 30, width: 20, height: 20))
+        let id = try #require(model.selectedMarkupID)
+        let page = try #require(model.document?.page(at: 0))
+        #expect(model.activeMarkupEdits.count == 1)
+        #expect(markedAnnotations(on: page).count == 1)
+
+        model.updateSelectedMarkupText("Updated note")
+        #expect(model.selectedMarkup?.text == "Updated note")
+        #expect(markedAnnotations(on: page).first?.contents == "Updated note")
+        model.undoLastEdit()
+        #expect(model.activeMarkupEdits.first?.text == "First note")
+        #expect(markedAnnotations(on: page).first?.contents == "First note")
+        model.redoLastEdit()
+        #expect(model.activeMarkupEdits.first?.text == "Updated note")
+
+        model.selectMarkup(id)
+        model.deleteSelectedMarkup()
+        #expect(model.activeMarkupEdits.isEmpty)
+        #expect(markedAnnotations(on: page).isEmpty)
+        model.undoLastEdit()
+        #expect(model.activeMarkupEdits.count == 1)
+        #expect(markedAnnotations(on: page).first?.contents == "Updated note")
+        model.undoLastEdit()
+        #expect(model.activeMarkupEdits.first?.text == "First note")
+        #expect(markedAnnotations(on: page).first?.contents == "First note")
+        model.redoLastEdit()
+        #expect(model.activeMarkupEdits.first?.text == "Updated note")
+        model.undoLastEdit()
+        model.undoLastEdit()
+        #expect(model.activeMarkupEdits.isEmpty)
+        #expect(markedAnnotations(on: page).isEmpty)
+        model.redoLastEdit()
+        #expect(model.activeMarkupEdits.first?.text == "First note")
+    }
+
+    @Test("moving and resizing ink and arrows updates their paths and undo restores the old geometry")
+    @MainActor
+    func moveAndResizeMarkupGeometry() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 240, height: 160),
+            contentStream: "BT /F1 12 Tf 20 120 Td (SOURCE) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        model.setMode(.markup)
+        model.setMarkupTool(.arrow)
+        model.addMarkup(pageIndex: 0, bounds: CGRect(x: 20, y: 30, width: 50, height: 40),
+                        points: [CGPoint(x: 20, y: 30), CGPoint(x: 70, y: 70)])
+        let id = try #require(model.selectedMarkupID)
+        let movedBounds = CGRect(x: 60, y: 80, width: 50, height: 40)
+        model.moveMarkup(id: id, to: movedBounds)
+        #expect(model.selectedMarkup?.bounds == movedBounds)
+        #expect(model.selectedMarkup?.points == [CGPoint(x: 60, y: 80), CGPoint(x: 110, y: 120)])
+
+        model.undoLastEdit()
+        #expect(model.activeMarkupEdits.first?.bounds == CGRect(x: 20, y: 30, width: 50, height: 40))
+        let page = try #require(model.document?.page(at: 0))
+        let restored = try #require(markedAnnotations(on: page).first)
+        #expect(restored.bounds == CGRect(x: 20, y: 30, width: 50, height: 40))
+        #expect(restored.startPoint == .zero)
+        #expect(restored.endPoint == CGPoint(x: 50, y: 40))
+
+        model.redoLastEdit()
+        let resizedBounds = CGRect(x: 60, y: 80, width: 100, height: 80)
+        model.moveMarkup(id: id, to: resizedBounds)
+        #expect(model.activeMarkupEdits.first?.points == [CGPoint(x: 60, y: 80), CGPoint(x: 160, y: 160)])
+    }
+
+    private func markedAnnotations(on page: PDFPage) -> [PDFAnnotation] {
+        page.annotations.filter { $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true }
+    }
+}

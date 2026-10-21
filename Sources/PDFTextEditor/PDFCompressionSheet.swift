@@ -372,7 +372,8 @@ struct PDFCompressionSheet: View {
         do {
             try PDFExportEngine.exportForPrinting(
                 sourceURL: sourceURL,
-                edits: model.edits.map(\.replacement),
+                edits: model.activeReplacements,
+                markups: model.activeMarkupEdits,
                 to: preparedURL
             )
         } catch {
