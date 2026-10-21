@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 @testable import PDFTextEditor
 
@@ -42,5 +43,14 @@ struct PDFZoomStateTests {
         state.setMagnifierActive(false)
         #expect(!state.magnifierIsActive)
         #expect(state.scale == 1.75)
+    }
+
+    @Test("command and control scroll gestures zoom while plain scrolling remains scrolling")
+    @MainActor
+    func recognizesCommonZoomScrollModifiers() {
+        #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .command))
+        #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .control))
+        #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: []))
+        #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: .option))
     }
 }
