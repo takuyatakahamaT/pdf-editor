@@ -26,6 +26,7 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "Tw", opSetWordSpacing)
     CGPDFOperatorTableSetCallback(table, "Tz", opSetHorizontalScale)
     CGPDFOperatorTableSetCallback(table, "Ts", opSetTextRise)
+    CGPDFOperatorTableSetCallback(table, "Tr", opSetTextRenderingMode)
     CGPDFOperatorTableSetCallback(table, "Tj", opShowText)
     CGPDFOperatorTableSetCallback(table, "TJ", opShowTextArray)
     CGPDFOperatorTableSetCallback(table, "'", opNextLineShowText)
@@ -282,6 +283,13 @@ private func opSetTextRise(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawP
     state.textRise = value
 }
 
+private func opSetTextRenderingMode(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = state(from: info) else { return }
+    var mode: CGPDFReal = 0
+    guard CGPDFScannerPopNumber(scanner, &mode), mode.isFinite else { return }
+    state.textRenderingMode = min(max(Int(mode), 0), 7)
+}
+
 private func opShowText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = state(from: info) else { return }
     var stringRef: CGPDFStringRef?
@@ -343,6 +351,9 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
         }
         offset += bytesPerCode
 
+        let paintOrder = state.nextPaintOrder
+        state.nextPaintOrder += 1
+
         let w0 = info.width(for: code)
         let unicode = info.toUnicode[code] ?? ""
 
@@ -390,7 +401,9 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
                 fontSize: effectiveSize,
                 advance: advance,
                 fillColor: state.fillColorStack.last ?? .black,
-                hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code)
+                hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code),
+                textRenderingMode: state.textRenderingMode,
+                paintOrder: paintOrder
             ))
         }
     }

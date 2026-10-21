@@ -24,6 +24,12 @@ struct ScannedGlyph {
     /// `/ToUnicode` に明示された対応で文字を解決できたか。
     /// 単純フォントのASCIIフォールバックで得た文字列とは区別する。
     var hasExplicitToUnicodeMapping: Bool = true
+    /// PDFのテキスト描画モード（`Tr`）。3は不可視の検索テキスト層。
+    var textRenderingMode: Int = 0
+    /// content streamを走査した順番。後から描かれた重なり文字を選択するために使う。
+    var paintOrder: Int = 0
+
+    var isVisible: Bool { (0...6).contains(textRenderingMode) && textRenderingMode != 3 }
 }
 
 /// 同一ベースライン・同一フォント・同一サイズで視覚的に連続するグリフの並び。
@@ -171,12 +177,19 @@ struct PageTextIndex {
 
     /// クリック点にちょうど乗っているグリフを探す。
     func run(at point: CGPoint) -> (run: ScannedRun, glyphIndex: Int)? {
+        var hits: [(run: ScannedRun, glyphIndex: Int, glyph: ScannedGlyph)] = []
         for run in runs {
             for (glyphIndex, glyph) in run.glyphs.enumerated() where glyph.advanceBox.contains(point) {
-                return (run, glyphIndex)
+                hits.append((run, glyphIndex, glyph))
             }
         }
-        return nil
+        // 白塗り編集後のPDFには、同じ位置に元文字・表示用文字・不可視の検索用文字が
+        // 重なって残ることがある。最初に見つかった元文字ではなく、後から描かれた
+        // Unicode文字を選ぶ。表示用の文字がUnicodeを持たないときは検索用層へ進む。
+        let mappedHits = hits.filter { !$0.glyph.text.isEmpty }
+        let candidates = mappedHits.isEmpty ? hits.filter { $0.glyph.isVisible } : mappedHits
+        guard let hit = candidates.max(by: { $0.glyph.paintOrder < $1.glyph.paintOrder }) else { return nil }
+        return (hit.run, hit.glyphIndex)
     }
 
     /// クリック点から文字種クラスタを初期選択として求める。
@@ -466,6 +479,7 @@ struct PageTextIndex {
         lhs.fontKey == rhs.fontKey
             && abs(lhs.fontSize - rhs.fontSize) < 0.05
             && lhs.fillColor.isEqual(rhs.fillColor)
+            && lhs.textRenderingMode == rhs.textRenderingMode
     }
 
     /// フォントキーごとに「埋め込みフォントプログラムが存在したか」を保持する
@@ -475,7 +489,7 @@ struct PageTextIndex {
     private func closestHit(at point: CGPoint) -> (run: ScannedRun, glyphIndex: Int)? {
         if let hit = run(at: point) { return hit }
 
-        var best: (run: ScannedRun, glyphIndex: Int, distance: CGFloat)?
+        var best: (run: ScannedRun, glyphIndex: Int, distance: CGFloat, mapped: Bool, paintOrder: Int)?
         for run in runs {
             let verticalDistance = distance(point.y, to: run.box.minY, run.box.maxY)
             let threshold = max(3.0, 0.6 * run.fontSize)
@@ -484,8 +498,11 @@ struct PageTextIndex {
                 let horizontalDistance = distance(point.x, to: glyph.advanceBox.minX, glyph.advanceBox.maxX)
                 let total = hypot(horizontalDistance, verticalDistance)
                 guard total <= threshold else { continue }
-                if best == nil || total < best!.distance {
-                    best = (run, glyphIndex, total)
+                let mapped = !glyph.text.isEmpty
+                if best == nil || total < best!.distance - 0.001
+                    || (abs(total - best!.distance) <= 0.001
+                        && (mapped != best!.mapped ? mapped : glyph.paintOrder > best!.paintOrder)) {
+                    best = (run, glyphIndex, total, mapped, glyph.paintOrder)
                 }
             }
         }
@@ -738,6 +755,7 @@ final class GlyphScanState {
         let horizontalScale: CGFloat
         let leading: CGFloat
         let textRise: CGFloat
+        let textRenderingMode: Int
     }
 
     var ctmStack: [CGAffineTransform] = [.identity]
@@ -758,6 +776,8 @@ final class GlyphScanState {
     var horizontalScale: CGFloat = 1
     var leading: CGFloat = 0
     var textRise: CGFloat = 0
+    var textRenderingMode: Int = 0
+    var nextPaintOrder = 0
     private var textGraphicsStateStack: [TextGraphicsState] = []
 
     var fonts: [String: PDFFontInfo] = [:]
@@ -845,7 +865,8 @@ final class GlyphScanState {
             wordSpacing: wordSpacing,
             horizontalScale: horizontalScale,
             leading: leading,
-            textRise: textRise
+            textRise: textRise,
+            textRenderingMode: textRenderingMode
         ))
     }
 
@@ -861,6 +882,7 @@ final class GlyphScanState {
             horizontalScale = saved.horizontalScale
             leading = saved.leading
             textRise = saved.textRise
+            textRenderingMode = saved.textRenderingMode
         }
     }
 }
@@ -872,7 +894,10 @@ private func groupIntoRuns(glyphs: [ScannedGlyph]) -> [ScannedRun] {
         if abs(lhs.baseline - rhs.baseline) > 0.01 {
             return lhs.baseline > rhs.baseline
         }
-        return lhs.advanceBox.minX < rhs.advanceBox.minX
+        if lhs.advanceBox.minX != rhs.advanceBox.minX {
+            return lhs.advanceBox.minX < rhs.advanceBox.minX
+        }
+        return lhs.paintOrder < rhs.paintOrder
     }
 
     var lines: [[ScannedGlyph]] = []
@@ -888,14 +913,22 @@ private func groupIntoRuns(glyphs: [ScannedGlyph]) -> [ScannedRun] {
 
     var runs: [ScannedRun] = []
     for line in lines {
-        let byX = line.sorted { $0.advanceBox.minX < $1.advanceBox.minX }
+        let byX = line.sorted {
+            if $0.advanceBox.minX != $1.advanceBox.minX {
+                return $0.advanceBox.minX < $1.advanceBox.minX
+            }
+            return $0.paintOrder < $1.paintOrder
+        }
         var current: [ScannedGlyph] = []
         for glyph in byX {
             if let last = current.last {
                 let gap = glyph.advanceBox.minX - (last.advanceBox.minX + last.advance)
                 let sameFont = glyph.fontKey == last.fontKey
                 let sameSize = abs(glyph.fontSize - last.fontSize) < 0.05
-                if sameFont, sameSize, gap <= 0.25 * glyph.fontSize {
+                // 別々に描かれた同位置の文字は同じrunへ結合しない。
+                // 負のTJ間隔による通常の字間詰めは最大0.25emまで許容する。
+                let boundedOverlap = gap >= -0.25 * glyph.fontSize
+                if sameFont, sameSize, boundedOverlap, gap <= 0.25 * glyph.fontSize {
                     current.append(glyph)
                     continue
                 }

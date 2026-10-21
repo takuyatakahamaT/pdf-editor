@@ -135,6 +135,29 @@ struct PDFHybridEditingBoundaryTests {
         #expect(exportedPage.string?.contains("XYZ") == true)
     }
 
+    @Test("重なった置換文字は元文字ではなく最後に描かれたUnicodeグリフを選ぶ")
+    @MainActor
+    func overlappingReplacementPrefersLatestMappedGlyph() throws {
+        let url = simpleFontFixture(content: """
+        BT /F1 16 Tf 1 0 0 1 50 40 Tm (9) Tj ET
+        BT /F1 16 Tf 1 0 0 1 50 40 Tm (10) Tj ET
+        BT /F1 16 Tf 3 Tr 1 0 0 1 50 40 Tm (10) Tj ET
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let hit = try #require(index.run(at: CGPoint(x: 50.5, y: 42)))
+        let glyph = hit.run.glyphs[hit.glyphIndex]
+        let originalOrder = index.runs.flatMap(\.glyphs).first { $0.text == "9" }?.paintOrder ?? Int.max
+
+        #expect(glyph.text == "1")
+        #expect(glyph.textRenderingMode == 3)
+        #expect(glyph.paintOrder > originalOrder)
+        #expect(hit.run.text != "9")
+    }
+
     @Test("日本語の明示ToUnicodeとsubset名を読めても、元page objectは特定されない")
     func japaneseSubsetMetadata() throws {
         let url = cidFixture(
