@@ -150,6 +150,18 @@ struct PDFEditEngineTests {
         #expect(CTFontCopyFamilyName(CTFontCreateWithName("Noto Sans JP" as CFString, 12, nil)) as String == "Noto Sans JP")
     }
 
+    @Test("application font resources are preferred before the SwiftPM fallback")
+    func applicationFontResourcesArePreferred() {
+        var requestedPackageFallback = false
+        let fontURL = PDFEmbeddedFontLoader.bundledFontURL(mainBundle: .module) {
+            requestedPackageFallback = true
+            return .main
+        }
+
+        #expect(fontURL?.lastPathComponent == "NotoSansJP-Regular.otf")
+        #expect(!requestedPackageFallback)
+    }
+
     @Test("local Office MS Gothic is registered when its font file is available")
     func registersLocalMSGothicWhenAvailable() {
         let officeFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msgothic.ttc"

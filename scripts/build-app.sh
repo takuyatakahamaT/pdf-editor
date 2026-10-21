@@ -59,8 +59,11 @@ if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
     echo "SwiftPMのフォントリソースが見つかりません: $RESOURCE_BUNDLE" >&2
     exit 1
 fi
+/bin/rm -rf "$APP_BUNDLE/PDFTextEditor_PDFTextEditor.bundle"
 /bin/rm -rf "$CONTENTS_DIR/Resources/PDFTextEditor_PDFTextEditor.bundle"
-/bin/cp -R "$RESOURCE_BUNDLE" "$CONTENTS_DIR/Resources/PDFTextEditor_PDFTextEditor.bundle"
+/bin/rm -rf "$CONTENTS_DIR/Resources/Fonts"
+/bin/cp -R "$RESOURCE_BUNDLE/Fonts" "$CONTENTS_DIR/Resources/Fonts"
+/usr/bin/swift "$APP_DIR/scripts/verify-app-resources.swift" "$APP_BUNDLE"
 /bin/rm -f "$CONTENTS_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt"
 /usr/bin/install -m 644 \
     "$APP_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt" \
