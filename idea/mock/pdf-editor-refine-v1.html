@@ -1,0 +1,516 @@
+<!doctype html>
+<!--
+  mock: PDF editor（macOS・別 repo takuyatakahamaT/pdf-editor）の UI リファイン v1 — 案 A／B × 状態 4 つ
+  対象: 編集画面（上のバー・キャンバス・編集の操作）と開始画面。1200×780 の窓を画面幅に合わせて縮めて表示する。
+  論点:
+    1. 編集の操作をどこに置くか。A＝右の文脈パネル（いま選んでいるものに関係ある操作だけ。何も選んでいなければ編集方法の切替だけ）。
+       B＝右パネルを無くし、選んだ文字のすぐ下に小さな操作が浮く（編集方法の切替は上のバーの中央）。
+    2. 上のバー: ファイル名・ページ送り・検索・取り消し/やり直し・「ツール」1 つ・「書き出す」1 つに絞る。
+       OCR / 結合 / ページ整理 / ページサイズ / 圧縮 / 印刷 / フォントの読み込み は「ツール」のメニューへ畳む（メニューバーと ⌘ の近道は現行のまま）。
+    3. 減らしたもの: 「TEXT PATCH」の見出し・各モードの大見出しと説明文・「選択した文字」「選択文字のフォント」の箱と説明・
+       フォント読み込みの説明と読み込み済み一覧・MVP の注意書き・下のステータス行（案内と ⌘ の一覧）・独立したズームの横バー（キャンバス右下の小さな操作へ）・
+       「まだ選択されていません」のような空の状態の文言。
+    4. 色: 白基調。キャンバス #F7F7F4・面は白・罫線 #E7E7E2・墨 #1C1C1A（experience-provider-workspace-v1 のトークン）。
+       主ボタンは 墨 / 若草（#B2D67C）を切替で比較。選んだ文字の目印は若草（現行の珊瑚色をやめる）。墨消しの対象は黒の下見せ。
+    5. 書体: macOS の system（ヒラギノ）。見出しのセリフは使わない。窓はタイトルバーと上のバーを 1 本にまとめる。
+  作っていない:
+    - ツールのメニューの各項目の先（OCR・結合・ページ整理・ページサイズ・圧縮・印刷のシート）。検索のシート。書き出しの保存ダイアログ。
+    - 取り消し/やり直し・ズーム・ページ送り（押しても変わらない）。フォントの選択肢は見本。色は見本のスウォッチだけ。
+    - 追加モードの入力位置のクリック（置いた後の状態だけ）。注釈の描画（ツールの選択だけ・ハイライト固定）。手書き・署名の入力面。
+    - 一時的な結果の通知（書き出した・保存した）。読み込み中・エラー・複数ページ・スクロール・ドラッグでの移動。
+    - PDF の中身は架空の請求書（見本）。URL バーは無い（ネイティブアプリなので窓の枠で代える）。B の下端の注釈ツールは icon だけ（aria-label あり）。
+  参照: paneB-7 への依頼（owner のスクリーンショット 2026-10-21）、idea/mock/experience-provider-workspace-v1.html（見た目の手本・トークン）、
+    takuyatakahamaT/pdf-editor Sources/PDFTextEditor/EditorScreen.swift・NihoTheme.swift・README.md（機能の範囲）、docs/design/design-guide.md
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>PDF editor リファイン v1</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:#ECECE8;color:#1C1C1A;font:13px/1.6 -apple-system,"Hiragino Sans","Hiragino Kaku Gothic ProN",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:22px 20px 60px;overflow-x:hidden}
+button{font:inherit;cursor:pointer;border:0;background:none;color:inherit;padding:0;line-height:1}
+svg{display:block}
+svg.ic{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* ===== outer page ===== */
+.doc{width:min(1280px,100%);margin:0 auto 6px}
+.doc h1{font-size:17px;margin:0 0 10px}
+.switch-row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+.switch-label{font-size:11.5px;font-weight:800;letter-spacing:.06em;color:#7A7A74;width:52px;text-align:right;flex-shrink:0}
+.variant-switch{display:flex;flex-wrap:wrap;gap:4px;background:rgba(255,255,255,.78);border:1px solid #DCDCD6;border-radius:999px;padding:4px}
+.variant-switch button{font-size:12.5px;font-weight:700;color:#55554F;padding:6px 12px;border-radius:999px;transition:background-color .15s,color .15s}
+.variant-switch button:hover{background:rgba(178,214,124,.22)}
+.variant-switch button.on{background:#1C1C1A;color:#fff}
+
+.stage{width:min(1280px,100%);margin:10px auto 0;position:relative;overflow:hidden;height:850px}
+.scaled{position:absolute;left:40px;top:0;width:1200px;height:780px;transform-origin:top left}
+.frame{width:1200px;height:780px;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 20px 60px rgba(0,0,0,.14),0 0 0 1px rgba(0,0,0,.06)}
+
+/* ===== app ===== */
+.app{--ink:#1C1C1A;--ink2:#55554F;--mute:#8A8A84;--line:#E7E7E2;--line2:#D4D4CF;--bg:#FFFFFF;--bg2:#F7F7F4;--bg3:#EFEFEB;--green:#B2D67C;--green-ink:#3F7A3E;--green-soft:#EDF5E1;--red:#C2472E;
+  height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);font-size:13px;line-height:1.5;position:relative}
+.app[data-state="start"] .hide-start{display:none!important}
+.app:not([data-state="start"]) .only-start{display:none!important}
+
+/* top bar */
+.topbar{height:52px;flex-shrink:0;display:flex;align-items:center;gap:8px;padding:0 14px 0 16px;border-bottom:1px solid var(--line);background:#fff;position:relative;z-index:6}
+.lights{display:flex;gap:8px;margin-right:14px;flex-shrink:0}
+.lights i{width:12px;height:12px;border-radius:50%;display:block}
+.lights i:nth-child(1){background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+.mark{width:22px;height:22px;border-radius:6px;background:var(--ink);color:#fff;font-size:10px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.fname{font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;margin-left:2px}
+.pager{display:inline-flex;align-items:center;margin-left:4px;color:var(--ink2);font-size:12.5px;font-weight:700;font-variant-numeric:tabular-nums}
+.pager .ib{width:24px;height:24px}
+.pager .ib svg{width:14px;height:14px}
+.spacer{flex:1;min-width:8px}
+.ib{width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;color:var(--ink2);flex-shrink:0}
+.ib:hover{background:var(--bg2);color:var(--ink)}
+.ib.on{background:var(--bg3);color:var(--ink)}
+.ib.off{opacity:.35;pointer-events:none}
+.ib svg{width:18px;height:18px}
+.vsep{width:1px;height:20px;background:var(--line);margin:0 6px;flex-shrink:0}
+.tb-right{display:flex;align-items:center;gap:2px;flex-shrink:0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:34px;padding:0 15px;border-radius:999px;font-weight:800;font-size:13px;border:1px solid transparent;white-space:nowrap;flex-shrink:0}
+.btn svg{width:16px;height:16px}
+.btn-primary{background:var(--ink);color:#fff}
+.btn-primary:hover{background:#000}
+.app[data-primary="green"] .btn-primary{background:var(--green);color:var(--ink)}
+.app[data-primary="green"] .btn-primary:hover{background:#A6CD6B}
+.btn-secondary{background:#fff;border-color:var(--line2);color:var(--ink)}
+.btn-ghost{color:var(--ink2)}
+.btn-ghost:hover,.btn-ghost.on{background:var(--bg3);color:var(--ink)}
+.btn-sm{height:30px;padding:0 12px;font-size:12.5px}
+.btn-sm svg{width:14px;height:14px}
+.toolwrap{position:relative;margin-right:6px}
+.menu{display:none;position:absolute;top:38px;right:0;min-width:208px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.05);padding:6px;z-index:9}
+.menu button{display:flex;align-items:center;gap:10px;width:100%;height:32px;padding:0 10px;border-radius:8px;font-weight:700;font-size:12.5px;color:var(--ink);text-align:left;white-space:nowrap}
+.menu button:hover{background:var(--bg2)}
+.menu button svg{width:16px;height:16px;color:var(--ink2)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:6px 4px}
+.app[data-state="tools"] .menu{display:block}
+.app[data-state="tools"] [data-toggle="tools"]{background:var(--bg3);color:var(--ink)}
+
+/* segmented mode switch */
+.seg{display:inline-flex;background:var(--bg3);border-radius:10px;padding:3px;gap:2px;flex-shrink:0}
+.seg button{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 12px;border-radius:8px;font-weight:700;font-size:12.5px;color:var(--ink2);white-space:nowrap}
+.seg button svg{width:15px;height:15px}
+.seg button.on{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 1px rgba(0,0,0,.03)}
+.app[data-variant="A"] .seg-top{display:none}
+.seg-side{display:flex;width:100%}
+.seg-side button{flex:1;padding:0 4px;gap:4px}
+
+/* body */
+.body{flex:1;min-height:0;display:flex}
+.canvas{flex:1;min-width:0;position:relative;background:var(--bg2);overflow:hidden;display:flex;align-items:flex-start;justify-content:center;padding:30px 24px}
+.page{width:470px;height:665px;background:#fff;border:1px solid var(--line);box-shadow:0 1px 2px rgba(0,0,0,.04),0 12px 32px rgba(0,0,0,.07);position:relative;border-radius:2px;flex-shrink:0;overflow:hidden}
+.panel{width:300px;flex-shrink:0;border-left:1px solid var(--line);background:#fff;padding:14px 16px;display:flex;flex-direction:column;gap:18px;overflow:auto}
+.app[data-variant="B"] .panel{display:none}
+.ctx{display:flex;flex-direction:column;gap:18px}
+.ctx > section{display:none;flex-direction:column;gap:12px}
+.app[data-mode="replace"][data-state="selected"] .ctx-replace{display:flex}
+.app[data-mode="insert"][data-state="selected"] .ctx-insert{display:flex}
+.app[data-mode="redact"][data-state="selected"] .ctx-redact{display:flex}
+.app[data-mode="markup"] .ctx-markup{display:flex}
+.app[data-mode="markup"]:not([data-state="selected"]) .onsel{display:none}
+
+/* zoom (canvas corner) */
+.zoom{position:absolute;right:16px;bottom:14px;display:flex;align-items:center;gap:1px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:3px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.zoom .ib{width:26px;height:26px;border-radius:999px}
+.zoom .ib svg{width:14px;height:14px}
+.zoom .zv{font-size:12px;font-weight:700;min-width:42px;text-align:center;font-variant-numeric:tabular-nums;color:var(--ink)}
+.zoom .vsep{height:14px;margin:0 2px}
+
+/* B: floating controls near the selection */
+.float{position:absolute;display:none;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.05);padding:6px;z-index:4}
+.app[data-variant="B"][data-state="selected"] .float{display:block}
+.fl{display:none;align-items:center;gap:6px}
+.app[data-mode="replace"] .fl-replace{display:flex}
+.app[data-mode="insert"] .fl-insert{display:flex}
+.app[data-mode="redact"] .fl-redact{display:flex}
+.app[data-mode="markup"] .fl-markup{display:flex}
+.fl .in{width:auto;min-height:32px;padding:4px 8px;border-radius:8px}
+.fl input.in{width:96px;font-weight:700;font-size:14px}
+.fl select.in{max-width:150px;font-size:12px;font-weight:700}
+.fl .ib{width:30px;height:30px}
+.fl .ib.ok{background:var(--ink);color:#fff}
+.fl .ib.ok:hover{background:#000}
+.app[data-primary="green"] .fl .ib.ok{background:var(--green);color:var(--ink)}
+.fl .stepper{height:32px;border-radius:8px}.fl .stepper button{width:24px}.fl .stepper span{min-width:38px;font-size:12px}
+.fl .swatch{height:32px;padding:0 8px;border-radius:8px}
+.chip{display:inline-flex;align-items:center;gap:2px;height:28px;padding:0 2px 0 10px;border-radius:999px;background:var(--bg3);font-weight:700;font-size:12.5px}
+.chip .ib{width:24px;height:24px;border-radius:999px}.chip .ib svg{width:13px;height:13px}
+.mtools{display:none;position:absolute;left:50%;bottom:14px;transform:translateX(-50%);background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px;box-shadow:0 2px 8px rgba(0,0,0,.06);gap:1px}
+.app[data-variant="B"][data-mode="markup"] .mtools{display:flex}
+.mtools .ib{width:30px;height:30px;border-radius:999px}
+.mtools .ib svg{width:16px;height:16px}
+
+/* inputs */
+.in{width:100%;min-height:36px;border:1px solid var(--line2);border-radius:10px;padding:6px 10px;font:inherit;background:#fff;color:var(--ink);line-height:1.4}
+.in.big{font-size:17px;font-weight:700;min-height:44px}
+.in:focus{outline:0;border-color:#8FB55A;box-shadow:0 0 0 3px rgba(178,214,124,.35)}
+select.in{appearance:none;-webkit-appearance:none;padding-right:28px;font-weight:700;background:#fff url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path fill='%2355554F' d='M4.3 7.3a1 1 0 0 1 1.4 0L10 11.6l4.3-4.3a1 1 0 1 1 1.4 1.4l-5 5a1 1 0 0 1-1.4 0l-5-5a1 1 0 0 1 0-1.4z'/></svg>") no-repeat right 9px center/14px}
+.meta{font-size:12px;color:var(--mute);margin-top:-6px;font-variant-numeric:tabular-nums}
+.inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--line2);border-radius:10px;height:36px;overflow:hidden;flex-shrink:0}
+.stepper button{width:30px;height:100%;display:inline-flex;align-items:center;justify-content:center;color:var(--ink2)}
+.stepper button:hover{background:var(--bg2)}
+.stepper button svg{width:13px;height:13px}
+.stepper span{min-width:46px;text-align:center;font-weight:700;font-size:12.5px;font-variant-numeric:tabular-nums}
+.swatch{display:inline-flex;align-items:center;gap:7px;height:36px;padding:0 11px;border:1px solid var(--line2);border-radius:10px;font-weight:700;font-size:12.5px;flex-shrink:0}
+.swatch i{width:14px;height:14px;border-radius:50%;display:block;background:#1C1C1A}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 6px 7px 12px;font-weight:700;font-size:12.5px;border-top:1px solid var(--line)}
+.li:first-child{border-top:0}
+.li .ib{width:26px;height:26px}.li .ib svg{width:14px;height:14px}
+.tools9{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.tools9 button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;height:56px;border-radius:10px;border:1px solid var(--line);font-size:11px;font-weight:700;color:var(--ink2);background:#fff}
+.tools9 button:hover{background:var(--bg2)}
+.tools9 button.on{background:var(--bg3);border-color:var(--bg3);color:var(--ink)}
+.tools9 svg{width:18px;height:18px}
+
+/* start screen */
+.start{flex:1;display:flex;align-items:center;justify-content:center;background:#fff}
+.drop{width:520px;height:300px;border:1.5px dashed var(--line2);border-radius:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+.drop svg{width:44px;height:44px;color:var(--mute);stroke-width:1.4;margin-bottom:6px}
+
+/* ===== invoice (fictitious) ===== */
+.inv{position:absolute;inset:0;padding:26px 28px;font-size:7.4px;line-height:1.5;color:#1a1a1a;user-select:none}
+.inv-top{display:flex;justify-content:space-between;gap:16px}
+.inv-l{width:230px}.inv-r{width:160px}
+.np{font-size:8px;font-weight:700;color:#1E63B0;display:flex;align-items:center;gap:4px;margin-bottom:8px}
+.np b{color:#1a1a1a;font-size:9px;letter-spacing:.2em;margin-left:8px}
+.np-mark{width:12px;height:8px;border-radius:4px 4px 4px 0;background:#2F7BD2;display:inline-block}
+.addr{white-space:pre-line}
+.addr .big{font-size:8.6px;font-weight:700}
+.bar{height:7px;margin:5px 0 3px;width:150px;background:repeating-linear-gradient(90deg,#222 0 1px,transparent 1px 2.5px,#222 2.5px 3px,transparent 3px 4px,#222 4px 6px,transparent 6px 7.5px)}
+.no{font-size:6.8px}
+.inv-r .lab{font-size:6.8px;color:#555}
+.seller{font-size:14px;font-weight:900;letter-spacing:.04em;margin:2px 0 4px}
+.small{font-size:6.2px;line-height:1.5;color:#333}
+.greet{margin:14px 0 8px;font-size:7px}
+.inv-mid{display:flex;gap:14px}
+.inv-ml{flex:1}
+.inv-mr{width:160px;display:flex;flex-direction:column;gap:6px}
+.row-amt{display:flex;align-items:flex-end;justify-content:space-between;border-bottom:1.2px solid #1E63B0;padding:4px 0 2px;margin-bottom:8px}
+.k{font-size:7px;font-weight:700;color:#1E63B0}
+.amt{font-size:16px;font-weight:700;letter-spacing:.02em;line-height:1.2}
+.amt small{font-size:6.5px;font-weight:400;margin-left:4px}
+.row-k{display:flex;gap:10px;margin:6px 0}
+.row-k .k{width:56px;flex-shrink:0}
+.row-k .v{font-size:7px}
+.row-k .v.big{font-size:9px;font-weight:700}
+.notes{margin:8px 0 0;padding-left:8px;font-size:5.8px;color:#444}
+.box{border:1px solid #bbb;padding:5px 6px;font-size:6px;line-height:1.5}
+.box b{display:block;font-size:6.6px;margin-bottom:2px}
+.qr{width:26px;height:26px;float:right;margin-left:6px;background:repeating-conic-gradient(#222 0 25%,transparent 0 50%) 0 0/6px 6px}
+.inv-tbl{width:100%;border-collapse:collapse;margin-top:12px;font-size:6.4px}
+.inv-tbl th{text-align:left;font-weight:700;border-bottom:1px solid #999;padding:2px 3px;background:#f3f3f3}
+.inv-tbl td{padding:2px 3px;border-bottom:1px solid #e5e5e5}
+.inv-tbl .r{text-align:right}
+.lines{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.lines i{display:block;height:5px;border-radius:2px;background:#ECECEA}
+.foot{position:absolute;left:28px;right:28px;bottom:14px;display:flex;justify-content:space-between;font-size:5.4px;color:#666}
+.sel{border-radius:2px;cursor:pointer;padding:0 1px}
+.app[data-state="selected"] .sel{background:rgba(178,214,124,.5);box-shadow:0 0 0 1.5px #8FB55A}
+.app[data-state="selected"][data-mode="redact"] .sel{background:#1C1C1A;color:#1C1C1A;box-shadow:none}
+.app[data-state="selected"][data-mode="insert"] .sel{background:none;box-shadow:none}
+.ins{display:none;position:absolute;left:30px;top:392px;font-size:7.4px;padding:0 2px;background:rgba(178,214,124,.3);box-shadow:0 0 0 1px #8FB55A;border-radius:2px;white-space:nowrap}
+.ins::after{content:"";display:inline-block;width:1px;height:8px;background:#1C1C1A;vertical-align:-1px;margin-left:1px}
+.app[data-state="selected"][data-mode="insert"] .ins{display:inline-block}
+</style>
+</head>
+<body>
+
+<div class="doc">
+  <h1>PDF editor リファイン v1</h1>
+  <div class="switch-row"><span class="switch-label">案</span><div class="variant-switch"><button data-set="variant:A">A 右の文脈パネル</button><button data-set="variant:B">B 選んだ文字の近くに浮く</button></div></div>
+  <div class="switch-row"><span class="switch-label">状態</span><div class="variant-switch"><button data-set="state:start">開始画面</button><button data-set="state:idle">何も選んでいない</button><button data-set="state:selected">文字を選んだ</button><button data-set="state:tools">ツールのメニュー</button></div></div>
+  <div class="switch-row"><span class="switch-label">編集</span><div class="variant-switch"><button data-set="mode:replace">置換</button><button data-set="mode:insert">追加</button><button data-set="mode:redact">墨消し</button><button data-set="mode:markup">注釈・署名</button></div></div>
+  <div class="switch-row"><span class="switch-label">主ボタン</span><div class="variant-switch"><button data-set="primary:ink">墨</button><button data-set="primary:green">若草</button></div></div>
+</div>
+
+<div class="stage"><div class="scaled"><div class="frame">
+<div class="app" id="app" data-variant="A" data-state="idle" data-mode="replace" data-primary="ink">
+
+  <header class="topbar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <span class="mark">T/</span>
+    <span class="fname hide-start">請求書_2026-09.pdf</span>
+    <span class="fname only-start">PDF editor</span>
+    <span class="pager hide-start"><button class="ib off" aria-label="前のページ"><i data-i="chevL"></i></button><span>1 / 1</span><button class="ib off" aria-label="次のページ"><i data-i="chevR"></i></button></span>
+    <div class="spacer"></div>
+    <div class="seg seg-top hide-start">
+      <button data-set="mode:replace"><i data-i="replace"></i>置換</button>
+      <button data-set="mode:insert"><i data-i="insert"></i>追加</button>
+      <button data-set="mode:redact"><i data-i="redact"></i>墨消し</button>
+      <button data-set="mode:markup"><i data-i="markup"></i>注釈</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="tb-right hide-start">
+      <button class="ib" aria-label="検索"><i data-i="search"></i></button>
+      <button class="ib" aria-label="取り消す"><i data-i="undo"></i></button>
+      <button class="ib off" aria-label="やり直す"><i data-i="redo"></i></button>
+      <span class="vsep"></span>
+      <div class="toolwrap">
+        <button class="btn btn-ghost btn-sm" data-toggle="tools">ツール<i data-i="chevD"></i></button>
+        <div class="menu">
+          <button><i data-i="folder"></i>PDF を開く…</button>
+          <button><i data-i="merge"></i>結合…</button>
+          <button><i data-i="grid"></i>ページ整理…</button>
+          <button><i data-i="resize"></i>ページサイズ…</button>
+          <button><i data-i="compress"></i>圧縮…</button>
+          <button><i data-i="ocr"></i>OCR…</button>
+          <hr>
+          <button><i data-i="print"></i>印刷…</button>
+          <button><i data-i="font"></i>フォントを読み込む…</button>
+        </div>
+      </div>
+      <button class="btn btn-primary"><i data-i="export"></i>書き出す</button>
+    </div>
+  </header>
+
+  <div class="body hide-start">
+    <div class="canvas" id="canvas">
+      <div class="page" id="page">
+        <div class="inv" id="inv">
+          <div class="inv-top">
+            <div class="inv-l">
+              <div class="np"><span class="np-mark"></span>NP掛け払い <b>請 求 書</b></div>
+              <div class="addr">〒248-0006
+神奈川県鎌倉市小町1-2-3
+株式会社サンプル商事
+総務部
+<span class="big">山田 太郎 様</span></div>
+              <div class="bar"></div>
+              <div class="no">請求番号：F-1-20260902-000000-01</div>
+            </div>
+            <div class="inv-r">
+              <div class="lab">販売元</div>
+              <div class="seller">サンプル印刷</div>
+              <div class="small">サンプル印刷株式会社<br>登録番号 T0000000000000<br>〒100-0001 東京都千代田区千代田1-1<br>03-0000-0000<br>2026年8月31日出荷　請求日 2026年9月2日</div>
+            </div>
+          </div>
+          <p class="greet">NP掛け払いをご利用いただき、誠にありがとうございます。下記の通りご請求申し上げます。</p>
+          <div class="inv-mid">
+            <div class="inv-ml">
+              <div class="row-amt"><span class="k">請求金額</span><span class="amt"><span class="sel" id="sel" data-toggle="select">7,854</span><small>円（税込）</small></span></div>
+              <div class="row-k"><span class="k">支払い期限日</span><span class="v big">2026年9月30日</span></div>
+              <div class="row-k"><span class="k">振込先</span><span class="v">サンプル銀行（0000）<br>本店（001）<br>カ）サンプルペイメント<br>普通 0000000</span></div>
+              <ul class="notes"><li>振込手数料は貴社にてご負担ください。</li><li>支払い期限日までにお振り込みください。</li><li>口座番号は請求書ごとに異なります。</li></ul>
+              <span class="ins" id="ins">担当：山田</span>
+            </div>
+            <div class="inv-mr">
+              <div class="box"><span class="qr"></span><b>お支払いに関するお問い合わせ</b>サンプルペイメント サポートデスク<br>03-0000-0000（平日 9:00–18:00）<br>https://example.com/faq<br>請求番号 F-1-20260902-000000-01</div>
+              <div class="box"><span class="qr"></span><b>会員ページのご利用</b>請求書の確認・お支払い方法の変更は会員ページから行えます。<br>https://example.com/member<br>仮パスワード 000-000-XXXX</div>
+            </div>
+          </div>
+          <table class="inv-tbl">
+            <thead><tr><th>明細</th><th class="r">数量</th><th class="r">単価</th><th class="r">小計</th></tr></thead>
+            <tbody>
+              <tr><td>2026年8月16日　冊子・カタログ</td><td class="r">1</td><td class="r">7,854</td><td class="r">7,854</td></tr>
+              <tr><td colspan="3" class="r">ご請求合計</td><td class="r">7,854円</td></tr>
+              <tr><td colspan="3" class="r">（10%対象 7,854円　内消費税 714円）</td><td></td></tr>
+            </tbody>
+          </table>
+          <div class="lines"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="foot"><span>1/1</span><span>本請求書は、サンプルペイメント株式会社が発行しています。</span></div>
+        </div>
+      </div>
+
+      <div class="float" id="float">
+        <div class="fl fl-replace">
+          <input class="in" value="7,854" aria-label="置き換える文字">
+          <select class="in" aria-label="書体"><option>元の書体 · MS Gothic</option><option>Noto Sans JP</option><option>ヒラギノ角ゴシック</option><option>MS PGothic</option><option>ファイルから読み込む…</option></select>
+          <button class="ib" aria-label="表示から削除"><i data-i="trash"></i></button>
+          <button class="ib ok" aria-label="置き換える"><i data-i="check"></i></button>
+        </div>
+        <div class="fl fl-insert">
+          <input class="in" value="担当：山田" aria-label="追加する文字">
+          <select class="in" aria-label="書体"><option>周囲に合わせる · MS Gothic</option><option>Noto Sans JP</option><option>ヒラギノ角ゴシック</option><option>ファイルから読み込む…</option></select>
+          <span class="stepper"><button aria-label="小さく"><i data-i="minus"></i></button><span>11 pt</span><button aria-label="大きく"><i data-i="plus"></i></button></span>
+          <button class="swatch" aria-label="色"><i></i></button>
+          <button class="ib ok" aria-label="追加する"><i data-i="check"></i></button>
+        </div>
+        <div class="fl fl-redact">
+          <span class="chip">7,854<button class="ib" aria-label="外す"><i data-i="x"></i></button></span>
+          <button class="btn btn-primary btn-sm">墨消しして保存</button>
+        </div>
+        <div class="fl fl-markup">
+          <button class="ib on" aria-label="ハイライト"><i data-i="highlight"></i></button>
+          <button class="ib" aria-label="下線"><i data-i="underline"></i></button>
+          <button class="ib" aria-label="取り消し線"><i data-i="strike"></i></button>
+          <button class="ib ok" aria-label="付ける"><i data-i="check"></i></button>
+        </div>
+      </div>
+
+      <div class="mtools">
+        <button class="ib on" aria-label="ハイライト"><i data-i="highlight"></i></button>
+        <button class="ib" aria-label="下線"><i data-i="underline"></i></button>
+        <button class="ib" aria-label="取り消し線"><i data-i="strike"></i></button>
+        <span class="vsep"></span>
+        <button class="ib" aria-label="メモ"><i data-i="note"></i></button>
+        <button class="ib" aria-label="四角形"><i data-i="rect"></i></button>
+        <button class="ib" aria-label="楕円"><i data-i="ellipse"></i></button>
+        <button class="ib" aria-label="矢印"><i data-i="arrow"></i></button>
+        <button class="ib" aria-label="手書き"><i data-i="ink"></i></button>
+        <button class="ib" aria-label="署名"><i data-i="sign"></i></button>
+      </div>
+
+      <div class="zoom">
+        <button class="ib" aria-label="縮小"><i data-i="minus"></i></button>
+        <span class="zv">74%</span>
+        <button class="ib" aria-label="拡大"><i data-i="plus"></i></button>
+        <span class="vsep"></span>
+        <button class="ib" aria-label="ページ全体"><i data-i="fit"></i></button>
+      </div>
+    </div>
+
+    <aside class="panel">
+      <div class="seg seg-side">
+        <button data-set="mode:replace"><i data-i="replace"></i>置換</button>
+        <button data-set="mode:insert"><i data-i="insert"></i>追加</button>
+        <button data-set="mode:redact"><i data-i="redact"></i>墨消し</button>
+        <button data-set="mode:markup"><i data-i="markup"></i>注釈</button>
+      </div>
+      <div class="ctx">
+        <section class="ctx-replace">
+          <input class="in big" value="7,854" aria-label="置き換える文字">
+          <div class="meta">1 ページ · 11 pt · MS Gothic · 埋め込みなし</div>
+          <select class="in" aria-label="書体"><option>元の書体 · MS Gothic</option><option>Noto Sans JP</option><option>ヒラギノ角ゴシック</option><option>MS PGothic</option><option>ファイルから読み込む…</option></select>
+          <div class="acts"><button class="btn btn-primary btn-sm">置き換える</button><button class="btn btn-ghost btn-sm"><i data-i="trash"></i>表示から削除</button></div>
+        </section>
+        <section class="ctx-insert">
+          <input class="in big" value="担当：山田" aria-label="追加する文字">
+          <select class="in" aria-label="書体"><option>周囲に合わせる · MS Gothic</option><option>Noto Sans JP</option><option>ヒラギノ角ゴシック</option><option>MS PGothic</option><option>ファイルから読み込む…</option></select>
+          <div class="inline">
+            <span class="stepper"><button aria-label="小さく"><i data-i="minus"></i></button><span>11 pt</span><button aria-label="大きく"><i data-i="plus"></i></button></span>
+            <button class="swatch"><i></i>黒</button>
+          </div>
+          <div class="acts"><button class="btn btn-primary btn-sm">追加する</button></div>
+        </section>
+        <section class="ctx-redact">
+          <div class="list">
+            <div class="li"><span>1 ページ · 7,854</span><button class="ib" aria-label="外す"><i data-i="x"></i></button></div>
+          </div>
+          <div class="acts"><button class="btn btn-primary btn-sm">墨消しして保存</button><button class="btn btn-ghost btn-sm">すべて外す</button></div>
+        </section>
+        <section class="ctx-markup">
+          <div class="tools9">
+            <button class="on"><i data-i="highlight"></i>ハイライト</button>
+            <button><i data-i="underline"></i>下線</button>
+            <button><i data-i="strike"></i>取り消し線</button>
+            <button><i data-i="note"></i>メモ</button>
+            <button><i data-i="rect"></i>四角形</button>
+            <button><i data-i="ellipse"></i>楕円</button>
+            <button><i data-i="arrow"></i>矢印</button>
+            <button><i data-i="ink"></i>手書き</button>
+            <button><i data-i="sign"></i>署名</button>
+          </div>
+          <div class="acts onsel"><button class="btn btn-primary btn-sm">選んだ文字にハイライト</button></div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <div class="start only-start">
+    <div class="drop">
+      <i data-i="doc"></i>
+      <button class="btn btn-primary"><i data-i="folder"></i>PDF を開く</button>
+      <button class="btn btn-ghost">複数の PDF を結合</button>
+    </div>
+  </div>
+
+</div>
+</div></div></div>
+
+<script>
+(function(){
+  const I={
+    search:'<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+    undo:'<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+    redo:'<path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/>',
+    chevD:'<path d="m6 9 6 6 6-6"/>',
+    chevL:'<path d="m15 6-6 6 6 6"/>',
+    chevR:'<path d="m9 6 6 6-6 6"/>',
+    export:'<path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/>',
+    trash:'<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>',
+    x:'<path d="M6 6l12 12M18 6 6 18"/>',
+    check:'<path d="m5 12 5 5 9-10"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    minus:'<path d="M5 12h14"/>',
+    fit:'<path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M15 4h4a1 1 0 0 1 1 1v4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/><path d="M9 20H5a1 1 0 0 1-1-1v-4"/>',
+    replace:'<path d="M4 6h12M10 6v12"/><path d="M17 10v8"/><path d="m14 15 3 3 3-3"/>',
+    insert:'<path d="M4 6h12M10 6v12"/><path d="M18 10v6M15 13h6"/>',
+    redact:'<path d="M4 6h16M4 18h16"/><rect x="4" y="9.5" width="16" height="5" rx="1" fill="currentColor" stroke="none"/>',
+    markup:'<path d="M4 20l4-1L19 8l-3-3L5 16z"/><path d="M13 7l3 3"/>',
+    folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    merge:'<rect x="8" y="3" width="13" height="14" rx="1.5"/><path d="M5 8v11a2 2 0 0 0 2 2h9"/>',
+    grid:'<rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/>',
+    resize:'<path d="M4 20 20 4"/><path d="M14 4h6v6"/><path d="M10 20H4v-6"/>',
+    compress:'<path d="M12 3v10"/><path d="m8 9 4 4 4-4"/><path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/>',
+    print:'<path d="M6 9V4h12v5"/><rect x="4" y="9" width="16" height="8" rx="2"/><rect x="7" y="14" width="10" height="6"/>',
+    ocr:'<path d="M4 8V5a1 1 0 0 1 1-1h3"/><path d="M16 4h3a1 1 0 0 1 1 1v3"/><path d="M20 16v3a1 1 0 0 1-1 1h-3"/><path d="M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M8 12h8"/>',
+    font:'<path d="M4 18 10 5l6 13"/><path d="M6.5 13h7"/><path d="M20 11v7"/><path d="M20 15.5a2.5 2.5 0 1 1-2.5-2.5H20"/>',
+    doc:'<path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/>',
+    highlight:'<path d="m8 14 7-7 3 3-7 7H8z"/><path d="M4 20h16"/>',
+    underline:'<path d="M6 4v6a6 6 0 0 0 12 0V4"/><path d="M5 20h14"/>',
+    strike:'<path d="M16 6.5A4.5 4.5 0 0 0 12 4c-2.5 0-4.5 1.5-4.5 3.5S9.5 11 12 11s4.5 1 4.5 3.5-2 3.5-4.5 3.5a4.5 4.5 0 0 1-4-2.5"/><path d="M4 12h16"/>',
+    note:'<path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6l-5 4v-4H6a2 2 0 0 1-2-2z"/>',
+    rect:'<rect x="4" y="5" width="16" height="14" rx="2"/>',
+    ellipse:'<ellipse cx="12" cy="12" rx="8" ry="6"/>',
+    arrow:'<path d="M5 19 19 5"/><path d="M9 5h10v10"/>',
+    ink:'<path d="M3 17c3-6 5-6 7 0s4 6 7 0 3-6 4-6"/>',
+    sign:'<path d="M3 18h18"/><path d="M5 14c2-6 4-8 6-5s2 5 4 2 3-3 6 1"/>'
+  };
+  document.querySelectorAll('i[data-i]').forEach(el=>{
+    const s=document.createElementNS('http://www.w3.org/2000/svg','svg');
+    s.setAttribute('viewBox','0 0 24 24');s.setAttribute('aria-hidden','true');s.setAttribute('class','ic');
+    s.innerHTML=I[el.dataset.i]||'';el.replaceWith(s);
+  });
+
+  const app=document.getElementById('app');
+  const S={variant:'A',state:'idle',mode:'replace',primary:'ink'};
+  function apply(){
+    for(const k in S) app.dataset[k]=S[k];
+    document.querySelectorAll('[data-set]').forEach(b=>{
+      const [k,v]=b.dataset.set.split(':');
+      b.classList.toggle('on',S[k]===v);
+    });
+    placeFloat();
+  }
+  function placeFloat(){
+    if(S.variant!=='B'||S.state!=='selected') return;
+    const fl=document.getElementById('float'),page=document.getElementById('page');
+    const a=document.getElementById(S.mode==='insert'?'ins':'sel');
+    const inv=document.getElementById('inv');
+    const left=page.offsetLeft+inv.offsetLeft+a.offsetLeft, top=page.offsetTop+inv.offsetTop+a.offsetTop+a.offsetHeight+10;
+    const maxL=page.offsetLeft+page.offsetWidth-fl.offsetWidth-8;
+    fl.style.left=Math.max(page.offsetLeft+8,Math.min(left,maxL))+'px';
+    fl.style.top=top+'px';
+  }
+  document.querySelectorAll('[data-set]').forEach(b=>b.addEventListener('click',()=>{
+    const [k,v]=b.dataset.set.split(':');S[k]=v;
+    if(k==='mode'&&(S.state==='start'||S.state==='tools')) S.state='idle';
+    apply();
+  }));
+  document.querySelector('[data-toggle="tools"]').addEventListener('click',()=>{S.state=S.state==='tools'?'idle':'tools';apply();});
+  document.getElementById('sel').addEventListener('click',()=>{S.state=S.state==='selected'?'idle':'selected';apply();});
+  document.getElementById('canvas').addEventListener('click',e=>{if(S.state==='tools'&&!e.target.closest('.toolwrap')){S.state='idle';apply();}});
+
+  function fit(){
+    const st=document.querySelector('.stage'),sc=document.querySelector('.scaled');
+    const s=Math.max(.2,Math.min(1,(st.clientWidth-80)/1200));
+    sc.style.transform='scale('+s+')';
+    st.style.height=(780*s+70)+'px';
+  }
+  window.addEventListener('resize',()=>{fit();placeFloat();});
+  fit();apply();
+})();
+</script>
+</body>
+</html>

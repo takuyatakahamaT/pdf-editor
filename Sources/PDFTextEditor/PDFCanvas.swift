@@ -46,7 +46,8 @@ struct PDFCanvas: NSViewRepresentable {
             onCommitInlineEditing: onCommitInlineEditing,
             onCancelInlineEditing: onCancelInlineEditing,
             onScaleChange: { scale in zoomState.reportScale(scale) },
-            onMagnifierChange: { active in zoomState.setMagnifierActive(active) }
+            onMagnifierChange: { active in zoomState.setMagnifierActive(active) },
+            onPageChange: { index, count in zoomState.reportPage(index: index, count: count) }
         )
     }
 
@@ -69,8 +70,11 @@ struct PDFCanvas: NSViewRepresentable {
         view.scaleChangeHandler = context.coordinator.handleScaleChange
         view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
         view.startObservingScaleChanges()
+        view.pageChangeHandler = context.coordinator.handlePageChange
+        view.startObservingPageChanges()
         view.applyZoomCommand(.fitPage)
         view.appliedZoomCommandRevision = zoomState.commandRevision
+        view.reportCurrentPageLater()
         view.syncRedactionPreviews(regions: redactionRegions, mode: mode)
         view.scaleChangeHandler?(view.scaleFactor)
         return view
@@ -92,6 +96,7 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onCancelInlineEditing = onCancelInlineEditing
         view.scaleChangeHandler = context.coordinator.handleScaleChange
         view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
+        view.pageChangeHandler = context.coordinator.handlePageChange
         configure(view, coordinator: context.coordinator)
         view.markupTool = markupTool
         if view.document !== document {
@@ -101,6 +106,7 @@ struct PDFCanvas: NSViewRepresentable {
             view.autoScales = false
             view.applyZoomCommand(.fitPage)
             view.appliedZoomCommandRevision = zoomState.commandRevision
+            view.reportCurrentPageLater()
         }
         if view.magnifierIsActive != zoomState.magnifierIsActive {
             view.setMagnifierActive(zoomState.magnifierIsActive)
@@ -169,6 +175,7 @@ struct PDFCanvas: NSViewRepresentable {
         var onCancelInlineEditing: () -> Void
         private let onScaleChange: (CGFloat) -> Void
         private let onMagnifierChange: (Bool) -> Void
+        private let onPageChange: (Int, Int) -> Void
 
         init(
             onSelection: @escaping (TextTarget?) -> Void,
@@ -185,7 +192,8 @@ struct PDFCanvas: NSViewRepresentable {
             onCommitInlineEditing: @escaping () -> Void,
             onCancelInlineEditing: @escaping () -> Void,
             onScaleChange: @escaping (CGFloat) -> Void,
-            onMagnifierChange: @escaping (Bool) -> Void
+            onMagnifierChange: @escaping (Bool) -> Void,
+            onPageChange: @escaping (Int, Int) -> Void
         ) {
             self.onSelection = onSelection
             self.onInsertion = onInsertion
@@ -202,12 +210,15 @@ struct PDFCanvas: NSViewRepresentable {
             self.onCancelInlineEditing = onCancelInlineEditing
             self.onScaleChange = onScaleChange
             self.onMagnifierChange = onMagnifierChange
+            self.onPageChange = onPageChange
         }
 
         func handleSelection(_ target: TextTarget?) { onSelection(target) }
         func handleInsertion(_ pageIndex: Int, _ point: CGPoint) { onInsertion(pageIndex, point) }
         func handleScaleChange(_ scale: CGFloat) { onScaleChange(scale) }
         func handleMagnifierChange(_ active: Bool) { onMagnifierChange(active) }
+        /// 表示中のページ（0 始まり）と総ページ数を上のバーのページ送りへ渡す。
+        func handlePageChange(_ index: Int, _ count: Int) { onPageChange(index, count) }
         func handleMoveInsertion(_ marker: String, _ pageIndex: Int, _ bounds: CGRect) {
             onMoveInsertion(marker, pageIndex, bounds)
         }
@@ -269,11 +280,13 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private var movementDelta = CGPoint.zero
     var scaleChangeHandler: ((CGFloat) -> Void)?
     var magnifierChangeHandler: ((Bool) -> Void)?
+    var pageChangeHandler: ((Int, Int) -> Void)?
     private(set) var magnifierIsActive = false
     var appliedZoomCommandRevision = 0
 
     private var scaleObserver: NSObjectProtocol?
     private var scrollWheelMonitor: Any?
+    private var pageObserver: NSObjectProtocol?
     private var magnifierTrackingArea: NSTrackingArea?
     private var magnifierPoint: CGPoint?
     private var fitsWidthOnResize = false
@@ -319,6 +332,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     deinit {
         MainActor.assumeIsolated {
             if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
+            if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
             if let scrollWheelMonitor { NSEvent.removeMonitor(scrollWheelMonitor) }
         }
     }
@@ -393,6 +407,36 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
                 self.scaleChangeHandler?(self.scaleFactor)
             }
         }
+    }
+
+    func startObservingPageChanges() {
+        if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
+        pageObserver = NotificationCenter.default.addObserver(
+            forName: .PDFViewPageChanged,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reportCurrentPage()
+            }
+        }
+    }
+
+    /// SwiftUI の更新中に状態を変えないよう、表示中のページは次の周回で知らせる。
+    func reportCurrentPageLater() {
+        Task { @MainActor [weak self] in
+            self?.reportCurrentPage()
+        }
+    }
+
+    private func reportCurrentPage() {
+        guard let document else {
+            pageChangeHandler?(0, 0)
+            return
+        }
+        var index = currentPage.map { document.index(for: $0) } ?? 0
+        if index == NSNotFound || index < 0 { index = 0 }
+        pageChangeHandler?(index, document.pageCount)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -803,6 +847,10 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             setScale(1, anchoredAt: visibleRect.center)
         case .setScale(let value):
             setScale(value, anchoredAt: visibleRect.center)
+        case .previousPage:
+            goToPreviousPage(nil)
+        case .nextPage:
+            goToNextPage(nil)
         }
     }
 
@@ -1165,7 +1213,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
         context.saveGState()
         context.addEllipse(in: lens.insetBy(dx: 1.5, dy: 1.5))
-        context.setStrokeColor(NSColor(NihoPalette.green).cgColor)
+        context.setStrokeColor(NSColor(NihoPalette.greenLine).cgColor)
         context.setLineWidth(3)
         context.strokePath()
         context.restoreGState()
@@ -1175,7 +1223,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         crosshair.line(to: CGPoint(x: lens.midX + 7, y: lens.midY))
         crosshair.move(to: CGPoint(x: lens.midX, y: lens.midY - 7))
         crosshair.line(to: CGPoint(x: lens.midX, y: lens.midY + 7))
-        NSColor(NihoPalette.green).withAlphaComponent(0.75).setStroke()
+        NSColor(NihoPalette.greenLine).withAlphaComponent(0.75).setStroke()
         crosshair.lineWidth = 1
         crosshair.stroke()
     }

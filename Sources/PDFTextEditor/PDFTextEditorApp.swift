@@ -24,6 +24,7 @@ struct PDFTextEditorApp: App {
                 .frame(minWidth: 1_080, minHeight: 720)
                 .task { updater.start() }
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1_280, height: 840)
         .commands {
             CommandGroup(after: .textEditing) {
