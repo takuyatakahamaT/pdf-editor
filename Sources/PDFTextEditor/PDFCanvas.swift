@@ -229,6 +229,10 @@ struct PDFCanvas: NSViewRepresentable {
 }
 
 final class ClickablePDFView: PDFView, NSTextFieldDelegate {
+    static func shouldZoomOnScroll(modifierFlags: NSEvent.ModifierFlags) -> Bool {
+        modifierFlags.contains(.command) || modifierFlags.contains(.control)
+    }
+
     var replacementOverlayProvider: ReplacementPreviewOverlayProvider?
     var editorMode: EditorMode = .replacement
     var markupTool: PDFMarkupTool = .highlight
@@ -370,7 +374,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard event.modifierFlags.contains(.command) else {
+        guard Self.shouldZoomOnScroll(modifierFlags: event.modifierFlags) else {
             super.scrollWheel(with: event)
             return
         }
