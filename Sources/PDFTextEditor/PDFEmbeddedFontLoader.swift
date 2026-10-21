@@ -415,11 +415,21 @@ enum PDFEmbeddedFontLoader {
     }
 
     private static let bundledFontsRegistered: Void = {
-        guard let fontURL = Bundle.module.url(
+        // Packaged app resources live in Contents/Resources. Bundle.module's generated
+        // accessor falls back to the build machine's absolute .build path when its
+        // SwiftPM resource bundle is absent, which makes an installed update machine-
+        // dependent. Prefer the self-contained app resource and use Bundle.module only
+        // for SwiftPM builds and tests.
+        let fontURL = Bundle.main.url(
             forResource: "NotoSansJP-Regular",
             withExtension: "otf",
             subdirectory: "Fonts"
-        ) else { return }
+        ) ?? Bundle.module.url(
+            forResource: "NotoSansJP-Regular",
+            withExtension: "otf",
+            subdirectory: "Fonts"
+        )
+        guard let fontURL else { return }
         _ = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
     }()
 
