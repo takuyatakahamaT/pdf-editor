@@ -1,0 +1,30 @@
+name: macOS acceptance
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: macos-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  acceptance:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Go version
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+      - name: Release build
+        run: swift build -c release
+      - name: Acceptance tests
+        run: swift test
+      - name: Update security acceptance (no private keys)
+        run: python3 scripts/check-update-security.py
+      - name: Package and verify the app (no release keys)
+        run: PDF_EDITOR_APP_BUNDLE="$RUNNER_TEMP/PDF editor.app" scripts/build-app.sh
+        env:
+          GOTOOLCHAIN: auto

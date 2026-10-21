@@ -7,7 +7,8 @@ import Foundation
 enum PDFEmbeddedFontLoader {
     struct Resolution {
         let font: CTFont
-        /// 元の埋め込みフォントで置換文字列の全グリフを表現できた場合のみ true。
+        /// 元PDFと同じフォント名の端末フォント、またはPDFのCID→GID対応で
+        /// 置換文字列の全グリフを描けた場合のみ true。
         let isExact: Bool
         /// 元 PDF の CID をそのまま GID として直接指定できる場合のみ非 nil。
         /// `replacement` の各文字に対応する (GID, 送り幅[em]) の並び。
@@ -26,21 +27,20 @@ enum PDFEmbeddedFontLoader {
         let info = PDFFontInfoLoader.load(from: fontDict)
         let requiredText = supportingText ?? replacementText
 
-        if let embedded = loadEmbeddedFont(fontDict: fontDict, size: size) {
-            if info.isIdentityCIDToGID,
-               let exact = exactGlyphs(for: replacementText, using: info) {
-                return Resolution(font: embedded, isExact: true, exactGlyphs: exact)
-            }
-            if coversAllCharacters(of: replacementText, font: embedded) {
-                return Resolution(font: embedded, isExact: true, exactGlyphs: nil)
-            }
+        if let embedded = loadEmbeddedFont(fontDict: fontDict, size: size),
+           let exact = embeddedFontResolution(
+               font: embedded,
+               info: info,
+               replacementText: replacementText
+           ) {
+            return exact
         }
 
         if let baseFontName = readBaseFontName(fontDict) {
             let cleaned = strippingSubsetPrefix(baseFontName)
             if let installed = installedFont(named: cleaned, size: size),
                coversAllCharacters(of: requiredText, font: installed) {
-                return Resolution(font: installed, isExact: false, exactGlyphs: nil)
+                return Resolution(font: installed, isExact: true, exactGlyphs: nil)
             }
         }
 
@@ -171,6 +171,20 @@ enum PDFEmbeddedFontLoader {
         return result
     }
 
+    /// 埋め込みフォントの cmap は PDF の文字コード→GID 対応と一致する保証がない。
+    /// とくに単純 TrueType のサブセットでは CoreText が数字を別の漢字グリフに
+    /// 解決することがあるため、PDF が Identity CID→GID を明示し、ToUnicode から
+    /// 置換文字の CID をすべて確定できる場合だけ直接描画に使う。
+    static func embeddedFontResolution(
+        font: CTFont,
+        info: PDFFontInfo,
+        replacementText: String
+    ) -> Resolution? {
+        guard info.isIdentityCIDToGID,
+              let glyphs = exactGlyphs(for: replacementText, using: info) else { return nil }
+        return Resolution(font: font, isExact: true, exactGlyphs: glyphs)
+    }
+
     /// 元の FontDescriptor に埋め込みフォントプログラムが存在するかどうかだけを判定する
     /// （置換文字列に対するグリフ網羅チェックはしない、軽量な事前チェック用）。
     static func fontHasEmbeddedProgram(fontDict: CGPDFDictionaryRef) -> Bool {
@@ -244,11 +258,18 @@ enum PDFEmbeddedFontLoader {
     }
 
     private static let bundledFontsRegistered: Void = {
-        guard let fontURL = Bundle.module.url(
+        let packagedFontURL = Bundle.main.resourceURL?
+            .appendingPathComponent("PDFTextEditor_PDFTextEditor.bundle", isDirectory: true)
+            .appendingPathComponent("Fonts", isDirectory: true)
+            .appendingPathComponent("NotoSansJP-Regular.otf")
+        let fontURL = packagedFontURL.flatMap {
+            FileManager.default.isReadableFile(atPath: $0.path) ? $0 : nil
+        } ?? Bundle.module.url(
             forResource: "NotoSansJP-Regular",
             withExtension: "otf",
             subdirectory: "Fonts"
-        ) else { return }
+        )
+        guard let fontURL else { return }
         _ = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
     }()
 
