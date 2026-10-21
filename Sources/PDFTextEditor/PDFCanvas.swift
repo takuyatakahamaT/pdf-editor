@@ -8,6 +8,7 @@ struct PDFCanvas: NSViewRepresentable {
     let mode: EditorMode
     let selectedTarget: TextTarget?
     let isInlineEditing: Bool
+    @ObservedObject var zoomState: PDFZoomState
     let onSelection: (TextTarget?) -> Void
     let onInsertion: (Int, CGPoint) -> Void
     let onMoveInsertion: (String, Int, CGRect) -> Void
@@ -28,7 +29,9 @@ struct PDFCanvas: NSViewRepresentable {
             onBeginInlineEditing: onBeginInlineEditing,
             onChangeInlineText: onChangeInlineText,
             onCommitInlineEditing: onCommitInlineEditing,
-            onCancelInlineEditing: onCancelInlineEditing
+            onCancelInlineEditing: onCancelInlineEditing,
+            onScaleChange: { scale in zoomState.reportScale(scale) },
+            onMagnifierChange: { active in zoomState.setMagnifierActive(active) }
         )
     }
 
@@ -37,12 +40,20 @@ struct PDFCanvas: NSViewRepresentable {
         configure(view, coordinator: context.coordinator)
         if mode == .insertion { view.clearSelection() }
         view.document = document
-        view.autoScales = true
+        view.minScaleFactor = PDFZoomState.minimumScale
+        view.maxScaleFactor = PDFZoomState.maximumScale
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
         view.pageShadowsEnabled = true
         view.backgroundColor = NihoPalette.pdfStageNSColor
+        view.autoScales = false
+        view.scaleChangeHandler = context.coordinator.handleScaleChange
+        view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
+        view.startObservingScaleChanges()
+        view.applyZoomCommand(.fitPage)
+        view.appliedZoomCommandRevision = zoomState.commandRevision
+        view.scaleChangeHandler?(view.scaleFactor)
         return view
     }
 
@@ -56,10 +67,23 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onChangeInlineText = onChangeInlineText
         context.coordinator.onCommitInlineEditing = onCommitInlineEditing
         context.coordinator.onCancelInlineEditing = onCancelInlineEditing
+        view.scaleChangeHandler = context.coordinator.handleScaleChange
+        view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
         configure(view, coordinator: context.coordinator)
         if view.document !== document {
+            view.resetFitMode()
+            view.setMagnifierActive(false)
             view.document = document
-            view.autoScales = true
+            view.autoScales = false
+            view.applyZoomCommand(.fitPage)
+            view.appliedZoomCommandRevision = zoomState.commandRevision
+        }
+        if view.magnifierIsActive != zoomState.magnifierIsActive {
+            view.setMagnifierActive(zoomState.magnifierIsActive)
+        }
+        if view.appliedZoomCommandRevision != zoomState.commandRevision {
+            view.applyZoomCommand(zoomState.command)
+            view.appliedZoomCommandRevision = zoomState.commandRevision
         }
         view.selectedTextTarget = selectedTarget
         view.syncInlineEditor(isEditing: isInlineEditing)
@@ -68,6 +92,7 @@ struct PDFCanvas: NSViewRepresentable {
         }
         _ = revision
         view.layoutDocumentView()
+        zoomState.reportScale(view.scaleFactor)
         view.window?.invalidateCursorRects(for: view)
         view.needsDisplay = true
     }
@@ -95,6 +120,8 @@ struct PDFCanvas: NSViewRepresentable {
         var onChangeInlineText: (String) -> Void
         var onCommitInlineEditing: () -> Void
         var onCancelInlineEditing: () -> Void
+        private let onScaleChange: (CGFloat) -> Void
+        private let onMagnifierChange: (Bool) -> Void
 
         init(
             onSelection: @escaping (TextTarget?) -> Void,
@@ -105,7 +132,9 @@ struct PDFCanvas: NSViewRepresentable {
             onBeginInlineEditing: @escaping () -> Void,
             onChangeInlineText: @escaping (String) -> Void,
             onCommitInlineEditing: @escaping () -> Void,
-            onCancelInlineEditing: @escaping () -> Void
+            onCancelInlineEditing: @escaping () -> Void,
+            onScaleChange: @escaping (CGFloat) -> Void,
+            onMagnifierChange: @escaping (Bool) -> Void
         ) {
             self.onSelection = onSelection
             self.onInsertion = onInsertion
@@ -116,10 +145,14 @@ struct PDFCanvas: NSViewRepresentable {
             self.onChangeInlineText = onChangeInlineText
             self.onCommitInlineEditing = onCommitInlineEditing
             self.onCancelInlineEditing = onCancelInlineEditing
+            self.onScaleChange = onScaleChange
+            self.onMagnifierChange = onMagnifierChange
         }
 
         func handleSelection(_ target: TextTarget?) { onSelection(target) }
         func handleInsertion(_ pageIndex: Int, _ point: CGPoint) { onInsertion(pageIndex, point) }
+        func handleScaleChange(_ scale: CGFloat) { onScaleChange(scale) }
+        func handleMagnifierChange(_ active: Bool) { onMagnifierChange(active) }
         func handleMoveInsertion(_ marker: String, _ pageIndex: Int, _ bounds: CGRect) {
             onMoveInsertion(marker, pageIndex, bounds)
         }
@@ -149,6 +182,18 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     private var movingExistingEdit: ReplacementEdit?
     private var movementStartPoint = CGPoint.zero
     private var movementDelta = CGPoint.zero
+    var scaleChangeHandler: ((CGFloat) -> Void)?
+    var magnifierChangeHandler: ((Bool) -> Void)?
+    private(set) var magnifierIsActive = false
+    var appliedZoomCommandRevision = 0
+
+    private var scaleObserver: NSObjectProtocol?
+    private var magnifierTrackingArea: NSTrackingArea?
+    private var magnifierPoint: CGPoint?
+    private var fitsWidthOnResize = false
+    private var fitsPageOnResize = false
+    private let magnifierDiameter: CGFloat = 164
+    private let magnifierFactor: CGFloat = 2.5
 
     private var draggedAnnotation: PDFAnnotation?
     private weak var draggedPage: PDFPage?
@@ -164,6 +209,105 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
 
     private var highlightAnnotation: PDFAnnotation?
     private weak var highlightPage: PDFPage?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    deinit {
+        MainActor.assumeIsolated {
+            if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawMagnifier()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let magnifierTrackingArea { removeTrackingArea(magnifierTrackingArea) }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        magnifierTrackingArea = trackingArea
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard fitsWidthOnResize || fitsPageOnResize else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if self.fitsPageOnResize {
+                self.updateFitPageScale()
+            } else if self.fitsWidthOnResize {
+                self.updateFitWidthScale()
+            }
+        }
+    }
+
+    func startObservingScaleChanges() {
+        if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
+        scaleObserver = NotificationCenter.default.addObserver(
+            forName: .PDFViewScaleChanged,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.scaleChangeHandler?(self.scaleFactor)
+            }
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard magnifierIsActive else { return }
+        magnifierPoint = convert(event.locationInWindow, from: nil)
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        magnifierPoint = nil
+        needsDisplay = true
+    }
+
+    override func magnify(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        setScale(scaleFactor * max(0.1, 1 + event.magnification), anchoredAt: point)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.contains(.command) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let delta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY * 10
+        guard delta != 0 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        setScale(scaleFactor * pow(1.1, -delta / 90), anchoredAt: point)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, magnifierIsActive {
+            setMagnifierActive(false)
+            return
+        }
+        switch event.charactersIgnoringModifiers {
+        case "+", "=":
+            setScale(scaleFactor * 1.2, anchoredAt: visibleRect.center)
+        case "-":
+            setScale(scaleFactor / 1.2, anchoredAt: visibleRect.center)
+        case "0":
+            applyZoomCommand(.actualSize)
+        default:
+            super.keyDown(with: event)
+        }
+    }
 
     override func resetCursorRects() {
         super.resetCursorRects()
@@ -318,6 +462,44 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         return false
     }
 
+    func setMagnifierActive(_ active: Bool) {
+        guard magnifierIsActive != active else { return }
+        magnifierIsActive = active
+        if active {
+            window?.makeFirstResponder(self)
+        } else {
+            magnifierPoint = nil
+        }
+        magnifierChangeHandler?(active)
+        needsDisplay = true
+    }
+
+    func applyZoomCommand(_ command: PDFZoomCommand) {
+        switch command {
+        case .zoomIn:
+            setScale(scaleFactor * 1.2, anchoredAt: visibleRect.center)
+        case .zoomOut:
+            setScale(scaleFactor / 1.2, anchoredAt: visibleRect.center)
+        case .fitPage:
+            fitsWidthOnResize = false
+            fitsPageOnResize = true
+            updateFitPageScale()
+        case .fitWidth:
+            fitsWidthOnResize = true
+            fitsPageOnResize = false
+            updateFitWidthScale()
+        case .actualSize:
+            setScale(1, anchoredAt: visibleRect.center)
+        case .setScale(let value):
+            setScale(value, anchoredAt: visibleRect.center)
+        }
+    }
+
+    func resetFitMode() {
+        fitsWidthOnResize = false
+        fitsPageOnResize = false
+    }
+
     private func handleInsertionMouseDown(_ event: NSEvent) {
         let viewPoint = convert(event.locationInWindow, from: nil)
         guard let page = page(for: viewPoint, nearest: false), let document else { return }
@@ -410,4 +592,118 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         highlightAnnotation = annotation
         highlightPage = page
     }
+
+    private func setScale(
+        _ requestedScale: CGFloat,
+        anchoredAt viewPoint: CGPoint,
+        preservingFitMode: Bool = false
+    ) {
+        if !preservingFitMode { resetFitMode() }
+        let targetScale = PDFZoomState.clampedScale(requestedScale)
+        guard abs(targetScale - scaleFactor) > 0.001 else { return }
+
+        let page = page(for: viewPoint, nearest: true)
+        let anchorInPage = page.map { convert(viewPoint, to: $0) }
+        // PDFKit hosts its document view in an internal scroll view; PDFView itself
+        // is an NSView, so `enclosingScrollView` is nil for this hierarchy.
+        let scrollView = subviews.first(where: { $0 is NSScrollView }) as? NSScrollView
+        let clipView = scrollView?.contentView
+        let documentView = scrollView?.documentView
+
+        autoScales = false
+        scaleFactor = targetScale
+        layoutDocumentView()
+
+        if let page, let anchorInPage, let clipView, let documentView {
+            let scaledPointInView = convert(anchorInPage, from: page)
+            let anchorInDocument = documentView.convert(scaledPointInView, from: self)
+            let cursorInDocument = documentView.convert(viewPoint, from: self)
+            let delta = CGPoint(
+                x: anchorInDocument.x - cursorInDocument.x,
+                y: anchorInDocument.y - cursorInDocument.y
+            )
+            clipView.scroll(to: CGPoint(
+                x: clipView.bounds.origin.x + delta.x,
+                y: clipView.bounds.origin.y + delta.y
+            ))
+            scrollView?.reflectScrolledClipView(clipView)
+        }
+        scaleChangeHandler?(scaleFactor)
+        needsDisplay = true
+    }
+
+    private func updateFitWidthScale() {
+        guard let page = currentPage ?? document?.page(at: 0) else { return }
+        let pageWidth = displaySize(of: page).width
+        guard pageWidth > 0 else { return }
+        autoScales = false
+        setScale(max(bounds.width - 32, 1) / pageWidth, anchoredAt: visibleRect.center, preservingFitMode: true)
+    }
+
+    private func updateFitPageScale() {
+        guard let page = currentPage ?? document?.page(at: 0) else { return }
+        let size = displaySize(of: page)
+        guard size.width > 0, size.height > 0 else { return }
+        let availableWidth = max(bounds.width - 32, 1)
+        let availableHeight = max(bounds.height - 32, 1)
+        let scale = min(availableWidth / size.width, availableHeight / size.height)
+        autoScales = false
+        setScale(scale, anchoredAt: visibleRect.center, preservingFitMode: true)
+    }
+
+    private func displaySize(of page: PDFPage) -> CGSize {
+        let pageBounds = page.bounds(for: .cropBox)
+        let rotation = ((page.rotation % 360) + 360) % 360
+        if rotation == 90 || rotation == 270 {
+            return CGSize(width: pageBounds.height, height: pageBounds.width)
+        }
+        return pageBounds.size
+    }
+
+    private func drawMagnifier() {
+        guard magnifierIsActive,
+              let mousePoint = magnifierPoint,
+              let page = page(for: mousePoint, nearest: false),
+              let context = NSGraphicsContext.current?.cgContext else { return }
+
+        let pagePoint = convert(mousePoint, to: page)
+        let drawingPoint = pagePoint.applying(page.transform(for: .cropBox))
+        let size = magnifierDiameter
+        var origin = CGPoint(x: mousePoint.x + 20, y: mousePoint.y - size - 20)
+        origin.x = min(max(origin.x, bounds.minX + 8), bounds.maxX - size - 8)
+        origin.y = min(max(origin.y, bounds.minY + 8), bounds.maxY - size - 8)
+        let lens = CGRect(origin: origin, size: CGSize(width: size, height: size))
+
+        context.saveGState()
+        context.setFillColor(NSColor.white.cgColor)
+        context.addEllipse(in: lens)
+        context.fillPath()
+        context.addEllipse(in: lens)
+        context.clip()
+        let pageScale = scaleFactor * magnifierFactor
+        context.translateBy(x: lens.midX - drawingPoint.x * pageScale, y: lens.midY - drawingPoint.y * pageScale)
+        context.scaleBy(x: pageScale, y: pageScale)
+        page.draw(with: .cropBox, to: context)
+        context.restoreGState()
+
+        context.saveGState()
+        context.addEllipse(in: lens.insetBy(dx: 1.5, dy: 1.5))
+        context.setStrokeColor(NSColor(NihoPalette.green).cgColor)
+        context.setLineWidth(3)
+        context.strokePath()
+        context.restoreGState()
+
+        let crosshair = NSBezierPath()
+        crosshair.move(to: CGPoint(x: lens.midX - 7, y: lens.midY))
+        crosshair.line(to: CGPoint(x: lens.midX + 7, y: lens.midY))
+        crosshair.move(to: CGPoint(x: lens.midX, y: lens.midY - 7))
+        crosshair.line(to: CGPoint(x: lens.midX, y: lens.midY + 7))
+        NSColor(NihoPalette.green).withAlphaComponent(0.75).setStroke()
+        crosshair.lineWidth = 1
+        crosshair.stroke()
+    }
+}
+
+private extension CGRect {
+    var center: CGPoint { CGPoint(x: midX, y: midY) }
 }
