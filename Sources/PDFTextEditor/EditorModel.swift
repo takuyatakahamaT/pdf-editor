@@ -34,6 +34,8 @@ final class EditorModel: ObservableObject {
     @Published var replacementText = ""
     @Published private(set) var replacementFocusRequest = 0
     @Published private(set) var insertionFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var replacementFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var customFontName: String?
     @Published private(set) var insertionFontSize: Double = 12
     @Published private(set) var insertionFontColor: NSColor = .black
     @Published private(set) var importedFontFamilies: [String] = []
@@ -43,6 +45,14 @@ final class EditorModel: ObservableObject {
     @Published var isShowingMergeSheet = false
     @Published var isShowingResizeSheet = false
     @Published var isShowingCompressionSheet = false
+    @Published var isShowingSearchSheet = false
+    @Published private(set) var searchQuery = ""
+    @Published private(set) var searchResults: [PDFSearchHit] = []
+    @Published private(set) var highlightedSearchSelections: [PDFSelection] = []
+    @Published private(set) var focusedSearchSelection: PDFSelection?
+    @Published private(set) var focusedSearchResultID: UUID?
+    @Published private(set) var searchHighlightRevision = 0
+    @Published private(set) var searchNavigationRevision = 0
 
     init(initialURL: URL?) {
         importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
@@ -70,8 +80,39 @@ final class EditorModel: ObservableObject {
         return "\(document.pageCount)ページ"
     }
     var detectedFontName: String? { insertionDraft?.detectedFontName }
+    var selectedFontDescription: PDFEmbeddedFontLoader.FontDescription? {
+        guard let target = selectedTarget, let page = document?.page(at: target.pageIndex),
+              let key = target.fontKey,
+              let dictionary = PDFGlyphIndex.fontDictionary(for: key, page: page) else { return nil }
+        return PDFEmbeddedFontLoader.describe(fontDict: dictionary)
+    }
+    var selectedFontChoiceName: String? {
+        let choice = mode == .replacement ? replacementFontChoice : insertionFontChoice
+        return choice == .custom ? customFontName : choice.fontName
+    }
+    var replacementFontPreview: PDFEmbeddedFontLoader.Resolution? {
+        guard let target = selectedTarget, let page = document?.page(at: target.pageIndex) else { return nil }
+        return PDFEditEngine.resolveFont(
+            for: target, on: page, replacement: replacementText,
+            preferredFontName: selectedFontChoiceName
+        )
+    }
+    var insertionFontPreviewReason: String? {
+        guard insertionDraft != nil, let requested = selectedFontChoiceName else { return nil }
+        guard let font = PDFEmbeddedFontLoader.availableFont(named: requested, size: CGFloat(insertionFontSize)) else {
+            return "指定フォント「\(requested)」がこのMacで利用できないため自動フォントを使います。"
+        }
+        let missing = PDFEmbeddedFontLoader.missingCharacters(in: replacementText, font: font)
+        return missing.isEmpty ? nil : "指定フォントに \(missing.joined(separator: "")) のグリフがないため自動フォントを使います。"
+    }
     var effectiveInsertionFontName: String {
-        insertionFontChoice.fontName ?? insertionDraft?.automaticFontName ?? "Hiragino Sans"
+        let automatic = insertionDraft?.automaticFontName ?? "Hiragino Sans"
+        guard let requested = selectedFontChoiceName,
+              let font = PDFEmbeddedFontLoader.availableFont(named: requested, size: CGFloat(insertionFontSize)),
+              PDFEmbeddedFontLoader.missingCharacters(in: replacementText, font: font).isEmpty else {
+            return automatic
+        }
+        return requested
     }
 
     func openFromPanel() {
@@ -100,10 +141,11 @@ final class EditorModel: ObservableObject {
         do {
             let families = try PDFEmbeddedFontLoader.registerFontFile(at: url)
             importedFontFamilies = Array(Set(importedFontFamilies + families)).sorted()
+            if customFontName == nil { customFontName = importedFontFamilies.first }
             revision += 1
             statusMessage = families.isEmpty
-                ? "フォントファイルを読み込みました。PDF内のフォント名と一致すると置換に使われます。"
-                : "フォントを読み込みました: \(families.joined(separator: "、"))。一致するPDFの書体で使われます。"
+                ? "フォントファイルを読み込みました。"
+                : "フォントを読み込みました: \(families.joined(separator: "、"))。フォント欄から選べます。"
         } catch {
             statusMessage = "フォントを読み込めませんでした: \(error.localizedDescription)"
         }
@@ -125,6 +167,71 @@ final class EditorModel: ObservableObject {
             return
         }
         isShowingCompressionSheet = true
+    }
+
+    func showSearchSheet() {
+        guard document != nil else { return }
+        isShowingSearchSheet = true
+        if !searchResults.isEmpty {
+            highlightedSearchSelections = searchResults.map(\.selection)
+            searchHighlightRevision += 1
+        }
+    }
+
+    func closeSearchSheet() {
+        isShowingSearchSheet = false
+        guard !highlightedSearchSelections.isEmpty else { return }
+        highlightedSearchSelections = []
+        searchHighlightRevision += 1
+    }
+
+    func search(_ query: String) {
+        searchQuery = query
+        focusedSearchResultID = nil
+        focusedSearchSelection = nil
+        guard let document else {
+            searchResults = []
+            highlightedSearchSelections = []
+            searchHighlightRevision += 1
+            return
+        }
+
+        searchResults = PDFSearchEngine.search(document: document, query: query)
+        highlightedSearchSelections = searchResults.map(\.selection)
+        searchHighlightRevision += 1
+        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, searchResults.isEmpty {
+            statusMessage = "「\(query)」は見つかりません。画像だけのページはOCRが必要です。"
+        } else if !searchResults.isEmpty {
+            statusMessage = "\(searchResults.count)件見つかりました。結果を選ぶと該当ページへ移動します。"
+        }
+    }
+
+    func focusSearchResult(_ result: PDFSearchHit) {
+        guard searchResults.contains(where: { $0.id == result.id }) else { return }
+        guard !isInlineEditing else {
+            statusMessage = "編集中の文字を確定またはキャンセルしてから検索結果を選んでください。"
+            return
+        }
+
+        focusedSearchSelection = result.selection
+        focusedSearchResultID = result.id
+        searchNavigationRevision += 1
+        if mode == .replacement, let target = result.editTarget {
+            select(target)
+            statusMessage = "検索結果を編集対象にしました。置換する文字を入力してください。"
+        } else if result.editTarget == nil {
+            statusMessage = "\(result.pageIndex + 1)ページ目へ移動しました。文字情報を取得できないため、ページ上で対象を選択してください。"
+        } else {
+            statusMessage = "\(result.pageIndex + 1)ページ目の検索結果へ移動しました。"
+        }
+    }
+
+    func moveSearchResult(by offset: Int) {
+        guard !searchResults.isEmpty else { return }
+        let currentIndex = searchResults.firstIndex { $0.id == focusedSearchResultID }
+        let startIndex = currentIndex ?? (offset < 0 ? 0 : -1)
+        let nextIndex = (startIndex + offset + searchResults.count) % searchResults.count
+        focusSearchResult(searchResults[nextIndex])
     }
 
     func reportCompressionStatus(_ message: String) {
@@ -150,8 +257,15 @@ final class EditorModel: ObservableObject {
         sourceURL = url
         selectedTarget = nil
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = ""
         edits = []
+        searchResults = []
+        highlightedSearchSelections = []
+        focusedSearchSelection = nil
+        focusedSearchResultID = nil
+        searchHighlightRevision += 1
+        searchNavigationRevision += 1
         revision += 1
         statusMessage = mode == .replacement
             ? "変更したい文字をクリックしてください。"
@@ -164,6 +278,7 @@ final class EditorModel: ObservableObject {
         mode = newMode
         selectedTarget = nil
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = ""
         revision += 1
         statusMessage = newMode == .replacement
@@ -175,6 +290,7 @@ final class EditorModel: ObservableObject {
         guard mode == .replacement else { return }
         selectedTarget = target
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = target?.originalText ?? ""
         if let target {
             statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
@@ -241,6 +357,16 @@ final class EditorModel: ObservableObject {
         refreshInsertionPreview()
     }
 
+    func setReplacementFontChoice(_ choice: InsertionFontChoice) {
+        replacementFontChoice = choice
+    }
+
+    func setCustomFontName(_ name: String) {
+        customFontName = name
+        if mode == .replacement { replacementFontChoice = .custom }
+        else { insertionFontChoice = .custom; refreshInsertionPreview() }
+    }
+
     func setInsertionFontSize(_ size: Double) {
         insertionFontSize = min(max(size, 6), 72)
         refreshInsertionPreview()
@@ -263,7 +389,11 @@ final class EditorModel: ObservableObject {
             statusMessage = "置換後の文字を入力してください。"
             return
         }
-        let result = PDFEditEngine.applyReplacement(normalized, to: page, target: target)
+        let previewReason = replacementFontPreview?.reason
+        let selectedFontName = selectedFontChoiceName
+        let result = PDFEditEngine.applyReplacement(
+            normalized, to: page, target: target, preferredFontName: selectedFontChoiceName
+        )
         edits.append(AppliedEdit(
             pageIndex: target.pageIndex,
             annotations: [result.annotation],
@@ -273,9 +403,9 @@ final class EditorModel: ObservableObject {
         isInlineEditing = false
         replacementText = ""
         revision += 1
-        statusMessage = result.fontIsExact
-            ? "文字を置換しました。確認後に編集済みPDFを書き出してください。"
-            : "文字を置換しました(元フォントを再現できないため代替フォントで描画します)。確認後に編集済みPDFを書き出してください。"
+        let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
+            ? "元フォントを再現できないため代替フォントで描画します。" : "")
+        statusMessage = "文字を置換しました。\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }
 
     func moveSelection(by delta: CGPoint) {
@@ -468,6 +598,70 @@ final class EditorModel: ObservableObject {
                 protecting: [sourceURL]
             )
             statusMessage = "ページサイズを変更して保存しました: \(outputURL.lastPathComponent)"
+            return true
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func cropPreview(pageIndex: Int, margins: PDFCropMargins) -> PDFCropPreview? {
+        guard let document, !hasPendingEditorInput,
+              document.page(at: pageIndex) != nil else { return nil }
+        let previewURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-crop-preview-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: previewURL) }
+        guard document.write(to: previewURL), let previewDocument = PDFDocument(url: previewURL) else { return nil }
+        return try? PDFCropEngine.preview(document: previewDocument, pageIndex: pageIndex, margins: margins)
+    }
+
+    @discardableResult
+    func cropFromPanel(margins: PDFCropMargins, pageSpecification: String) -> Bool {
+        guard let sourceURL, let document else { return false }
+        guard margins.isValid else {
+            statusMessage = PDFCropError.invalidMargins.localizedDescription
+            return false
+        }
+        guard !hasPendingEditorInput else {
+            statusMessage = "入力中の文字を確定してから切り抜いてください。"
+            return false
+        }
+        do {
+            _ = try PDFCropEngine.pageIndices(from: pageSpecification, pageCount: document.pageCount)
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+        guard document.allowsCopying && document.allowsDocumentAssembly else {
+            statusMessage = "このPDFは内容のコピーまたはページの変更が許可されていません。"
+            return false
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = sourceURL.deletingPathExtension().lastPathComponent + "-cropped.pdf"
+        panel.directoryURL = sourceURL.deletingLastPathComponent()
+        panel.message = "表示範囲だけを変更したPDFを別名で保存します。隠れた内容はPDF内部に残ります。"
+        guard panel.runModal() == .OK, let outputURL = panel.url else {
+            statusMessage = "保存をキャンセルしました。"
+            return false
+        }
+
+        let preparedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-crop-prepared-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: preparedURL) }
+        do {
+            guard document.write(to: preparedURL) else { throw PDFCropError.unreadableSource }
+            try PDFCropEngine.crop(
+                sourceURL: preparedURL,
+                to: outputURL,
+                margins: margins,
+                pageSpecification: pageSpecification,
+                protecting: [sourceURL]
+            )
+            statusMessage = "切り抜いて保存しました: \(outputURL.lastPathComponent)"
             return true
         } catch {
             statusMessage = error.localizedDescription

@@ -17,39 +17,54 @@ enum EditorMode: String, CaseIterable, Identifiable {
 
 enum InsertionFontChoice: String, CaseIterable, Identifiable {
     case automatic
+    case msGothic
+    case msPGothic
+    case msUIGothic
     case hiraginoSans
     case hiraginoMincho
-    case msGothic
+    case notoSansJP
     case helveticaNeue
     case arial
     case timesNewRoman
+    case courierNew
     case menlo
+    case custom
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .automatic: return "自動（周囲に合わせる）"
+        case .automatic: return "元の書体・自動"
+        case .msGothic: return "MS Gothic"
+        case .msPGothic: return "MS PGothic"
+        case .msUIGothic: return "MS UI Gothic"
         case .hiraginoSans: return "ヒラギノ角ゴ"
         case .hiraginoMincho: return "ヒラギノ明朝"
-        case .msGothic: return "MS ゴシック"
+        case .notoSansJP: return "Noto Sans JP"
         case .helveticaNeue: return "Helvetica Neue"
         case .arial: return "Arial"
         case .timesNewRoman: return "Times New Roman"
+        case .courierNew: return "Courier New"
         case .menlo: return "Menlo"
+        case .custom: return "読み込み済みのフォント"
         }
     }
 
     var fontName: String? {
         switch self {
         case .automatic: return nil
+        case .msGothic: return "MS Gothic"
+        case .msPGothic: return "MS PGothic"
+        case .msUIGothic: return "MS UI Gothic"
         case .hiraginoSans: return "Hiragino Sans"
         case .hiraginoMincho: return "Hiragino Mincho ProN"
-        case .msGothic: return "MS Gothic"
+        case .notoSansJP: return "Noto Sans JP"
         case .helveticaNeue: return "Helvetica Neue"
         case .arial: return "Arial"
         case .timesNewRoman: return "Times New Roman"
+        case .courierNew: return "Courier New"
         case .menlo: return "Menlo"
+        case .custom: return nil
         }
     }
 }

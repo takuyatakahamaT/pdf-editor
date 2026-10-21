@@ -2,7 +2,7 @@
 set -euo pipefail
 # Sign from the innermost code out. Sparkle's sandbox entitlements must survive.
 APP_BUNDLE="${1:?Usage: sign-app.sh '/path/PDF editor.app'}"
-SIGN_IDENTITY="${PDF_EDITOR_CODESIGN_IDENTITY:--}"
+SIGN_IDENTITY="${PDF_EDITOR_CODESIGN_IDENTITY:-${DEVELOPER_ID_APPLICATION:--}}"
 SIGN_ARGS=(--force --sign "$SIGN_IDENTITY" --preserve-metadata=entitlements)
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
     SIGN_ARGS+=(--timestamp=none)

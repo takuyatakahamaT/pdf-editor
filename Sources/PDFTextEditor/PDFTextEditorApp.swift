@@ -25,12 +25,14 @@ struct PDFTextEditorApp: App {
         }
         .defaultSize(width: 1_280, height: 840)
         .commands {
-            CommandGroup(after: .appInfo) {
-                Button("アップデートを確認…") { updater.checkForUpdates() }
-                if updater.isRestartPending {
-                    Button("更新して再起動") { updater.restartToUpdate() }
+            CommandGroup(after: .textEditing) {
+                Button("PDF内を検索…") {
+                    model.showSearchSheet()
                 }
+                .keyboardShortcut("f")
+                .disabled(model.document == nil)
             }
+
             CommandGroup(replacing: .newItem) {
                 Button("PDFを開く…") {
                     model.openFromPanel()

@@ -42,6 +42,9 @@ struct PDFWorkflowTests {
         let output = temporaryPDFURL(prefix: "merged")
         defer { remove([first, second, output]) }
         let before = try [Data(contentsOf: first), Data(contentsOf: second)]
+        let source = try #require(PDFDocument(url: first))
+        let sourceFirstPage = try #require(source.page(at: 0))
+        let sourceAnnotationCount = sourceFirstPage.annotations.count
 
         let result = try PDFMergeEngine.merge(inputURLs: [first, second], to: output)
 
@@ -56,7 +59,7 @@ struct PDFWorkflowTests {
         #expect(secondPage.bounds(for: .mediaBox).size == CGSize(width: 330, height: 190))
         #expect(firstPage.rotation == 90)
         #expect(secondPage.rotation == 270)
-        #expect(firstPage.annotations.count == 1)
+        #expect(firstPage.annotations.count == sourceAnnotationCount)
         #expect(try Data(contentsOf: first) == before[0])
         #expect(try Data(contentsOf: second) == before[1])
     }

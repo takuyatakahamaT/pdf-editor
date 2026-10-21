@@ -11,6 +11,8 @@ enum PDFCompressionError: Error, Equatable, LocalizedError {
     case conversionFailed(String)
     case invalidOutput
     case cannotSave
+    case outputAlreadyExists
+    case cancelled
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +26,8 @@ enum PDFCompressionError: Error, Equatable, LocalizedError {
             details.isEmpty ? "PDFを圧縮できませんでした。" : "PDFを圧縮できませんでした: \(details)"
         case .invalidOutput: "圧縮後のPDFを検証できませんでした。元のPDFは変更していません。"
         case .cannotSave: "圧縮後のPDFを保存できませんでした。"
+        case .outputAlreadyExists: "保存先に同じ名前のファイルがすでにあります。"
+        case .cancelled: "圧縮をキャンセルしました。"
         }
     }
 }
@@ -44,7 +48,8 @@ enum PDFCompressionEngine {
         sourceURL: URL,
         originalURL: URL,
         quality: Int,
-        helperURL: URL? = nil
+        helperURL: URL? = nil,
+        cancellationRequested: @Sendable () -> Bool = { false }
     ) throws -> PDFCompressionEstimate {
         guard quality == 0 || (90...98).contains(quality) else { throw PDFCompressionError.invalidQuality }
         guard FileManager.default.isReadableFile(atPath: sourceURL.path),
@@ -58,20 +63,38 @@ enum PDFCompressionEngine {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw PDFCompressionError.helperMissing
         }
+        guard !cancellationRequested() else { throw PDFCompressionError.cancelled }
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-compressed-\(UUID().uuidString).pdf")
         let process = Process()
         process.executableURL = executable
         process.arguments = [sourceURL.path, outputURL.path, String(quality)]
-        let log = Pipe()
-        process.standardOutput = log
-        process.standardError = log
+        let logURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-compress-log-\(UUID().uuidString).txt")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: logURL) }
+        guard let logHandle = FileHandle(forWritingAtPath: logURL.path) else {
+            throw PDFCompressionError.conversionFailed("")
+        }
+        process.standardOutput = logHandle
+        process.standardError = logHandle
         do {
             try process.run()
-            let logData = log.fileHandleForReading.readDataToEndOfFile()
+            while process.isRunning {
+                if cancellationRequested() {
+                    process.terminate()
+                    process.waitUntilExit()
+                    try? logHandle.close()
+                    throw PDFCompressionError.cancelled
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
             process.waitUntilExit()
+            try? logHandle.close()
+            if cancellationRequested() { throw PDFCompressionError.cancelled }
             guard process.terminationStatus == 0 else {
+                let logData = (try? Data(contentsOf: logURL)) ?? Data()
                 throw PDFCompressionError.conversionFailed(
                     String(String(data: logData, encoding: .utf8)?.suffix(400) ?? "")
                 )
@@ -90,6 +113,7 @@ enum PDFCompressionEngine {
                 outputBytes: outputBytes
             )
         } catch {
+            try? logHandle.close()
             try? FileManager.default.removeItem(at: outputURL)
             if let compressionError = error as? PDFCompressionError { throw compressionError }
             throw PDFCompressionError.conversionFailed("")
@@ -119,6 +143,27 @@ enum PDFCompressionEngine {
         }
     }
 
+    static func saveNew(_ estimate: PDFCompressionEstimate, to outputURL: URL, protecting sourceURL: URL) throws {
+        guard !sameFile(sourceURL, outputURL), !sameFile(estimate.temporaryURL, outputURL) else {
+            throw PDFCompressionError.outputMatchesInput
+        }
+        guard !FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw PDFCompressionError.outputAlreadyExists
+        }
+        guard (try? fileSize(estimate.temporaryURL)) == estimate.outputBytes else {
+            throw PDFCompressionError.invalidOutput
+        }
+        let stagedURL = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".pdf-editor-compressed-save-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: stagedURL) }
+        do {
+            try FileManager.default.copyItem(at: estimate.temporaryURL, to: stagedURL)
+            try FileManager.default.moveItem(at: stagedURL, to: outputURL)
+        } catch {
+            throw PDFCompressionError.cannotSave
+        }
+    }
+
     private static func pagesMatch(_ source: PDFDocument, _ output: PDFDocument) -> Bool {
         let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
         return (0..<source.pageCount).allSatisfy { index in
@@ -133,7 +178,7 @@ enum PDFCompressionEngine {
         }
     }
 
-    private static func fileSize(_ url: URL) throws -> Int64 {
+    static func fileSize(_ url: URL) throws -> Int64 {
         guard let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber else {
             throw PDFCompressionError.unreadableSource
         }

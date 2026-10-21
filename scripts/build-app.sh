@@ -8,11 +8,16 @@ if /usr/bin/pgrep -f "^$APP_BUNDLE/Contents/MacOS/PDFTextEditor([[:space:]]|$)" 
     exit 1
 fi
 CONTENTS_DIR="$APP_BUNDLE/Contents"
-PDFCPU_VERSION="v0.16.1"
 GO_COMMAND="$(command -v go || true)"
 
 if [[ -z "$GO_COMMAND" ]]; then
     echo "Go 1.26以降が必要です（pdfcpu をアプリへ同梱するため）。" >&2
+    exit 1
+fi
+
+PDFCPU_VERSION="$(cd "$APP_DIR/Tools/pdf-compress" && "$GO_COMMAND" list -m -f '{{.Version}}' github.com/pdfcpu/pdfcpu)"
+if [[ -z "$PDFCPU_VERSION" ]]; then
+    echo "Tools/pdf-compress/go.mod からpdfcpuのバージョンを取得できません。" >&2
     exit 1
 fi
 
@@ -61,12 +66,13 @@ fi
     "$APP_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt" \
     "$CONTENTS_DIR/Resources/ThirdParty/pdfcpu-LICENSE.txt"
 /usr/bin/install -m 644 \
+    "$APP_DIR/Resources/ThirdParty/THIRD-PARTY-NOTICES.txt" \
+    "$CONTENTS_DIR/Resources/ThirdParty/THIRD-PARTY-NOTICES.txt"
+/usr/bin/install -m 644 \
     "$APP_DIR/Resources/ThirdParty/NotoSansJP-OFL.txt" \
     "$CONTENTS_DIR/Resources/ThirdParty/NotoSansJP-OFL.txt"
 
-# SwiftPM signs the standalone executable before it is placed in the app
-# bundle. Sign the completed bundle again so Finder/Gatekeeper can verify the
-# final Info.plist and resources when it is launched by double-clicking.
+# Re-sign the complete app bundle, including Sparkle helpers, after packaging.
 "$APP_DIR/scripts/sign-app.sh" "$APP_BUNDLE"
 
 echo "$APP_BUNDLE"

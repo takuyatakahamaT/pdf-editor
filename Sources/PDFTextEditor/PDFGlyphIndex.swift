@@ -132,6 +132,10 @@ struct TextRunLayout: Equatable {
         glyphs[selectedRange.lowerBound].offsetX
     }
 
+    var selectedAdvance: CGFloat {
+        glyphs[selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
+    }
+
     func text(replacingWith replacement: String) -> String {
         let prefix = glyphs[..<selectedRange.lowerBound].map(\.text).joined()
         let suffix = glyphs[selectedRange.upperBound...].map(\.text).joined()
@@ -366,16 +370,25 @@ struct PageTextIndex {
               let lastSelected = selectedPositions.last,
               lastSelected - firstSelected + 1 == selectedPositions.count else { return nil }
 
+        let selectedStyle = candidates[firstSelected].glyph
+        guard selectedPositions.allSatisfy({ sameRenderingStyle(candidates[$0].glyph, selectedStyle) }) else {
+            return nil
+        }
+
         let joinGap = max(1.5, run.fontSize * 0.28)
         var first = firstSelected
         var last = lastSelected
         while first > 0 {
-            let gap = candidates[first].glyph.advanceBox.minX - candidates[first - 1].glyph.advanceBox.maxX
+            let previous = candidates[first - 1].glyph
+            guard sameRenderingStyle(previous, selectedStyle) else { break }
+            let gap = candidates[first].glyph.advanceBox.minX - previous.advanceBox.maxX
             guard gap >= -0.5, gap <= joinGap else { break }
             first -= 1
         }
         while last + 1 < candidates.count {
-            let gap = candidates[last + 1].glyph.advanceBox.minX - candidates[last].glyph.advanceBox.maxX
+            let next = candidates[last + 1].glyph
+            guard sameRenderingStyle(next, selectedStyle) else { break }
+            let gap = next.advanceBox.minX - candidates[last].glyph.advanceBox.maxX
             guard gap >= -0.5, gap <= joinGap else { break }
             last += 1
         }
@@ -385,6 +398,12 @@ struct PageTextIndex {
         let lineWidth = lastGlyph.advanceBox.maxX - lineStartX
         guard lineWidth > 0 else { return nil }
         let lineEndX = lastGlyph.advanceBox.maxX
+        let overlapsDifferentStyle = sameLineRuns.flatMap(\.glyphs).contains { glyph in
+            !sameRenderingStyle(glyph, selectedStyle)
+                && glyph.advanceBox.minX < lineEndX - 0.01
+                && glyph.advanceBox.maxX > lineStartX + 0.01
+        }
+        guard !overlapsDifferentStyle else { return nil }
         let nextBlockStart = sameLineRuns
             .flatMap(\.glyphs)
             .map(\.advanceBox.minX)
@@ -422,6 +441,12 @@ struct PageTextIndex {
             && lhs.text == rhs.text
             && lhs.box == rhs.box
             && abs(lhs.baseline - rhs.baseline) < 0.01
+    }
+
+    private func sameRenderingStyle(_ lhs: ScannedGlyph, _ rhs: ScannedGlyph) -> Bool {
+        lhs.fontKey == rhs.fontKey
+            && abs(lhs.fontSize - rhs.fontSize) < 0.05
+            && lhs.fillColor.isEqual(rhs.fillColor)
     }
 
     /// フォントキーごとに「埋め込みフォントプログラムが存在したか」を保持する

@@ -52,4 +52,24 @@ enum RawPDFBuilder {
         ]
         return build(objects: objects)
     }
+
+    static func multiPagePDF(pages: [(bounds: CGRect, content: String)]) -> URL {
+        var objects = ["<< /Type /Catalog /Pages 2 0 R >>", ""]
+        var pageReferences: [String] = []
+        for page in pages {
+            let pageObject = objects.count + 1
+            let contentObject = pageObject + 1
+            pageReferences.append("\(pageObject) 0 R")
+            objects.append(
+                "<< /Type /Page /Parent 2 0 R "
+                    + "/MediaBox [\(page.bounds.minX) \(page.bounds.minY) \(page.bounds.maxX) \(page.bounds.maxY)] "
+                    + "/Resources << /Font << /F1 \(pages.count * 2 + 3) 0 R >> >> "
+                    + "/Contents \(contentObject) 0 R >>"
+            )
+            objects.append(streamObject(dict: "", streamContent: page.content))
+        }
+        objects[1] = "<< /Type /Pages /Kids [\(pageReferences.joined(separator: " "))] /Count \(pages.count) >>"
+        objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+        return build(objects: objects)
+    }
 }
