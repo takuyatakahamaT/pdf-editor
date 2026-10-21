@@ -34,6 +34,8 @@ final class EditorModel: ObservableObject {
     @Published var replacementText = ""
     @Published private(set) var replacementFocusRequest = 0
     @Published private(set) var insertionFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var replacementFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var customFontName: String?
     @Published private(set) var insertionFontSize: Double = 12
     @Published private(set) var insertionFontColor: NSColor = .black
     @Published private(set) var importedFontFamilies: [String] = []
@@ -70,8 +72,39 @@ final class EditorModel: ObservableObject {
         return "\(document.pageCount)ページ"
     }
     var detectedFontName: String? { insertionDraft?.detectedFontName }
+    var selectedFontDescription: PDFEmbeddedFontLoader.FontDescription? {
+        guard let target = selectedTarget, let page = document?.page(at: target.pageIndex),
+              let key = target.fontKey,
+              let dictionary = PDFGlyphIndex.fontDictionary(for: key, page: page) else { return nil }
+        return PDFEmbeddedFontLoader.describe(fontDict: dictionary)
+    }
+    var selectedFontChoiceName: String? {
+        let choice = mode == .replacement ? replacementFontChoice : insertionFontChoice
+        return choice == .custom ? customFontName : choice.fontName
+    }
+    var replacementFontPreview: PDFEmbeddedFontLoader.Resolution? {
+        guard let target = selectedTarget, let page = document?.page(at: target.pageIndex) else { return nil }
+        return PDFEditEngine.resolveFont(
+            for: target, on: page, replacement: replacementText,
+            preferredFontName: selectedFontChoiceName
+        )
+    }
+    var insertionFontPreviewReason: String? {
+        guard insertionDraft != nil, let requested = selectedFontChoiceName else { return nil }
+        guard let font = PDFEmbeddedFontLoader.availableFont(named: requested, size: CGFloat(insertionFontSize)) else {
+            return "指定フォント「\(requested)」がこのMacで利用できないため自動フォントを使います。"
+        }
+        let missing = PDFEmbeddedFontLoader.missingCharacters(in: replacementText, font: font)
+        return missing.isEmpty ? nil : "指定フォントに \(missing.joined(separator: "")) のグリフがないため自動フォントを使います。"
+    }
     var effectiveInsertionFontName: String {
-        insertionFontChoice.fontName ?? insertionDraft?.automaticFontName ?? "Hiragino Sans"
+        let automatic = insertionDraft?.automaticFontName ?? "Hiragino Sans"
+        guard let requested = selectedFontChoiceName,
+              let font = PDFEmbeddedFontLoader.availableFont(named: requested, size: CGFloat(insertionFontSize)),
+              PDFEmbeddedFontLoader.missingCharacters(in: replacementText, font: font).isEmpty else {
+            return automatic
+        }
+        return requested
     }
 
     func openFromPanel() {
@@ -100,10 +133,11 @@ final class EditorModel: ObservableObject {
         do {
             let families = try PDFEmbeddedFontLoader.registerFontFile(at: url)
             importedFontFamilies = Array(Set(importedFontFamilies + families)).sorted()
+            if customFontName == nil { customFontName = importedFontFamilies.first }
             revision += 1
             statusMessage = families.isEmpty
-                ? "フォントファイルを読み込みました。PDF内のフォント名と一致すると置換に使われます。"
-                : "フォントを読み込みました: \(families.joined(separator: "、"))。一致するPDFの書体で使われます。"
+                ? "フォントファイルを読み込みました。"
+                : "フォントを読み込みました: \(families.joined(separator: "、"))。フォント欄から選べます。"
         } catch {
             statusMessage = "フォントを読み込めませんでした: \(error.localizedDescription)"
         }
@@ -150,6 +184,7 @@ final class EditorModel: ObservableObject {
         sourceURL = url
         selectedTarget = nil
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = ""
         edits = []
         revision += 1
@@ -164,6 +199,7 @@ final class EditorModel: ObservableObject {
         mode = newMode
         selectedTarget = nil
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = ""
         revision += 1
         statusMessage = newMode == .replacement
@@ -175,6 +211,7 @@ final class EditorModel: ObservableObject {
         guard mode == .replacement else { return }
         selectedTarget = target
         isInlineEditing = false
+        replacementFontChoice = .automatic
         replacementText = target?.originalText ?? ""
         if let target {
             statusMessage = "\(target.pageIndex + 1)ページ目の文字を選択しました。ダブルクリックで編集、ドラッグで移動できます。"
@@ -241,6 +278,16 @@ final class EditorModel: ObservableObject {
         refreshInsertionPreview()
     }
 
+    func setReplacementFontChoice(_ choice: InsertionFontChoice) {
+        replacementFontChoice = choice
+    }
+
+    func setCustomFontName(_ name: String) {
+        customFontName = name
+        if mode == .replacement { replacementFontChoice = .custom }
+        else { insertionFontChoice = .custom; refreshInsertionPreview() }
+    }
+
     func setInsertionFontSize(_ size: Double) {
         insertionFontSize = min(max(size, 6), 72)
         refreshInsertionPreview()
@@ -263,7 +310,11 @@ final class EditorModel: ObservableObject {
             statusMessage = "置換後の文字を入力してください。"
             return
         }
-        let result = PDFEditEngine.applyReplacement(normalized, to: page, target: target)
+        let previewReason = replacementFontPreview?.reason
+        let selectedFontName = selectedFontChoiceName
+        let result = PDFEditEngine.applyReplacement(
+            normalized, to: page, target: target, preferredFontName: selectedFontChoiceName
+        )
         edits.append(AppliedEdit(
             pageIndex: target.pageIndex,
             annotations: [result.annotation],
@@ -273,9 +324,9 @@ final class EditorModel: ObservableObject {
         isInlineEditing = false
         replacementText = ""
         revision += 1
-        statusMessage = result.fontIsExact
-            ? "文字を置換しました。確認後に編集済みPDFを書き出してください。"
-            : "文字を置換しました(元フォントを再現できないため代替フォントで描画します)。確認後に編集済みPDFを書き出してください。"
+        let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
+            ? "元フォントを再現できないため代替フォントで描画します。" : "")
+        statusMessage = "文字を置換しました。\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }
 
     func moveSelection(by delta: CGPoint) {

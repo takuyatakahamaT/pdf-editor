@@ -44,7 +44,11 @@ enum PDFFontInfoLoader {
 
         let toUnicode = loadToUnicode(fontDict)
         let unicodeToCode = invertToUnicode(toUnicode)
-        let isIdentity = isIdentityCIDToGIDMap(descendantDict)
+        // ToUnicode のキーを CID として扱えるのは Identity-H エンコーディングだけ。
+        // それ以外の CMap では文字コードと CID/GID が一致する保証がない。
+        let isIdentity = name(in: fontDict, key: "Encoding") == "Identity-H"
+            && name(in: descendantDict, key: "Subtype") == "CIDFontType2"
+            && isIdentityCIDToGIDMap(descendantDict)
 
         return PDFFontInfo(
             bytesPerCode: 2,

@@ -150,6 +150,78 @@ struct PDFEditEngineTests {
         #expect(CTFontCopyFamilyName(CTFontCreateWithName("Noto Sans JP" as CFString, 12, nil)) as String == "Noto Sans JP")
     }
 
+    @Test("embedded-font replacement reflows instead of shrinking when it exceeds the selection width")
+    func widerEmbeddedFontReplacementRequestsLineReflow() {
+        #expect(PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: 9))
+        #expect(!PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 9, selectedWidth: 9))
+        #expect(!PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: nil))
+    }
+
+    @Test("Type0 font reports subset, descendant and Identity-H safely")
+    func type0FontDescriptionAndIdentityMapping() throws {
+        let url = type0FontFixture(encoding: "Identity-H")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let dictionary = try #require(PDFGlyphIndex.fontDictionary(for: "F1", page: page))
+        let description = PDFEmbeddedFontLoader.describe(fontDict: dictionary)
+        #expect(description.pdfName == "ABCDEF+MS-Gothic")
+        #expect(description.subtype == "Type0")
+        #expect(description.descendantSubtype == "CIDFontType2")
+        #expect(description.encoding == "Identity-H")
+        #expect(description.isSubset)
+        #expect(!description.hasEmbeddedProgram)
+        #expect(PDFFontInfoLoader.load(from: dictionary).isIdentityCIDToGID)
+
+        let otherURL = type0FontFixture(encoding: "UniJIS-UTF16-H")
+        defer { try? FileManager.default.removeItem(at: otherURL) }
+        let otherDocument = try #require(PDFDocument(url: otherURL))
+        let otherPage = try #require(otherDocument.page(at: 0))
+        let otherDictionary = try #require(PDFGlyphIndex.fontDictionary(for: "F1", page: otherPage))
+        #expect(!PDFFontInfoLoader.load(from: otherDictionary).isIdentityCIDToGID)
+
+        let cidType0URL = type0FontFixture(encoding: "Identity-H", descendantSubtype: "CIDFontType0")
+        defer { try? FileManager.default.removeItem(at: cidType0URL) }
+        let cidType0Document = try #require(PDFDocument(url: cidType0URL))
+        let cidType0Page = try #require(cidType0Document.page(at: 0))
+        let cidType0Dictionary = try #require(PDFGlyphIndex.fontDictionary(for: "F1", page: cidType0Page))
+        #expect(!PDFFontInfoLoader.load(from: cidType0Dictionary).isIdentityCIDToGID)
+    }
+
+    @Test("selected replacement previews explicit local font before commit")
+    @MainActor
+    func replacementFontChoicePreviewsResolvedFamily() throws {
+        let url = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 300, height: 100),
+            contentStream: "BT /F1 12 Tf 1 0 0 1 30 50 Tm (12) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = EditorModel(initialURL: url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "12" })
+        let target = try #require(index.target(in: run, range: 0..<2, pageIndex: 0))
+        model.select(target)
+        #expect(model.selectedFontDescription?.pdfName == "Helvetica")
+        model.setReplacementFontChoice(.helveticaNeue)
+        model.updateEditorText("123")
+        #expect(model.replacementFontPreview?.familyName == "Helvetica Neue")
+        #expect(model.replacementFontPreview?.reason == nil)
+        model.applyReplacement()
+        #expect(model.edits.first?.replacement.resolvedFont != nil)
+    }
+
+    private func type0FontFixture(encoding: String, descendantSubtype: String = "CIDFontType2") -> URL {
+        RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>",
+            "<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+MS-Gothic /Encoding /\(encoding) /DescendantFonts [5 0 R] >>",
+            "<< /Type /Font /Subtype /\(descendantSubtype) /BaseFont /ABCDEF+MS-Gothic /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "")
+        ])
+    }
+
     @Test("replacement does not distort glyphs horizontally when space is tight")
     func replacementKeepsGlyphProportionsWhenShrinking() {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)

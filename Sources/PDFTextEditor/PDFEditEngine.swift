@@ -12,9 +12,11 @@ enum PDFEditEngine {
     static func applyReplacement(
         _ replacement: String,
         to page: PDFPage,
-        target: TextTarget
+        target: TextTarget,
+        preferredFontName: String? = nil
     ) -> (annotation: PDFAnnotation, edit: ReplacementEdit, fontIsExact: Bool) {
-        let resolution = resolveFont(for: target, on: page, replacement: replacement)
+        let resolution = resolveFont(for: target, on: page, replacement: replacement,
+                                     preferredFontName: preferredFontName)
         let edit = ReplacementEdit(
             target: target,
             replacement: replacement,
@@ -59,28 +61,49 @@ enum PDFEditEngine {
         return [cover, text]
     }
 
-    private static func resolveFont(
+    static func resolveFont(
         for target: TextTarget,
         on page: PDFPage,
-        replacement: String
+        replacement: String,
+        preferredFontName: String? = nil
     ) -> PDFEmbeddedFontLoader.Resolution {
         guard let fontKey = target.fontKey,
               let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) else {
             PDFEmbeddedFontLoader.registerBundledFonts()
-            let containsJapanese = replacement.unicodeScalars.contains { scalar in
+            let requiredText = target.lineLayout?.text(replacingWith: replacement) ?? replacement
+            let containsJapanese = requiredText.unicodeScalars.contains { scalar in
                 let value = scalar.value
                 return (0x3040...0x30FF).contains(value) || (0x4E00...0x9FFF).contains(value)
                     || (0x3400...0x4DBF).contains(value) || (0xFF66...0xFF9F).contains(value)
             }
             let fallbackName = containsJapanese ? "Noto Sans JP" : "Helvetica Neue"
-            let font = CTFontCreateWithName(fallbackName as CFString, target.fontSize, nil)
-            return PDFEmbeddedFontLoader.Resolution(font: font, isExact: false, exactGlyphs: nil)
+            let fallback = PDFEmbeddedFontLoader.availableFont(named: fallbackName, size: target.fontSize)
+                ?? CTFontCreateWithName(fallbackName as CFString, target.fontSize, nil)
+            let requestedFont = preferredFontName.flatMap {
+                PDFEmbeddedFontLoader.availableFont(named: $0, size: target.fontSize)
+            }
+            let missing = requestedFont.map {
+                PDFEmbeddedFontLoader.missingCharacters(in: requiredText, font: $0)
+            } ?? []
+            let chosen: CTFont
+            if let requestedFont, missing.isEmpty { chosen = requestedFont }
+            else { chosen = fallback }
+            let requestedName = preferredFontName ?? ""
+            let reason = preferredFontName == nil
+                ? "元のPDFフォント情報を取得できないため代替します。"
+                : requestedFont == nil
+                    ? "指定フォント「\(requestedName)」がこのMacで利用できないため代替します。"
+                    : missing.isEmpty ? nil : "指定フォントに入力文字のグリフがないため代替します。"
+            return PDFEmbeddedFontLoader.Resolution(font: chosen, isExact: false,
+                                                     exactGlyphs: nil, reason: reason)
         }
         return PDFEmbeddedFontLoader.resolveFont(
             fontDict: fontDict,
             size: target.fontSize,
             replacementText: replacement,
-            supportingText: target.lineLayout?.text(replacingWith: replacement)
+            supportingText: target.lineLayout?.text(replacingWith: replacement),
+            selectedWidth: target.lineLayout?.selectedAdvance ?? target.bounds.width,
+            preferredFontName: preferredFontName
         )
     }
 

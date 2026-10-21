@@ -132,6 +132,10 @@ struct TextRunLayout: Equatable {
         glyphs[selectedRange.lowerBound].offsetX
     }
 
+    var selectedAdvance: CGFloat {
+        glyphs[selectedRange].reduce(CGFloat.zero) { $0 + $1.advance }
+    }
+
     func text(replacingWith replacement: String) -> String {
         let prefix = glyphs[..<selectedRange.lowerBound].map(\.text).joined()
         let suffix = glyphs[selectedRange.upperBound...].map(\.text).joined()

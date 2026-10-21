@@ -5,6 +5,16 @@ import Foundation
 /// `/FontDescriptor` の `FontFile`/`FontFile2`/`FontFile3` から元 PDF と同じフォントを復元する。
 /// 復元できない、または置換文字列のグリフを引けない場合は既定のフォールバック順で代替する。
 enum PDFEmbeddedFontLoader {
+    struct FontDescription {
+        let pdfName: String?
+        let subtype: String?
+        let descendantSubtype: String?
+        let encoding: String?
+        let isSubset: Bool
+        let hasEmbeddedProgram: Bool
+        let installedFamily: String?
+    }
+
     struct Resolution {
         let font: CTFont
         /// 元の埋め込みフォントで置換文字列の全グリフを表現できた場合のみ true。
@@ -15,32 +25,133 @@ enum PDFEmbeddedFontLoader {
         /// (このサンプル PDF のように埋め込みサブセットに `cmap` が無く
         /// `CTFontGetGlyphsForCharacters` が原理的に使えないケースを救う)。
         let exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]?
+        let reason: String?
+
+        var familyName: String { CTFontCopyFamilyName(font) as String }
+    }
+
+    static func describe(fontDict: CGPDFDictionaryRef) -> FontDescription {
+        let pdfName = readBaseFontName(fontDict)
+        let installed = pdfName.flatMap { installedFont(named: strippingSubsetPrefix($0), size: 12) }
+        var subtypeName: UnsafePointer<Int8>?
+        var descendantSubtypeName: UnsafePointer<Int8>?
+        var encodingName: UnsafePointer<Int8>?
+        _ = CGPDFDictionaryGetName(fontDict, "Subtype", &subtypeName)
+        _ = CGPDFDictionaryGetName(fontDict, "Encoding", &encodingName)
+        if let subtypeName, String(cString: subtypeName) == "Type0" {
+            var descendants: CGPDFArrayRef?
+            var descendant: CGPDFDictionaryRef?
+            if CGPDFDictionaryGetArray(fontDict, "DescendantFonts", &descendants), let descendants,
+               CGPDFArrayGetDictionary(descendants, 0, &descendant), let descendant {
+                _ = CGPDFDictionaryGetName(descendant, "Subtype", &descendantSubtypeName)
+            }
+        }
+        return FontDescription(
+            pdfName: pdfName,
+            subtype: subtypeName.map { String(cString: $0) },
+            descendantSubtype: descendantSubtypeName.map { String(cString: $0) },
+            encoding: encodingName.map { String(cString: $0) },
+            isSubset: pdfName.map { strippingSubsetPrefix($0) != $0 } ?? false,
+            hasEmbeddedProgram: fontHasEmbeddedProgram(fontDict: fontDict),
+            installedFamily: installed.map { CTFontCopyFamilyName($0) as String }
+        )
     }
 
     static func resolveFont(
         fontDict: CGPDFDictionaryRef,
         size: CGFloat,
         replacementText: String,
-        supportingText: String? = nil
+        supportingText: String? = nil,
+        selectedWidth: CGFloat? = nil,
+        preferredFontName: String? = nil
     ) -> Resolution {
         let info = PDFFontInfoLoader.load(from: fontDict)
         let requiredText = supportingText ?? replacementText
 
-        if let embedded = loadEmbeddedFont(fontDict: fontDict, size: size) {
-            if info.isIdentityCIDToGID,
-               let exact = exactGlyphs(for: replacementText, using: info) {
-                return Resolution(font: embedded, isExact: true, exactGlyphs: exact)
+        if let preferredFontName {
+            if let chosen = installedFont(named: preferredFontName, size: size) {
+                let missing = missingCharacters(in: requiredText, font: chosen)
+                if missing.isEmpty {
+                    return Resolution(font: chosen, isExact: false, exactGlyphs: nil, reason: nil)
+                }
+                return fallbackResolution(
+                    fontDict: fontDict, size: size, requiredText: requiredText,
+                    reason: "指定フォント「\(preferredFontName)」に \(missing.joined(separator: "")) のグリフがないため代替します。"
+                )
             }
-            if coversAllCharacters(of: replacementText, font: embedded) {
-                return Resolution(font: embedded, isExact: true, exactGlyphs: nil)
+            return fallbackResolution(
+                fontDict: fontDict, size: size, requiredText: requiredText,
+                reason: "指定フォント「\(preferredFontName)」がこのMacで利用できないため代替します。"
+            )
+        }
+
+        if let embedded = loadEmbeddedFont(fontDict: fontDict, size: size) {
+            let requiresLineReflow: Bool
+            if info.isIdentityCIDToGID,
+               let exact = exactGlyphs(for: replacementText, using: info, font: embedded) {
+                let replacementWidth = exact.reduce(CGFloat.zero) { $0 + $1.emWidth * size }
+                requiresLineReflow = replacementNeedsLineReflow(
+                    replacementWidth: replacementWidth,
+                    selectedWidth: selectedWidth
+                )
+                if !requiresLineReflow {
+                    return Resolution(font: embedded, isExact: true, exactGlyphs: exact, reason: nil)
+                }
+            } else if coversAllCharacters(of: requiredText, font: embedded) {
+                let replacementWidth = typographicWidth(of: replacementText, font: embedded)
+                requiresLineReflow = replacementNeedsLineReflow(
+                    replacementWidth: replacementWidth,
+                    selectedWidth: selectedWidth
+                )
+                if !requiresLineReflow {
+                    return Resolution(font: embedded, isExact: true, exactGlyphs: nil, reason: nil)
+                }
+            } else {
+                requiresLineReflow = false
+            }
+            if requiresLineReflow {
+                return fallbackResolution(
+                    fontDict: fontDict,
+                    size: size,
+                    requiredText: requiredText,
+                    reason: "置換文字が元の選択幅を超えるため、後続文字を移動できるローカルフォントで同じ行を描き直します。"
+                )
             }
         }
 
+        return fallbackResolution(
+            fontDict: fontDict, size: size, requiredText: requiredText,
+            reason: fontHasEmbeddedProgram(fontDict: fontDict)
+                ? "PDF内の埋め込みフォントに入力文字のグリフがないため代替します。"
+                : "PDFに利用可能なフォント本体が埋め込まれていないため代替します。"
+        )
+    }
+
+    static func replacementNeedsLineReflow(replacementWidth: CGFloat, selectedWidth: CGFloat?) -> Bool {
+        guard let selectedWidth, replacementWidth.isFinite, selectedWidth.isFinite else { return false }
+        return replacementWidth > selectedWidth + 0.25
+    }
+
+    private static func typographicWidth(of text: String, font: CTFont) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: text,
+            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+        ))
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    private static func fallbackResolution(
+        fontDict: CGPDFDictionaryRef,
+        size: CGFloat,
+        requiredText: String,
+        reason: String
+    ) -> Resolution {
         if let baseFontName = readBaseFontName(fontDict) {
             let cleaned = strippingSubsetPrefix(baseFontName)
             if let installed = installedFont(named: cleaned, size: size),
                coversAllCharacters(of: requiredText, font: installed) {
-                return Resolution(font: installed, isExact: false, exactGlyphs: nil)
+                return Resolution(font: installed, isExact: false, exactGlyphs: nil, reason: reason)
             }
         }
 
@@ -51,13 +162,14 @@ enum PDFEmbeddedFontLoader {
         for fallbackName in fallbackNames {
             guard let fallback = installedFont(named: fallbackName, size: size),
                   coversAllCharacters(of: requiredText, font: fallback) else { continue }
-            return Resolution(font: fallback, isExact: false, exactGlyphs: nil)
+            return Resolution(font: fallback, isExact: false, exactGlyphs: nil, reason: reason)
         }
 
         let fallbackName = fallbackNames.first ?? "Helvetica Neue"
         let fallback = installedFont(named: fallbackName, size: size)
             ?? CTFontCreateWithName("Helvetica Neue" as CFString, size, nil)
-        return Resolution(font: fallback, isExact: false, exactGlyphs: nil)
+        return Resolution(font: fallback, isExact: false, exactGlyphs: nil,
+                          reason: reason + " 対応する全グリフを持つフォントも見つかりません。")
     }
 
     /// 未導入フォントを代替するときは置換後の文字種だけで判断せず、元PDFの書体名を優先する。
@@ -160,12 +272,15 @@ enum PDFEmbeddedFontLoader {
     /// 1 文字でも載っていなければ nil（通常の cmap 経由の経路へフォールバックする）。
     private static func exactGlyphs(
         for text: String,
-        using info: PDFFontInfo
+        using info: PDFFontInfo,
+        font: CTFont
     ) -> [(glyph: CGGlyph, emWidth: CGFloat)]? {
         guard !text.isEmpty else { return [] }
         var result: [(CGGlyph, CGFloat)] = []
         for character in text {
-            guard let code = info.unicodeToCode[String(character)] else { return nil }
+            guard let code = info.unicodeToCode[String(character)],
+                  code > 0, code <= Int(CGGlyph.max),
+                  CTFontCreatePathForGlyph(font, CGGlyph(code), nil) != nil else { return nil }
             result.append((CGGlyph(code), info.width(for: code)))
         }
         return result
@@ -229,14 +344,31 @@ enum PDFEmbeddedFontLoader {
     /// 実際に返った書体の family / PostScript 名が一致する場合だけ採用する。
     private static func installedFont(named name: String, size: CGFloat) -> CTFont? {
         registerBundledFonts()
-        let font = CTFontCreateWithName(name as CFString, size, nil)
         let requestedName = normalizedFontName(name)
-        let actualNames = [
-            CTFontCopyFamilyName(font) as String,
-            CTFontCopyPostScriptName(font) as String
-        ]
-        guard actualNames.contains(where: { normalizedFontName($0) == requestedName }) else { return nil }
-        return font
+        let direct = CTFontCreateWithName(name as CFString, size, nil)
+        if [CTFontCopyFamilyName(direct) as String, CTFontCopyPostScriptName(direct) as String]
+            .contains(where: { normalizedFontName($0) == requestedName }) {
+            return direct
+        }
+        let postScriptNames = CTFontManagerCopyAvailablePostScriptNames() as? [String] ?? []
+        let familyNames = CTFontManagerCopyAvailableFontFamilyNames() as? [String] ?? []
+        let candidates = postScriptNames.filter { normalizedFontName($0) == requestedName }
+            + familyNames.filter { normalizedFontName($0) == requestedName }
+        for candidate in candidates {
+            let font = CTFontCreateWithName(candidate as CFString, size, nil)
+            let actualNames = [
+                CTFontCopyFamilyName(font) as String,
+                CTFontCopyPostScriptName(font) as String
+            ]
+            if actualNames.contains(where: { normalizedFontName($0) == requestedName }) {
+                return font
+            }
+        }
+        return nil
+    }
+
+    static func availableFont(named name: String, size: CGFloat) -> CTFont? {
+        installedFont(named: name, size: size)
     }
 
     private static func normalizedFontName(_ name: String) -> String {
@@ -276,11 +408,23 @@ enum PDFEmbeddedFontLoader {
         }
     }
 
+    static func missingCharacters(in text: String, font: CTFont) -> [String] {
+        var missing: [String] = []
+        for character in text {
+            let allScalarsHaveGlyphs = character.unicodeScalars.allSatisfy { scalar in
+                var units = Array(String(scalar).utf16)
+                var glyphs = [CGGlyph](repeating: 0, count: units.count)
+                _ = CTFontGetGlyphsForCharacters(font, &units, &glyphs, units.count)
+                return glyphs.contains(where: { $0 != 0 })
+            }
+            if !allScalarsHaveGlyphs, !missing.contains(String(character)) {
+                missing.append(String(character))
+            }
+        }
+        return missing
+    }
+
     private static func coversAllCharacters(of text: String, font: CTFont) -> Bool {
-        guard !text.isEmpty else { return true }
-        let units = Array(text.utf16)
-        var glyphs = [CGGlyph](repeating: 0, count: units.count)
-        return CTFontGetGlyphsForCharacters(font, units, &glyphs, units.count)
-            && glyphs.allSatisfy { $0 != 0 }
+        missingCharacters(in: text, font: font).isEmpty
     }
 }
