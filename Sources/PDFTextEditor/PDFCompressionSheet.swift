@@ -367,28 +367,39 @@ struct PDFCompressionSheet: View {
         attemptID = attempt
         let revision = model.revision
         let selectedQuality = quality
-        let preparedURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pdf-editor-compress-prepared-\(UUID().uuidString).pdf")
-        do {
-            try PDFExportEngine.exportForPrinting(
-                sourceURL: sourceURL,
-                edits: model.activeReplacements,
-                markups: model.activeMarkupEdits,
-                to: preparedURL
-            )
-        } catch {
-            isWorking = false
-            message = "編集済みPDFの準備に失敗しました: \(error.localizedDescription)"
-            model.reportCompressionStatus(message)
-            try? FileManager.default.removeItem(at: preparedURL)
-            return
+        let compressionSourceURL: URL
+        let preparedURL: URL?
+        if model.edits.isEmpty {
+            compressionSourceURL = sourceURL
+            preparedURL = nil
+        } else {
+            let outputURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("pdf-editor-compress-prepared-\(UUID().uuidString).pdf")
+            do {
+                try PDFExportEngine.export(
+                    sourceURL: sourceURL,
+                    edits: model.activeReplacements,
+                    markups: model.activeMarkupEdits,
+                    to: outputURL
+                )
+            } catch {
+                isWorking = false
+                message = "編集済みPDFの準備に失敗しました: \(error.localizedDescription)"
+                model.reportCompressionStatus(message)
+                try? FileManager.default.removeItem(at: outputURL)
+                return
+            }
+            compressionSourceURL = outputURL
+            preparedURL = outputURL
         }
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                defer { try? FileManager.default.removeItem(at: preparedURL) }
+                defer {
+                    if let preparedURL { try? FileManager.default.removeItem(at: preparedURL) }
+                }
                 return Result {
                     try PDFCompressionEngine.estimate(
-                        sourceURL: preparedURL,
+                        sourceURL: compressionSourceURL,
                         originalURL: sourceURL,
                         quality: selectedQuality
                     )

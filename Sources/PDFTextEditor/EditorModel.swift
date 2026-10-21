@@ -954,10 +954,10 @@ final class EditorModel: ObservableObject {
         defer { try? FileManager.default.removeItem(at: preparedURL) }
         do {
             let resizeSourceURL: URL
-            if edits.isEmpty && activeMarkupEdits.isEmpty {
+            if edits.isEmpty {
                 resizeSourceURL = sourceURL
             } else {
-                try PDFExportEngine.exportForPrinting(
+                try PDFExportEngine.export(
                     sourceURL: sourceURL,
                     edits: activeReplacements,
                     markups: activeMarkupEdits,
