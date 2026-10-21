@@ -259,6 +259,60 @@ struct PDFMarkupEngineTests {
         } == true)
     }
 
+    @Test("markup export preserves rotated page geometry and source annotation coordinates")
+    func exportPreservesRotatedPageGeometry() throws {
+        let source = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] "
+                + "/CropBox [10 12 220 135] /BleedBox [4 6 236 154] "
+                + "/TrimBox [18 20 222 140] /ArtBox [26 28 190 122] /Rotate 90 "
+                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 12 Tf 20 120 Td (ROTATED) Tj ET"),
+            "<< /Type /Annot /Subtype /Text /Rect [40 50 80 70] /T (Original reviewer) /Contents (Original note) >>"
+        ])
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-rotated-export-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        let sourceDocument = try #require(PDFDocument(url: source))
+        let sourcePage = try #require(sourceDocument.page(at: 0))
+        let sourceBoxes: [(PDFDisplayBox, CGRect)] = [
+            (.mediaBox, sourcePage.bounds(for: .mediaBox)),
+            (.cropBox, sourcePage.bounds(for: .cropBox)),
+            (.bleedBox, sourcePage.bounds(for: .bleedBox)),
+            (.trimBox, sourcePage.bounds(for: .trimBox)),
+            (.artBox, sourcePage.bounds(for: .artBox))
+        ]
+        #expect(sourcePage.rotation == 90)
+        let sourceNote = try #require(sourcePage.annotations.first { $0.contents == "Original note" })
+
+        let markup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .note,
+            bounds: CGRect(x: 120, y: 36, width: 24, height: 24),
+            text: "New note"
+        )
+        try PDFExportEngine.export(sourceURL: source, edits: [], markups: [markup], to: output)
+
+        let exported = try #require(PDFDocument(url: output))
+        let exportedPage = try #require(exported.page(at: 0))
+        #expect(exportedPage.rotation == sourcePage.rotation)
+        for (box, bounds) in sourceBoxes {
+            #expect(exportedPage.bounds(for: box) == bounds)
+        }
+        let exportedNote = try #require(exportedPage.annotations.first { $0.contents == "Original note" })
+        #expect(exportedNote.bounds == sourceNote.bounds)
+        let exportedMarkup = try #require(exportedPage.annotations.first {
+            $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true
+        })
+        #expect(exportedMarkup.bounds == markup.bounds)
+    }
+
     @Test("export remaps internal link destinations to output pages")
     func exportRemapsInternalLinkDestinations() throws {
         let source = RawPDFBuilder.build(objects: [

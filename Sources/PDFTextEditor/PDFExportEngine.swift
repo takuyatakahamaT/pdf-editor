@@ -272,9 +272,16 @@ enum PDFExportEngine {
             guard let page = document.page(at: pageIndex) else { continue }
             let pageBounds = page.bounds(for: .mediaBox)
             let pageInfo = [
-                kCGPDFContextMediaBox as String: pageBounds
+                kCGPDFContextMediaBox as String: pageBounds,
+                kCGPDFContextCropBox as String: page.bounds(for: .cropBox),
+                kCGPDFContextBleedBox as String: page.bounds(for: .bleedBox),
+                kCGPDFContextTrimBox as String: page.bounds(for: .trimBox),
+                kCGPDFContextArtBox as String: page.bounds(for: .artBox)
             ] as CFDictionary
 
+            let originalRotation = page.rotation
+            page.rotation = 0
+            defer { page.rotation = originalRotation }
             context.beginPDFPage(pageInfo)
             context.saveGState()
             page.draw(with: .mediaBox, to: context)
@@ -293,10 +300,6 @@ enum PDFExportEngine {
         }
 
         context.closePDF()
-        let sourceHasAnnotations = (0..<document.pageCount).contains {
-            document.page(at: $0)?.annotations.isEmpty == false
-        }
-        guard !markups.isEmpty || sourceHasAnnotations else { return }
         guard let annotatedDocument = PDFDocument(url: outputURL) else {
             throw PDFExportError.unreadableSource
         }
@@ -306,6 +309,7 @@ enum PDFExportEngine {
                   let outputPage = annotatedDocument.page(at: pageIndex) else {
                 throw PDFExportError.unreadableSource
             }
+            restorePageGeometry(from: sourcePage, to: outputPage)
             for sourceAnnotation in sourcePage.annotations
                 where sourceAnnotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) != true {
                 guard let copiedAnnotation = PDFMarkupEngine.duplicateAnnotation(sourceAnnotation) else {
@@ -330,6 +334,14 @@ enum PDFExportEngine {
         )
         do { try data.write(to: outputURL, options: .atomic) }
         catch { throw PDFExportError.cannotCreateContext }
+    }
+
+    private static func restorePageGeometry(from sourcePage: PDFPage, to outputPage: PDFPage) {
+        let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
+        for box in boxes {
+            outputPage.setBounds(sourcePage.bounds(for: box), for: box)
+        }
+        outputPage.rotation = sourcePage.rotation
     }
 
     private static func remappedLinkData(
