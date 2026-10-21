@@ -369,6 +369,47 @@ struct PDFMarkupEngineTests {
         #expect(exportedDestination.zoom == 1.25)
     }
 
+    @Test("failed export post-processing preserves the existing destination")
+    func failedPostProcessingPreservesExistingDestination() throws {
+        let source = RawPDFBuilder.build(objects: [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R /Annots [8 0 R] >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 12 Tf 20 120 Td (FIRST) Tj ET"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>",
+            RawPDFBuilder.streamObject(dict: "", streamContent: "BT /F1 12 Tf 20 120 Td (SECOND) Tj ET"),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            "<< /Type /Annot /Subtype /Link /Rect [20 100 100 118] /Border [0 0 0] /Dest [5 0 R /XYZ 42 64 1.25] >>"
+        ])
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-preserved-destination-\(UUID().uuidString).pdf")
+        let missingHelper = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-pdf-link-remap-helper-\(UUID().uuidString)")
+        let originalOutput = Data("existing destination must survive".utf8)
+        try originalOutput.write(to: output)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+        let markup = PDFMarkupEdit(
+            pageIndex: 0,
+            tool: .note,
+            bounds: CGRect(x: 120, y: 36, width: 24, height: 24),
+            text: "New note"
+        )
+
+        #expect(throws: PDFExportError.cannotCreateContext) {
+            try PDFExportEngine.export(
+                sourceURL: source,
+                edits: [],
+                markups: [markup],
+                to: output,
+                linkRemapHelperURL: missingHelper
+            )
+        }
+        #expect(try Data(contentsOf: output) == originalOutput)
+    }
+
     @Test("signature text cannot be cleared by updating an existing annotation")
     @MainActor
     func emptySignatureUpdateIsRejected() throws {

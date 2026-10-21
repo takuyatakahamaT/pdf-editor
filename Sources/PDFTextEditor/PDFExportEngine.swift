@@ -262,8 +262,11 @@ enum PDFExportEngine {
             }
         }
 
+        let renderedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-rendered-export-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: renderedURL) }
         var initialBox = firstPage.bounds(for: .mediaBox)
-        guard let consumer = CGDataConsumer(url: outputURL as CFURL),
+        guard let consumer = CGDataConsumer(url: renderedURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &initialBox, nil) else {
             throw PDFExportError.cannotCreateContext
         }
@@ -300,7 +303,7 @@ enum PDFExportEngine {
         }
 
         context.closePDF()
-        guard let annotatedDocument = PDFDocument(url: outputURL) else {
+        guard let annotatedDocument = PDFDocument(url: renderedURL) else {
             throw PDFExportError.unreadableSource
         }
         let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)
