@@ -6,6 +6,31 @@ import Testing
 @testable import PDFTextEditor
 
 struct PDFRedactionEngineTests {
+    @Test("standard Helvetica metrics keep selected text and redaction bounds aligned")
+    func standardHelveticaMetricsKeepRedactionBoundsAligned() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 612, height: 792),
+            contentStream: "BT /F1 14 Tf 72 650 Td (SECRET: TEST-REDACT-9357) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try #require(PDFDocument(url: source))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first(where: { $0.text.contains("REDACT") }))
+        let range = try #require(run.text.range(of: "REDACT"))
+        let startIndex = run.text.distance(from: run.text.startIndex, to: range.lowerBound)
+        let firstGlyph = run.glyphs[startIndex]
+        let target = try #require(index.clusterWithAnchor(
+            at: CGPoint(x: firstGlyph.advanceBox.midX, y: firstGlyph.advanceBox.midY),
+            pageIndex: 0
+        )?.target)
+
+        #expect(target.originalText == "REDACT")
+        #expect(abs(target.bounds.minX - 177.014) < 0.02)
+        #expect(abs(target.bounds.width - 57.559) < 0.02)
+        #expect(abs(firstGlyph.advance - 10.110) < 0.02)
+    }
+
     @Test("rasterized redaction removes extractable text")
     func redactionRemovesExtractableText() throws {
         let source = RawPDFBuilder.singlePagePDF(
