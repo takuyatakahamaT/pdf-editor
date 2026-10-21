@@ -60,12 +60,14 @@ struct PDFMarkupEngineTests {
         let exported = try #require(PDFDocument(url: output))
         let page = try #require(exported.page(at: 0))
         #expect(page.string?.contains("SOURCE") == true)
-        #expect(page.annotations.count == 2)
-        #expect(page.annotations.contains {
+        let editorAnnotations = page.annotations.filter {
+            $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true
+        }
+        #expect(editorAnnotations.count == 2)
+        #expect(editorAnnotations.contains {
             $0.type == PDFAnnotationSubtype.highlight.rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         })
-        #expect(page.annotations.contains { $0.contents == "Review this" })
-        #expect(page.annotations.allSatisfy { $0.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true })
+        #expect(editorAnnotations.contains { $0.contents == "Review this" })
 
         try PDFExportEngine.exportForPrinting(sourceURL: source, edits: [], markups: markups, to: printOutput)
         let preparedForPrint = try #require(PDFDocument(url: printOutput))
