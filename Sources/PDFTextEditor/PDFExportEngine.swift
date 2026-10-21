@@ -302,7 +302,11 @@ enum PDFExportEngine {
         markups: [PDFMarkupEdit] = [],
         to outputURL: URL
     ) throws {
-        if edits.isEmpty && markups.isEmpty {
+        guard let sourceDocument = PDFDocument(url: sourceURL), sourceDocument.pageCount > 0 else {
+            throw PDFExportError.unreadableSource
+        }
+        let sourceHasManagedMarkups = PDFMarkupEngine.hasManagedAnnotations(in: sourceDocument)
+        if edits.isEmpty && markups.isEmpty && !sourceHasManagedMarkups {
             do {
                 let sourceData = try Data(contentsOf: sourceURL)
                 try sourceData.write(to: outputURL, options: .atomic)
@@ -312,9 +316,6 @@ enum PDFExportEngine {
             }
         }
 
-        guard let sourceDocument = PDFDocument(url: sourceURL), sourceDocument.pageCount > 0 else {
-            throw PDFExportError.unreadableSource
-        }
         let printDocument = PDFDocument()
         let editsByPage = Dictionary(grouping: edits, by: \.pageIndex)
         let markupsByPage = Dictionary(grouping: markups, by: \.pageIndex)

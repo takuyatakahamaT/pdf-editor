@@ -59,6 +59,18 @@ struct PDFMarkupEngineTests {
         )
         #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 62), in: ink))
         #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 35), in: ink))
+
+        let underline = PDFMarkupEdit(
+            pageIndex: 0, tool: .underline, bounds: CGRect(x: 20, y: 30, width: 100, height: 20)
+        )
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 31), in: underline))
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 42), in: underline))
+
+        let strikeOut = PDFMarkupEdit(
+            pageIndex: 0, tool: .strikeOut, bounds: CGRect(x: 20, y: 30, width: 100, height: 20)
+        )
+        #expect(PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 40), in: strikeOut))
+        #expect(!PDFMarkupEngine.hitTest(CGPoint(x: 70, y: 31), in: strikeOut))
     }
 
     @Test("selected line markup resize handle remains hittable outside the visible path")
@@ -148,11 +160,14 @@ struct PDFMarkupEngineTests {
             .appendingPathComponent("pdf-markup-export-\(UUID().uuidString).pdf")
         let printOutput = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-markup-print-\(UUID().uuidString).pdf")
+        let printAfterDeleteOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-markup-print-delete-\(UUID().uuidString).pdf")
         defer {
             try? FileManager.default.removeItem(at: source)
             try? FileManager.default.removeItem(at: sourceWithAnnotation)
             try? FileManager.default.removeItem(at: output)
             try? FileManager.default.removeItem(at: printOutput)
+            try? FileManager.default.removeItem(at: printAfterDeleteOutput)
         }
 
         let sourceDocument = try #require(PDFDocument(url: source))
@@ -211,6 +226,18 @@ struct PDFMarkupEngineTests {
         let preparedForPrint = try #require(PDFDocument(url: printOutput))
         #expect(preparedForPrint.pageCount == 1)
         #expect(preparedForPrint.page(at: 0)?.annotations.isEmpty == true)
+
+        try PDFExportEngine.exportForPrinting(
+            sourceURL: output,
+            edits: [],
+            markups: [],
+            to: printAfterDeleteOutput
+        )
+        let preparedAfterDelete = try #require(PDFDocument(url: printAfterDeleteOutput))
+        #expect(PDFMarkupEngine.hasManagedAnnotations(in: preparedAfterDelete) == false)
+        #expect(preparedAfterDelete.page(at: 0)?.annotations.contains {
+            $0.userName == "Another PDF app" && $0.contents == "Original review note"
+        } == true)
     }
 
     @Test("markup add, update, delete, undo and redo keep model and page in sync")

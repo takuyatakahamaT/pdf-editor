@@ -144,9 +144,35 @@ enum PDFMarkupEngine {
             return zip(edit.points, edit.points.dropFirst()).contains {
                 distance(from: point, toSegmentFrom: $0.0, to: $0.1) <= tolerance
             }
+        case .underline:
+            return hitTestHorizontalStroke(
+                point,
+                bounds: bounds,
+                y: bounds.minY,
+                tolerance: tolerance
+            )
+        case .strikeOut:
+            return hitTestHorizontalStroke(
+                point,
+                bounds: bounds,
+                y: bounds.midY,
+                tolerance: tolerance
+            )
         default:
             return bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(point)
         }
+    }
+
+    private static func hitTestHorizontalStroke(
+        _ point: CGPoint,
+        bounds: CGRect,
+        y: CGFloat,
+        tolerance: CGFloat
+    ) -> Bool {
+        let strokeTolerance = min(tolerance, max(2, min(bounds.width, bounds.height) * 0.15))
+        return point.x >= bounds.minX - strokeTolerance
+            && point.x <= bounds.maxX + strokeTolerance
+            && abs(point.y - y) <= strokeTolerance
     }
 
     static func hitTestResizeHandle(_ point: CGPoint, bounds: CGRect, tolerance: CGFloat = 10) -> Bool {
@@ -169,6 +195,14 @@ enum PDFMarkupEngine {
             document.page(at: pageIndex)?.annotations.compactMap {
                 edit(from: $0, pageIndex: pageIndex)
             } ?? []
+        }
+    }
+
+    static func hasManagedAnnotations(in document: PDFDocument) -> Bool {
+        (0..<document.pageCount).contains { pageIndex in
+            document.page(at: pageIndex)?.annotations.contains {
+                $0.userName?.hasPrefix(markerPrefix) == true
+            } == true
         }
     }
 
