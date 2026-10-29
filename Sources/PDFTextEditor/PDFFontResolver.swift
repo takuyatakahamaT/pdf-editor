@@ -11,7 +11,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .replacement: return "既存文字を置換"
+        case .replacement: return "文字を編集"
         case .insertion: return "テキストを追加"
         case .redaction: return "墨消し"
         case .markup: return "注釈・署名"
@@ -21,7 +21,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     /// 編集方法の切替に出す短い名前。
     var shortTitle: String {
         switch self {
-        case .replacement: return "置換"
+        case .replacement: return "編集"
         case .insertion: return "追加"
         case .redaction: return "墨消し"
         case .markup: return "注釈"

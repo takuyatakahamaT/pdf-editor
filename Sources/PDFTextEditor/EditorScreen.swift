@@ -564,13 +564,9 @@ private struct ContextPanel: View {
                 if model.replacementFontChoice == .custom {
                     ImportedFontPicker(model: model)
                 }
-                if let reason = model.replacementFontPreview?.reason {
-                    warning(reason)
-                }
-                warning("白い重ね描きで置換します。元の文字データはPDF内に残るため、機密情報の削除には使えません。")
 
                 HStack {
-                    Text("出力サイズ")
+                    Text("文字サイズ")
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(NihoPalette.ink)
                     Spacer()
@@ -586,18 +582,18 @@ private struct ContextPanel: View {
                             .font(.system(size: 12.5, weight: .semibold))
                             .monospacedDigit()
                     }
-                    .accessibilityLabel("置換文字の出力サイズ")
+                    .accessibilityLabel("文字サイズ")
                 }
 
                 HStack(spacing: 8) {
-                    Button("置き換える", action: model.beginInlineEditing)
+                    Button("編集", action: model.beginInlineEditing)
                         .buttonStyle(PillButtonStyle(kind: .primary))
                         .disabled(model.isInlineEditing)
                     Button(action: model.deleteSelection) {
                         HStack(spacing: 5) {
                             Image(systemName: "trash")
                                 .font(.system(size: 11.5, weight: .semibold))
-                            Text("表示から削除")
+                            Text("削除")
                         }
                     }
                     .buttonStyle(PillButtonStyle(kind: .ghost))
@@ -608,14 +604,11 @@ private struct ContextPanel: View {
 
     private func replacementMeta(for target: TextTarget) -> String {
         let detail = model.selectedFontDescription
-        var parts = [
+        let parts = [
             "\(target.pageIndex + 1) ページ",
-            "選択元 \(Double(target.fontSize).formatted(.number.precision(.fractionLength(0...1)))) pt",
+            "\(Double(target.fontSize).formatted(.number.precision(.fractionLength(0...1)))) pt",
             detail?.installedFamily ?? detail?.pdfName ?? "書体不明",
         ]
-        if detail?.hasEmbeddedProgram == false {
-            parts.append("埋め込みなし")
-        }
         return parts.joined(separator: " · ")
     }
 
@@ -643,9 +636,6 @@ private struct ContextPanel: View {
                 ))
                 if model.insertionFontChoice == .custom {
                     ImportedFontPicker(model: model)
-                }
-                if let reason = model.insertionFontPreviewReason {
-                    warning(reason)
                 }
 
                 HStack(spacing: 8) {

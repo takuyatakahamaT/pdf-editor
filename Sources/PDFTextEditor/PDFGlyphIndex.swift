@@ -28,12 +28,14 @@ struct ScannedGlyph {
     var textRenderingMode: Int = 0
     /// content streamを走査した順番。後から描かれた重なり文字を選択するために使う。
     var paintOrder: Int = 0
-    /// 元のshow演算子。内部置換は単一の `Tj` または単一文字列だけの `TJ` 全体を許可する。
+    /// 元のshow演算子。内部編集時はPDFiumの実際の文字原点も再照合する。
     var showOperator: PDFTextShowOperator = .unknown
     var showOperationID: Int = -1
     var isInsideForm: Bool = false
     var isInsideMarkedContent: Bool = false
     var isClipped: Bool = false
+    /// 再構成した非描画spaceも保存後に元charcodeと照合する。
+    var sourceCharacterCode: Int? = nil
 
     var isVisible: Bool { (0...6).contains(textRenderingMode) && textRenderingMode != 3 }
 }
@@ -121,7 +123,7 @@ struct TextTarget: Equatable {
     let sourceGlyphBounds: [CGRect]
     /// 選択外の可視グリフが同じ領域へ重なっている場合はobject同定を曖昧とする。
     let sourceSelectionIsAmbiguous: Bool
-    /// PageTextIndexが単一の通常 `Tj`、非Form、非marked contentと証明したか。
+    /// 単一show操作で、非Form・非marked content・非clipと証明したか。
     let sourceIsPlainTextObject: Bool
 
     init(
@@ -392,7 +394,7 @@ struct PageTextIndex {
         let sourceIsPlainTextObject = operationIDs.count == 1
             && operationIDs.first.map { $0 >= 0 } == true
             && clusterGlyphs.allSatisfy {
-                ($0.showOperator == .tj || $0.showOperator == .singleStringTJ)
+                ($0.showOperator != .unknown)
                     && !$0.isInsideForm && !$0.isInsideMarkedContent && !$0.isClipped
             }
 
@@ -851,6 +853,10 @@ final class GlyphScanState {
     var fillColorSpaceComponentsStack: [Int] = [1]
     private var clippingStack: [Bool] = [false]
     var clippingIsActive: Bool { clippingStack.last ?? false }
+    private var clippingRectStack: [CGRect?] = [nil]
+    private var clippingRectIsKnownStack: [Bool] = [true]
+    private var pendingPathExists = false
+    private var pendingPathRect: CGRect?
 
     var tm: CGAffineTransform = .identity
     var tlm: CGAffineTransform = .identity
@@ -950,6 +956,8 @@ final class GlyphScanState {
         fillColorStack.append(fillColorStack[fillColorStack.count - 1])
         fillColorSpaceComponentsStack.append(fillColorSpaceComponentsStack[fillColorSpaceComponentsStack.count - 1])
         clippingStack.append(clippingIsActive)
+        clippingRectStack.append(clippingRectStack[clippingRectStack.count - 1])
+        clippingRectIsKnownStack.append(clippingRectIsKnownStack[clippingRectIsKnownStack.count - 1])
         textGraphicsStateStack.append(TextGraphicsState(
             fontKey: fontKey,
             fontSize: fontSize,
@@ -967,6 +975,8 @@ final class GlyphScanState {
         if fillColorStack.count > 1 { fillColorStack.removeLast() }
         if fillColorSpaceComponentsStack.count > 1 { fillColorSpaceComponentsStack.removeLast() }
         if clippingStack.count > 1 { clippingStack.removeLast() }
+        if clippingRectStack.count > 1 { clippingRectStack.removeLast() }
+        if clippingRectIsKnownStack.count > 1 { clippingRectIsKnownStack.removeLast() }
         if let saved = textGraphicsStateStack.popLast() {
             fontKey = saved.fontKey
             fontSize = saved.fontSize
@@ -980,7 +990,60 @@ final class GlyphScanState {
     }
 
     func markClippingActive() {
+        let position = clippingStack.count - 1
+        if clippingRectIsKnownStack[position], let rectangle = pendingPathRect {
+            clippingRectStack[position] = clippingRectStack[position].map { $0.intersection(rectangle) } ?? rectangle
+        } else {
+            clippingRectStack[position] = nil
+            clippingRectIsKnownStack[position] = false
+        }
         clippingStack[clippingStack.count - 1] = true
+    }
+
+    func recordPathRectangle(_ rectangle: CGRect) {
+        let wasEmpty = !pendingPathExists
+        pendingPathExists = true
+        guard wasEmpty, [ctm.a, ctm.b, ctm.c, ctm.d, ctm.tx, ctm.ty].allSatisfy(\.isFinite),
+              abs(ctm.b) <= 0.000001, abs(ctm.c) <= 0.000001,
+              rectangle.width != 0, rectangle.height != 0 else {
+            pendingPathRect = nil
+            return
+        }
+        let transformed = rectangle.applying(ctm).standardized
+        pendingPathRect = transformed.isNull || transformed.isInfinite || transformed.isEmpty ? nil : transformed
+    }
+
+    func markPathUnknown() {
+        pendingPathExists = true
+        pendingPathRect = nil
+    }
+
+    func finishPath() {
+        pendingPathExists = false
+        pendingPathRect = nil
+    }
+
+    func isolateFormPath() -> (exists: Bool, rectangle: CGRect?) {
+        let saved = (pendingPathExists, pendingPathRect)
+        finishPath()
+        return saved
+    }
+
+    func restoreFormPath(_ saved: (exists: Bool, rectangle: CGRect?)) {
+        pendingPathExists = saved.exists
+        pendingPathRect = saved.rectangle
+    }
+
+    func clippingAffectsGlyph(in box: CGRect, fontSize: CGFloat) -> Bool {
+        guard clippingIsActive else { return false }
+        guard clippingRectIsKnownStack.last == true,
+              let rectangle = clippingRectStack.last ?? nil,
+              !rectangle.isNull, !rectangle.isEmpty,
+              [box.minX, box.minY, box.maxX, box.maxY].allSatisfy(\.isFinite) else { return true }
+        // 単一reだけから成るclip chainの内側へmetric bboxが十分収まる場合だけ中立候補。
+        // engineはさらにPDFiumが元object全inkのclipを除去済みであることを別途要求する。
+        let padding = max(1, min(2, fontSize * 0.1))
+        return !rectangle.contains(box.insetBy(dx: -padding, dy: -padding))
     }
 }
 

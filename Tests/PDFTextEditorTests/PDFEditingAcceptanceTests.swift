@@ -662,7 +662,7 @@ struct PDFEditingAcceptanceTests {
             customFontName: "PDFEditor Definitely Missing Font"
         ))
         #expect(CTFontCopyPostScriptName(try #require(fallback.resolvedFont)) as String != "PDFEditor Definitely Missing Font")
-        #expect(model.statusMessage.contains("利用できない"))
+        #expect(model.statusMessage == "文字を変更しました。")
         model.beginReeditingReplacement(id: first.id)
         #expect(model.replacementFontChoice == .custom)
         #expect(model.customFontName == "PDFEditor Definitely Missing Font")
@@ -740,7 +740,7 @@ struct PDFEditingAcceptanceTests {
         tightModel.commitEditorText()
         #expect(tightModel.activeReplacements.isEmpty)
         #expect(tightPage.annotations.isEmpty)
-        #expect(tightModel.noticeMessage?.contains("超えます") == true)
+        #expect(tightModel.noticeMessage?.contains("範囲を超えています") == true)
         #expect(tightModel.isInlineEditing == false)
         #expect(tightModel.selectedTarget == tightFixture.target)
 
@@ -788,7 +788,7 @@ struct PDFEditingAcceptanceTests {
         collisionModel.commitEditorText()
         #expect(collisionModel.activeReplacements.isEmpty)
         #expect(collisionPage.annotations.isEmpty)
-        #expect(collisionModel.noticeMessage?.contains("隣接文字またはページ境界") == true)
+        #expect(collisionModel.noticeMessage?.contains("範囲を超えています") == true)
 
         let edgeFixture = try makePageEdgeReplacementFixture()
         defer { try? FileManager.default.removeItem(at: edgeFixture.url) }
@@ -800,7 +800,7 @@ struct PDFEditingAcceptanceTests {
         edgeModel.commitEditorText()
         #expect(edgeModel.activeReplacements.isEmpty)
         #expect(edgePage.annotations.isEmpty)
-        #expect(edgeModel.noticeMessage?.contains("隣接文字またはページ境界") == true)
+        #expect(edgeModel.noticeMessage?.contains("範囲を超えています") == true)
     }
 
     @Test("追加済みテキストをA→B→Cと再編集しキャンセル・移動・undo/redoできる")

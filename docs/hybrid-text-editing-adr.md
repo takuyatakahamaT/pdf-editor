@@ -2,7 +2,9 @@
 
 - 対象: Issue #19、限定実装 Issue #50
 - 記録日: 2026-10-21、実装更新日: 2026-10-29
-- 状態: PDFium chromium/8125による限定内部置換を採用。条件外は理由付きoverlay。
+- 状態: PDFium chromium/8125を採用。現行の操作・対応範囲・保存検証は[日本語・英語の文字編集設計](japanese-english-text-editing.md)を正とする。
+
+以下は初期の比較調査と段階導入の記録。利用者に編集方式やPDF内部構造を説明する旧UI方針は撤回した。現在は一つの文字編集操作から内部で経路を選択する。
 
 固定したmacOS universal archive `pdfium-mac-univ.tgz` のSHA-256は `0cf06803b9a4acc489fc967a1b05990622ca1cf41fa027ff9cc89eeab9b19279`。dylibはarm64/x86_64、最小macOS 13.0で、アプリの対象macOS 14以降を満たす。`LICENSE`と`licenses/`の18ファイルを配布物へ収録する。実測したアプリ容量はSDK追加前64MB、追加後79MB。固定版の脆弱性更新と再検証は本リポジトリの保守対象とする。現在の自動更新リリースはad-hocコード署名とSparkle更新署名であり、Apple Developer IDによる公証済み販売ZIPは証明書とnotarytoolプロファイルを設定して`package-release.sh`で別途作成・検証する。
 

@@ -121,10 +121,10 @@ final class EditorModel: ObservableObject {
         }
         var visible: [(Int, ReplacementEdit)] = []
         for item in latestEdits {
-            if item.1.destinationOrigin == nil, let layout = item.1.lineLayout,
+            if !item.1.storage.isInternal, item.1.destinationOrigin == nil, let layout = item.1.lineLayout,
                !item.1.lineReplacements.isEmpty {
                 visible.removeAll { previous in
-                    guard previous.1.destinationOrigin == nil,
+                    guard !previous.1.storage.isInternal, previous.1.destinationOrigin == nil,
                           let previousLayout = previous.1.lineLayout else { return false }
                     return layout.hasSameSourceLine(as: previousLayout)
                 }
@@ -342,7 +342,7 @@ final class EditorModel: ObservableObject {
         searchNavigationRevision += 1
         if mode == .replacement, let target = result.editTarget {
             select(target)
-            statusMessage = "検索結果を編集対象にしました。置換する文字を入力してください。"
+            statusMessage = "検索結果を選択しました。変更する文字を入力してください。"
         } else if result.editTarget == nil {
             statusMessage = "\(result.pageIndex + 1)ページ目へ移動しました。文字情報を取得できないため、ページ上で対象を選択してください。"
         } else {
@@ -824,7 +824,7 @@ final class EditorModel: ObservableObject {
         editingReplacementID = id
         isInlineEditing = true
         revision += 1
-        statusMessage = "置換済みの文字を再編集しています。現在の出力は\(formattedPointSize(CGFloat(replacementFontSize))) ptです。"
+        statusMessage = "文字を編集中です。"
     }
 
     func beginInsertion(pageIndex: Int, point: CGPoint) {
@@ -965,11 +965,9 @@ final class EditorModel: ObservableObject {
               let page = document.page(at: target.pageIndex) else { return }
         let normalized = replacementText.trimmingCharacters(in: .newlines)
         guard !normalized.isEmpty else {
-            notice("置換後の文字を入力してください。")
+            notice("変更する文字を入力してください。")
             return
         }
-        let previewReason = replacementFontPreview?.reason
-        let selectedFontName = selectedFontChoiceName
         let previousApplied = editingReplacementID.flatMap { id in
             edits.last(where: { $0.replacement?.id == id })
         }
@@ -985,11 +983,14 @@ final class EditorModel: ObservableObject {
             outputFontSelection: selectedReplacementFontSelection
         )
         var replacement = result.edit
+        if let sourceURL {
+            replacement.storage = PDFTextEditPlanner.storage(sourceURL: sourceURL, edit: replacement)
+        }
         var supersededApplied = previousApplied
-        if replacement.destinationOrigin == nil,
+        if !replacement.storage.isInternal, replacement.destinationOrigin == nil,
            let layout = replacement.lineLayout,
            let previous = activeReplacements.last(where: { existing in
-               existing.destinationOrigin == nil
+               !existing.storage.isInternal && existing.destinationOrigin == nil
                    && (existing.id != replacement.id
                        || existing.lineReplacements.contains(where: { $0.id != replacement.id }))
                    && existing.lineLayout.map { layout.hasSameSourceLine(as: $0) } == true
@@ -1009,42 +1010,32 @@ final class EditorModel: ObservableObject {
         let fit = PDFTextRenderer.fitResult(for: replacement, in: page.bounds(for: .mediaBox))
         guard fit.fits else {
             notice(
-                "置換文字が配置可能範囲（隣接文字またはページ境界）を\(formattedPointSize(fit.overflow)) pt超えます。"
-                    + " 出力サイズ（現在 \(formattedPointSize(CGFloat(replacementFontSize))) pt）を小さくして再度確定してください。"
+                "文字が配置できる範囲を超えています。文字数を減らすか、文字サイズを小さくしてください。"
             )
             return
         }
 
-        if replacement.destinationOrigin == nil, !replacement.composesLineEdits, let sourceURL {
-            switch PDFInternalTextEditEngine.eligibility(sourceURL: sourceURL, edit: replacement) {
-            case .supported:
-                replacement.storage = .internalPDFium
-            case .unsupported(let reason):
-                replacement.storage = .overlay(reason: reason)
-            }
-        } else {
+        if replacement.destinationOrigin != nil || replacement.composesLineEdits {
             replacement.storage = .overlay(reason: "移動または行再配置を含むためPDF内部置換の対象外です。")
         }
 
+        let prospective = activeReplacements.filter { $0.id != replacement.id } + [replacement]
+        do {
+            try PDFExportEngine.validateEditPaths(prospective)
+        } catch {
+            notice("変更した文字が重なっています。位置を離すか、一方の変更を取り消してください。")
+            return
+        }
+        var verifiedPreview: PDFDocument?
         if replacement.storage.isInternal, let sourceURL {
-            var prospective = activeReplacements.filter { existing in
-                guard existing.id != replacement.id else { return false }
-                guard replacement.destinationOrigin == nil,
-                      let replacementLayout = replacement.lineLayout,
-                      existing.destinationOrigin == nil,
-                      let existingLayout = existing.lineLayout else { return true }
-                return !replacementLayout.hasSameSourceLine(as: existingLayout)
-            }
-            prospective.append(replacement)
             do {
-                _ = try PDFInternalTextEditEngine.previewDocument(
+                verifiedPreview = try PDFTextEditPlanner.previewDocument(
                     sourceURL: sourceURL,
                     edits: prospective.filter { $0.storage.isInternal }
                 )
             } catch {
-                replacement.storage = .overlay(
-                    reason: "他の内部置換との組合せを安全に検証できませんでした: \(error.localizedDescription)"
-                )
+                notice("この変更を適用できませんでした。入力内容はそのまま残しています。")
+                return
             }
         }
 
@@ -1063,22 +1054,13 @@ final class EditorModel: ObservableObject {
             annotations: annotations,
             replacement: replacement,
             restoredAnnotations: restoredAnnotations
-        ))
+        ), verifiedPreview: verifiedPreview)
         selectedTarget = nil
         isInlineEditing = false
         editingReplacementID = nil
         replacementText = ""
         revision += 1
-        let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
-            ? "元フォントを再現できないため代替フォントで描画します。" : "")
-        let storageMessage: String
-        switch replacement.storage {
-        case .internalPDFium:
-            storageMessage = "画面と保存の両方でPDF内部の単一text objectを置換し、再読込検証します。"
-        case .overlay(let reason):
-            storageMessage = "白い重ね描きで保存します（\(reason)）。元の文字データはPDF内に残ります。背景が白でなければ白帯になります。画像・罫線・背景との干渉は完全には判定できません。墨消しには使えません。"
-        }
-        statusMessage = "文字を置換しました（出力 \(formattedPointSize(replacement.fontSize)) pt）。\(storageMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
+        statusMessage = "文字を変更しました。"
     }
 
     func moveSelection(by delta: CGPoint) {
@@ -1134,18 +1116,48 @@ final class EditorModel: ObservableObject {
     func deleteSelection() {
         guard mode == .replacement, let document, let target = selectedTarget,
               let page = document.page(at: target.pageIndex) else { return }
-        let result = PDFEditEngine.applyDeletion(to: page, target: target)
+        let previousApplied = editingReplacementID.flatMap { id in
+            edits.last(where: { $0.replacement?.id == id })
+        }
+        var deletion = ReplacementEdit(deleting: target, id: previousApplied?.replacement?.id ?? UUID())
+        var verifiedPreview: PDFDocument?
+        if let sourceURL {
+            deletion.storage = PDFTextEditPlanner.storage(sourceURL: sourceURL, edit: deletion)
+            let prospective = activeReplacements.filter { $0.id != deletion.id } + [deletion]
+            do {
+                try PDFExportEngine.validateEditPaths(prospective)
+            } catch {
+                notice("変更した文字が重なっています。一方の変更を取り消してください。")
+                return
+            }
+            if deletion.storage.isInternal {
+                do {
+                    verifiedPreview = try PDFTextEditPlanner.previewDocument(
+                        sourceURL: sourceURL,
+                        edits: prospective.filter { $0.storage.isInternal }
+                    )
+                } catch {
+                    notice("この箇所の文字を削除できませんでした。")
+                    return
+                }
+            }
+        }
+        let restoredAnnotations = previousApplied?.annotations ?? []
+        for annotation in restoredAnnotations { page.removeAnnotation(annotation) }
+        let annotation = ReplacementTextAnnotation(edit: deletion)
+        page.addAnnotation(annotation)
         recordEdit(AppliedEdit(
             pageIndex: target.pageIndex,
-            annotations: [result.annotation],
-            replacement: result.edit
-        ))
+            annotations: [annotation],
+            replacement: deletion,
+            restoredAnnotations: restoredAnnotations
+        ), verifiedPreview: verifiedPreview)
         selectedTarget = nil
         isInlineEditing = false
         editingReplacementID = nil
         replacementText = ""
         revision += 1
-        statusMessage = "選択した文字を表示から削除しました。確認後に編集済みPDFを書き出してください。"
+        statusMessage = "文字を削除しました。"
     }
 
     func applyInsertion() {
@@ -1313,7 +1325,7 @@ final class EditorModel: ObservableObject {
             )
             statusMessage = "保存しました: \(outputURL.lastPathComponent)"
         } catch PDFExportError.overlappingEditPaths {
-            notice("内部置換と重ね描きが同じ位置で重なるため保存できません。編集位置を離すか、一方の編集を取り消してください。")
+            notice("変更した文字が重なっています。位置を離すか、一方の変更を取り消してください。")
         } catch {
             notice("PDFの保存に失敗しました。")
         }
@@ -1520,13 +1532,13 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    private func recordEdit(_ edit: AppliedEdit) {
+    private func recordEdit(_ edit: AppliedEdit, verifiedPreview: PDFDocument? = nil) {
         edits.append(edit)
         redoEdits.removeAll()
-        refreshPreviewDocument()
+        refreshPreviewDocument(using: verifiedPreview)
     }
 
-    private func refreshPreviewDocument() {
+    private func refreshPreviewDocument(using verifiedPreview: PDFDocument? = nil) {
         guard let sourceURL else {
             previewDocument = nil
             previewInsertionDraftAnnotation = nil
@@ -1540,10 +1552,12 @@ final class EditorModel: ObservableObject {
             return
         }
         do {
-            let preview = try PDFInternalTextEditEngine.previewDocument(
-                sourceURL: sourceURL,
-                edits: internalEdits
-            )
+            let preview: PDFDocument
+            if let verifiedPreview {
+                preview = verifiedPreview
+            } else {
+                preview = try PDFTextEditPlanner.previewDocument(sourceURL: sourceURL, edits: internalEdits)
+            }
             for pageIndex in 0..<preview.pageCount {
                 guard let page = preview.page(at: pageIndex) else { continue }
                 for annotation in page.annotations where
@@ -1580,7 +1594,7 @@ final class EditorModel: ObservableObject {
         } catch {
             previewDocument = nil
             previewInsertionDraftAnnotation = nil
-            notice("PDF内部置換のプレビューを再生成できませんでした: \(error.localizedDescription)")
+            notice("編集結果を表示できませんでした。もう一度お試しください。")
         }
     }
 

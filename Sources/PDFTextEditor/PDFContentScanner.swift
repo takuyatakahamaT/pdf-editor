@@ -16,6 +16,13 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "cm", opConcatCTM)
     CGPDFOperatorTableSetCallback(table, "W", opSetClip)
     CGPDFOperatorTableSetCallback(table, "W*", opSetClip)
+    CGPDFOperatorTableSetCallback(table, "re", opPathRectangle)
+    for operation in ["m", "l", "c", "v", "y", "h"] {
+        CGPDFOperatorTableSetCallback(table, operation, opUnknownPath)
+    }
+    for operation in ["n", "S", "s", "f", "F", "f*", "B", "B*", "b", "b*"] {
+        CGPDFOperatorTableSetCallback(table, operation, opFinishPath)
+    }
     CGPDFOperatorTableSetCallback(table, "Do", opInvokeXObject)
     CGPDFOperatorTableSetCallback(table, "BT", opBeginText)
     CGPDFOperatorTableSetCallback(table, "Tf", opSetFont)
@@ -47,6 +54,26 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
 
 private func opSetClip(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     state(from: info)?.markClippingActive()
+}
+
+private func opPathRectangle(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = state(from: info) else { return }
+    var height: CGPDFReal = 0, width: CGPDFReal = 0, y: CGPDFReal = 0, x: CGPDFReal = 0
+    guard CGPDFScannerPopNumber(scanner, &height), CGPDFScannerPopNumber(scanner, &width),
+          CGPDFScannerPopNumber(scanner, &y), CGPDFScannerPopNumber(scanner, &x),
+          [x, y, width, height].allSatisfy(\.isFinite) else {
+        state.markPathUnknown()
+        return
+    }
+    state.recordPathRectangle(CGRect(x: x, y: y, width: width, height: height))
+}
+
+private func opUnknownPath(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    state(from: info)?.markPathUnknown()
+}
+
+private func opFinishPath(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    state(from: info)?.finishPath()
 }
 
 private func state(from info: UnsafeMutableRawPointer?) -> GlyphScanState? {
@@ -100,6 +127,7 @@ private func opInvokeXObject(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRa
     let savedTextLineMatrix = state.tlm
     let savedMarkedContentStack = state.markedContentStack
     let savedSkippingMarkedContentCount = state.skippingMarkedContentCount
+    let savedPath = state.isolateFormPath()
     state.pushGraphicsState()
     defer {
         state.popGraphicsState()
@@ -107,6 +135,7 @@ private func opInvokeXObject(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRa
         state.tlm = savedTextLineMatrix
         state.markedContentStack = savedMarkedContentStack
         state.skippingMarkedContentCount = savedSkippingMarkedContentCount
+        state.restoreFormPath(savedPath)
     }
 
     let formMatrix = formTransformationMatrix(formDictionary)
@@ -421,7 +450,8 @@ private func showString(
                 showOperationID: operationID,
                 isInsideForm: state.formDepth > 0,
                 isInsideMarkedContent: !state.markedContentStack.isEmpty,
-                isClipped: state.clippingIsActive
+                isClipped: state.clippingAffectsGlyph(in: box, fontSize: effectiveSize),
+                sourceCharacterCode: code
             ))
         }
     }

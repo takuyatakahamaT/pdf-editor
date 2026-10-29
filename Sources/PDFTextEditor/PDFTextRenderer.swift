@@ -9,9 +9,66 @@ import PDFKit
 /// 置換文字は指定point sizeのまま描く。収まらない候補は確定前に拒否し、
 /// rendererが暗黙に縮小・変形・clipすることはない。
 enum PDFTextRenderer {
+    struct EmittedGlyph {
+        let text: String
+        let origin: CGPoint
+        let fontName: String
+        let fontSize: CGFloat
+    }
+
+    /// 自分が描く文字だけの対応表。原本の不明な文字を推測で補完する用途には使わない。
+    static func emittedGlyphs(for edit: ReplacementEdit) throws -> [EmittedGlyph] {
+        let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        if let exact = edit.exactGlyphs, !exact.isEmpty {
+            let characters = Array(edit.replacement)
+            guard exact.count == characters.count else { throw PDFExportError.cannotCreateContext }
+            var x = edit.bounds.minX
+            return zip(characters, exact).map { character, glyph in
+                defer { x += glyph.emWidth * CTFontGetSize(font) }
+                return EmittedGlyph(text: String(character), origin: CGPoint(x: x, y: edit.baseline),
+                                    fontName: CTFontCopyPostScriptName(font) as String, fontSize: CTFontGetSize(font))
+            }
+        }
+        let line = renderPlan(text: edit.replacement, font: font, color: edit.fontColor, maxWidth: edit.maxWidth).line
+        let string = edit.replacement as NSString
+        var result: [EmittedGlyph] = []
+        for case let run as CTRun in CTLineGetGlyphRuns(line) as NSArray {
+            let count = CTRunGetGlyphCount(run)
+            let attributes = CTRunGetAttributes(run) as NSDictionary
+            guard let value = attributes[kCTFontAttributeName],
+                  CFGetTypeID(value as CFTypeRef) == CTFontGetTypeID() else {
+                throw PDFExportError.cannotCreateContext
+            }
+            let runFont = value as! CTFont
+            var positions = [CGPoint](repeating: .zero, count: count)
+            var indices = [CFIndex](repeating: 0, count: count)
+            CTRunGetPositions(run, CFRange(location: 0, length: 0), &positions)
+            CTRunGetStringIndices(run, CFRange(location: 0, length: 0), &indices)
+            let range = CTRunGetStringRange(run)
+            for index in 0..<count {
+                let start = indices[index]
+                let end = index + 1 < count ? indices[index + 1] : range.location + range.length
+                guard start >= 0, end > start, end <= string.length else {
+                    throw PDFExportError.cannotCreateContext
+                }
+                result.append(EmittedGlyph(
+                    text: string.substring(with: NSRange(location: start, length: end - start)),
+                    origin: CGPoint(x: edit.bounds.minX + positions[index].x, y: edit.baseline + positions[index].y),
+                    fontName: CTFontCopyPostScriptName(runFont) as String, fontSize: CTFontGetSize(runFont)
+                ))
+            }
+        }
+        return result
+    }
+
     static func draw(_ edit: ReplacementEdit, in context: CGContext) {
         context.saveGState()
         defer { context.restoreGState() }
+
+        if edit.storage.needsForeground {
+            drawReplacementForeground(edit, in: context)
+            return
+        }
 
         if edit.destinationOrigin != nil {
             drawMoved(edit, in: context)
@@ -32,6 +89,11 @@ enum PDFTextRenderer {
         context.setFillColor(NSColor.white.cgColor)
         context.fill(edit.coverBounds)
 
+        drawReplacementForeground(edit, in: context)
+    }
+
+    /// 元文字は別工程で除去済み。背景や罫線に触れず、確定した書体だけを描く。
+    private static func drawReplacementForeground(_ edit: ReplacementEdit, in context: CGContext) {
         guard !edit.replacement.isEmpty else { return }
 
         if let font = edit.resolvedFont, let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
@@ -47,7 +109,16 @@ enum PDFTextRenderer {
 
         context.translateBy(x: edit.bounds.minX, y: edit.baseline)
         context.setFillColor(edit.fontColor.cgColor)
-        drawGlyphOutlines(for: plan.line, in: context)
+        if edit.storage.needsForeground {
+            // 新しいフォントは検索層だけでなく可視の文字として埋め込む。
+            // 保存後に再編集するときも元文字の除去を継続できるようにする。
+            context.textMatrix = .identity
+            context.textPosition = .zero
+            context.setTextDrawingMode(.fill)
+            CTLineDraw(plan.line, context)
+        } else {
+            drawGlyphOutlines(for: plan.line, in: context)
+        }
     }
 
     private static func drawMoved(_ edit: ReplacementEdit, in context: CGContext) {
@@ -370,7 +441,7 @@ enum PDFTextRenderer {
         if let destination = edit.destinationOrigin {
             requiredEnd = destination.x + renderedWidth(of: edit)
             availableEnd = pageBounds.maxX
-        } else if let layout = edit.lineLayout {
+        } else if let layout = edit.lineLayout, !edit.storage.needsForeground {
             if edit.composesLineEdits,
                let plan = composedReflowPlan(
                    layout: layout,

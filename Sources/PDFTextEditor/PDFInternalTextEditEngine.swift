@@ -27,6 +27,143 @@ enum PDFInternalTextEditError: LocalizedError {
 enum PDFInternalTextEditEngine {
     private static let lock = NSLock()
 
+    /// QuartzがToUnicodeを省略した可視fontへ、実際の描画とPDFiumのUnicodeが
+    /// 一対一に一致した対応だけを返す。fontKeyはページのresource名であり、
+    /// Form内のfontや不可視の検索層をページ直下のfontへ混ぜない。
+    static func visibleUnicodeMappings(sourceURL: URL) throws -> [Int: [String: [Int: String]]] {
+        lock.lock()
+        defer { lock.unlock() }
+        let api = try PDFiumAPI.load()
+        api.initialize()
+        defer { api.destroyLibrary() }
+        let document = try api.openDocument(sourceURL)
+        defer { api.closeDocument(document) }
+        guard let pdf = PDFDocument(url: sourceURL), pdf.pageCount == Int(api.pageCount(document)) else {
+            throw PDFInternalTextEditError.failed("可視文字のページ情報を照合できません。")
+        }
+
+        struct VisibleCharacter {
+            let index: Int32
+            let unicode: String
+            let origin: CGPoint
+            let size: CGFloat
+            let color: ObjectColor
+            let font: PDFiumHandle
+            let fontName: String
+        }
+        var result: [Int: [String: [Int: String]]] = [:]
+        for pageIndex in 0..<pdf.pageCount {
+            guard let pdfPage = pdf.page(at: pageIndex), pdfPage.rotation == 0 else { continue }
+            guard let page = api.loadPage(document, Int32(pageIndex)) else {
+                throw PDFInternalTextEditError.failed("可視文字のページを開けません。")
+            }
+            defer { api.closePage(page) }
+            guard let textPage = api.loadTextPage(page) else {
+                throw PDFInternalTextEditError.failed("可視文字のUnicodeを取得できません。")
+            }
+            defer { api.closeTextPage(textPage) }
+            let index = PDFGlyphIndex.makeIndex(for: pdfPage)
+            var fontsByObject: [UInt: PDFiumHandle] = [:]
+            for objectIndex in 0..<max(0, api.pageObjectCount(page)) {
+                guard let object = api.pageObject(page, objectIndex),
+                      api.pageObjectType(object) == 1,
+                      api.textRenderMode(object) == 0,
+                      api.pageObjectHasTransparency(object) == 0,
+                      api.pageObjectMarkCount(object) == 0,
+                      api.clipPathCount(object) == 0,
+                      let font = api.textObjectFont(object) else { continue }
+                var matrix = PDFiumMatrix()
+                guard withUnsafeMutablePointer(to: &matrix, {
+                    api.pageObjectMatrix(object, UnsafeMutableRawPointer($0))
+                }) != 0, matrix.a.isFinite, matrix.a > 0,
+                    abs(matrix.a - matrix.d) <= 0.0001,
+                    abs(matrix.b) <= 0.0001, abs(matrix.c) <= 0.0001 else { continue }
+                fontsByObject[UInt(bitPattern: object)] = font
+            }
+            var characters: [VisibleCharacter] = []
+            for charIndex in 0..<max(0, api.textCountChars(textPage)) {
+                guard api.textIsGenerated(textPage, charIndex) == 0,
+                      api.textHasUnicodeMapError(textPage, charIndex) == 0,
+                      let object = api.textObjectForCharacter(textPage, charIndex),
+                      let font = fontsByObject[UInt(bitPattern: object)],
+                      let scalar = Unicode.Scalar(api.textUnicode(textPage, charIndex)),
+                      scalar.value != 0, !CharacterSet.controlCharacters.contains(scalar),
+                      let origin = api.characterOrigin(textPage, index: charIndex),
+                      abs(api.textCharAngle(textPage, charIndex)) <= 0.0001 else { continue }
+                var red: UInt32 = 0, green: UInt32 = 0, blue: UInt32 = 0, alpha: UInt32 = 0
+                let size = CGFloat(api.effectiveCharacterFontSize(textPage, index: charIndex))
+                guard size.isFinite, size > 0,
+                      api.textFillColor(textPage, charIndex, &red, &green, &blue, &alpha) != 0,
+                      alpha == 255 else { continue }
+                characters.append(VisibleCharacter(
+                    index: charIndex, unicode: String(scalar), origin: origin, size: size,
+                    color: ObjectColor(red: red, green: green, blue: blue, alpha: alpha),
+                    font: font, fontName: api.baseFontName(font)
+                ))
+            }
+
+            var mappings: [String: [Int: String]] = [:]
+            var rejected: [String: Set<Int>] = [:]
+            var claimed: [Int32: (fontKey: String, code: Int)] = [:]
+            for glyph in index.runs.flatMap(\.glyphs) where glyph.isVisible && !glyph.isInsideForm {
+                guard let code = glyph.sourceCharacterCode else { continue }
+                func reject() {
+                    rejected[glyph.fontKey, default: []].insert(code)
+                }
+                guard !glyph.isInsideMarkedContent, !glyph.isClipped,
+                      glyph.textRenderingMode == 0,
+                      let dictionary = index.fontDictionaries[glyph.fontKey],
+                      let color = glyph.fillColor.usingColorSpace(.deviceRGB) else {
+                    reject(); continue
+                }
+                var baseFont: UnsafePointer<CChar>?
+                guard CGPDFDictionaryGetName(dictionary, "BaseFont", &baseFont), let baseFont else {
+                    reject(); continue
+                }
+                let fontName = String(cString: baseFont)
+                let candidates = characters.filter {
+                    $0.fontName == fontName
+                        && abs($0.origin.x - glyph.advanceBox.minX) <= 0.05
+                        && abs($0.origin.y - glyph.baseline) <= 0.05
+                        && abs($0.size - glyph.fontSize) <= 0.05
+                        && abs(color.redComponent - CGFloat($0.color.red) / 255) <= 0.01
+                        && abs(color.greenComponent - CGFloat($0.color.green) / 255) <= 0.01
+                        && abs(color.blueComponent - CGFloat($0.color.blue) / 255) <= 0.01
+                        && abs(color.alphaComponent - CGFloat($0.color.alpha) / 255) <= 0.01
+                }
+                guard candidates.count == 1, let character = candidates.first,
+                      let scalar = character.unicode.unicodeScalars.first,
+                      glyph.text.isEmpty || glyph.text == character.unicode else {
+                    reject(); continue
+                }
+                // charcodeが同じfontの実glyphを指すことも確認する。UnicodeからGIDを推測しない。
+                var width: Float = 0
+                guard api.fontGlyphWidth(character.font, scalar.value, Float(character.size), &width) != 0,
+                      width.isFinite, width >= 0,
+                      abs(CGFloat(width) - glyph.advanceBox.width) <= 0.1,
+                      api.fontGlyphPath(character.font, scalar.value, Float(character.size)) != nil
+                        || character.unicode.unicodeScalars.allSatisfy({ isBlankUnicode($0.value) }) else {
+                    reject(); continue
+                }
+                if let previous = claimed[character.index] {
+                    rejected[previous.fontKey, default: []].insert(previous.code)
+                    reject(); continue
+                }
+                claimed[character.index] = (glyph.fontKey, code)
+                if let previous = mappings[glyph.fontKey]?[code], previous != character.unicode {
+                    reject(); continue
+                }
+                mappings[glyph.fontKey, default: [:]][code] = character.unicode
+            }
+            for (fontKey, codes) in rejected {
+                for code in codes { mappings[fontKey]?[code] = nil }
+            }
+            mappings = mappings.filter { !$0.value.isEmpty }
+            if !mappings.isEmpty { result[pageIndex] = mappings }
+        }
+        return result
+    }
+
     static func eligibility(sourceURL: URL, edit: ReplacementEdit) -> PDFInternalTextEligibility {
         let trialURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-pdfium-eligibility-\(UUID().uuidString).pdf")
@@ -34,7 +171,6 @@ enum PDFInternalTextEditEngine {
         var trialEdit = edit
         trialEdit.storage = .internalPDFium
         do {
-            try preflightEligibility(sourceURL: sourceURL, edit: edit)
             // 候補判定の時点でも保存・再読込検証まで完走させる。画面で内部置換と
             // 表示した後に初めて保存失敗する候補はoverlayへ留める。
             try apply(sourceURL: sourceURL, edits: [trialEdit], to: trialURL)
@@ -44,23 +180,6 @@ enum PDFInternalTextEditEngine {
         } catch {
             return .unsupported("PDFiumの照合中に不明なエラーが発生しました。")
         }
-    }
-
-    private static func preflightEligibility(sourceURL: URL, edit: ReplacementEdit) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let sourceDocument = PDFDocument(url: sourceURL),
-              let sourcePage = sourceDocument.page(at: edit.pageIndex), sourcePage.rotation == 0 else {
-            throw PDFInternalTextEditError.unsupported("回転ページは対象外です。")
-        }
-        let api = try PDFiumAPI.load()
-        api.initialize()
-        defer { api.destroyLibrary() }
-        let document = try api.openDocument(sourceURL)
-        defer { api.closeDocument(document) }
-        try validateDocument(document, api: api)
-        let fontEvidence = try sourceFontEvidence(sourceURL: sourceURL, edit: edit)
-        _ = try match(edit: edit, fontEvidence: fontEvidence, document: document, api: api)
     }
 
     /// 元PDFを変更せず、全編集を照合してから一時出力を作る。途中失敗時は出力へ書かない。
@@ -84,12 +203,11 @@ enum PDFInternalTextEditEngine {
         }) else {
             throw PDFInternalTextEditError.unsupported("回転ページは対象外です。")
         }
+        let edits = try expandedSourceRemovals(edits, sourcePDF: sourcePDF)
+        try validateEditSet(edits)
         let fontEvidenceByID = try Dictionary(uniqueKeysWithValues: edits.map { edit in
             (edit.id, try sourceFontEvidence(sourcePDF: sourcePDF, edit: edit))
         })
-        for edit in edits {
-            try requireUniqueSourceText(edit.sourceText, in: document, api: api)
-        }
         let grouped = Dictionary(grouping: edits, by: \.pageIndex)
         var loadedPages: [Int: PDFiumHandle] = [:]
         defer { loadedPages.values.forEach(api.closePage) }
@@ -122,13 +240,30 @@ enum PDFInternalTextEditEngine {
                 api.closeTextPage(textPage)
                 throw error
             }
-            let objectIDs = Set(matches.map { UInt(bitPattern: $0.object) })
-            guard objectIDs.count == matches.count else {
-                api.closeTextPage(textPage)
-                throw PDFInternalTextEditError.unsupported("同じtext objectへの複数編集は保存できません。")
-            }
             api.closeTextPage(textPage)
-            for (edit, matched) in zip(pageEdits, matches) {
+            // 独立show末尾なら、元streamとfont codeを保って局所置換できる。
+            // ICCBased色や対象外fontのUnicodeを再生成せず文字列tokenだけを書き換える。
+            if sourcePDF.pageCount == 1, pageEdits.count == edits.count,
+               Set(matches.map(\.objectIndex)).count == matches.count,
+               let data = try PDFContentTextRemovalWriter.rewritingTextShows(
+                   sourceURL: sourceURL, sourcePDF: sourcePDF, edits: edits
+               ) {
+                try writeVerified(data: data, sourceURL: sourceURL, outputURL: outputURL, edits: edits, api: api, preservesRetainedGrouping: true)
+                return
+            }
+            let objectEdits = Dictionary(grouping: Array(zip(pageEdits, matches)), by: { $0.1.objectIndex })
+            // 後方から適用し、object分割や削除による後続indexのずれを避ける。
+            for (_, group) in objectEdits.sorted(by: { $0.key > $1.key }) {
+                if group.count > 1 {
+                    try reconstructCombinedTextObject(group, document: document, page: page, api: api)
+                    continue
+                }
+                guard let (edit, matched) = group.first else { continue }
+                if edit.replacement.isEmpty || matched.requiresReconstruction {
+                    let font = try reconstructTextObject(edit: edit, match: matched, document: document, page: page, api: api)
+                    if let font { replacementFonts.append(font) }
+                    continue
+                }
                 if let fontData = matched.fontEvidence.replacementFontData {
                     replacementFonts.append(try replaceTextObject(
                         edit: edit,
@@ -164,15 +299,159 @@ enum PDFInternalTextEditEngine {
         guard writer.save(document: document, api: api) else {
             throw PDFInternalTextEditError.failed("PDFiumがPDFを書き出せませんでした。")
         }
+        try writeVerified(data: writer.data, sourceURL: sourceURL, outputURL: outputURL, edits: edits, api: api)
+    }
+
+    private static func writeVerified(
+        data: Data, sourceURL: URL, outputURL: URL, edits: [ReplacementEdit], api: PDFiumAPI,
+        preservesRetainedGrouping: Bool = false
+    ) throws {
         let stagedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-editor-pdfium-stage-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: stagedURL) }
-        do { try writer.data.write(to: stagedURL, options: .atomic) }
+        do { try data.write(to: stagedURL, options: .atomic) }
         catch { throw PDFInternalTextEditError.failed("一時PDFを書き出せませんでした。") }
 
-        try verify(sourceURL: sourceURL, outputURL: stagedURL, edits: edits, api: api, requireObjectGeometry: true)
-        do { try writer.data.write(to: outputURL, options: .atomic) }
+        try verify(sourceURL: sourceURL, outputURL: stagedURL, edits: edits, api: api, requireObjectGeometry: true, preservesRetainedGrouping: preservesRetainedGrouping)
+        do { try data.write(to: outputURL, options: .atomic) }
         catch { throw PDFInternalTextEditError.failed("検証済みPDFを一時出力へ配置できませんでした。") }
+    }
+
+    /// 同じobject内の非重複編集を、同じ原本座標から一度だけ再構成する。
+    private static func reconstructCombinedTextObject(
+        _ edits: [(ReplacementEdit, Match)],
+        document: PDFiumHandle, page: PDFiumHandle, api: PDFiumAPI
+    ) throws {
+        guard let first = edits.first, let sourceFont = api.textObjectFont(first.1.object) else {
+            throw PDFInternalTextEditError.failed("集約対象の元fontを取得できません。")
+        }
+        var selectedIndices = Set<Int32>()
+        for (_, match) in edits {
+            guard selectedIndices.isDisjoint(with: match.selectedCharacterIndices) else {
+                throw PDFInternalTextEditError.unsupported("同じ文字範囲への複数編集は保存できません。")
+            }
+            guard match.fontEvidence.replacementFontData == nil else {
+                throw PDFInternalTextEditError.unsupported("同じobject内で別subsetのfontを混ぜる複数編集は対象外です。")
+            }
+            selectedIndices.formUnion(match.selectedCharacterIndices)
+        }
+        var pending: [(index: Int32, object: PDFiumHandle)] = []
+        defer { pending.forEach { api.destroyPageObject($0.object) } }
+        for glyph in first.1.retainedGlyphs where !selectedIndices.contains(glyph.sourceIndex) {
+            let object = try createPositionedObject(
+                document: document, font: sourceFont, size: first.0.sourceFontSize,
+                codes: [glyph.code], origin: glyph.origin, color: first.1.fillColor, api: api
+            )
+            pending.append((glyph.sourceIndex, object))
+        }
+        for (edit, match) in edits where !edit.replacement.isEmpty {
+            guard let firstIndex = match.selectedCharacterIndices.min() else {
+                throw PDFInternalTextEditError.failed("集約する選択文字位置がありません。")
+            }
+            let object = try createPositionedObject(
+                document: document, font: sourceFont, size: edit.sourceFontSize,
+                codes: match.fontEvidence.replacementCharcodes ?? match.fontEvidence.replacementGlyphs,
+                origin: match.sourceOrigin, color: match.fillColor, api: api
+            )
+            pending.append((firstIndex, object))
+        }
+        guard api.removePageObject(page, first.1.object) != 0 else {
+            throw PDFInternalTextEditError.failed("集約対象の元objectを外せませんでした。")
+        }
+        api.destroyPageObject(first.1.object)
+        pending.sort { $0.index < $1.index }
+        var outputIndex = Int(first.1.objectIndex)
+        while !pending.isEmpty {
+            // InsertObjectAtIndexは失敗時にもobjectを解放するため、呼出前に手元の所有権を外す。
+            let item = pending.removeFirst()
+            guard api.insertPageObject(page, item.object, outputIndex) != 0 else {
+                throw PDFInternalTextEditError.failed("集約した文字objectを挿入できませんでした。")
+            }
+            outputIndex += 1
+        }
+    }
+
+    /// 選択外の文字を実originへ独立配置する。字間調整・Tc/Twを再推定しない。
+    private static func reconstructTextObject(
+        edit: ReplacementEdit,
+        match: Match,
+        document: PDFiumHandle,
+        page: PDFiumHandle,
+        api: PDFiumAPI
+    ) throws -> PDFiumHandle? {
+        guard let sourceFont = api.textObjectFont(match.object) else {
+            throw PDFInternalTextEditError.unsupported("元のPDF fontを保持できません。")
+        }
+        var pending: [(object: PDFiumHandle, before: Bool)] = []
+        defer { pending.forEach { api.destroyPageObject($0.object) } }
+        for glyph in match.retainedGlyphs {
+            let object = try createPositionedObject(
+                document: document, font: sourceFont, size: edit.sourceFontSize,
+                codes: [glyph.code], origin: glyph.origin, color: match.fillColor, api: api
+            )
+            pending.append((object, glyph.beforeSelection))
+        }
+        var replacementFont: PDFiumHandle?
+        var completed = false
+        defer { if !completed, let replacementFont { api.closeFont(replacementFont) } }
+        let hasReplacement = !edit.replacement.isEmpty
+        if !hasReplacement {
+            guard api.removePageObject(page, match.object) != 0 else {
+                throw PDFInternalTextEditError.failed("削除対象objectを外せませんでした。")
+            }
+            api.destroyPageObject(match.object)
+        } else if let fontData = match.fontEvidence.replacementFontData {
+            replacementFont = try replaceTextObject(edit: edit, match: match, fontData: fontData, document: document, page: page, api: api)
+        } else {
+            let codes = match.fontEvidence.replacementCharcodes ?? match.fontEvidence.replacementGlyphs
+            let object = try createPositionedObject(
+                document: document, font: sourceFont, size: edit.sourceFontSize,
+                codes: codes, origin: match.sourceOrigin, color: match.fillColor, api: api
+            )
+            guard api.removePageObject(page, match.object) != 0 else {
+                api.destroyPageObject(object)
+                throw PDFInternalTextEditError.failed("元のtext objectを外せませんでした。")
+            }
+            api.destroyPageObject(match.object)
+            guard api.insertPageObject(page, object, Int(match.objectIndex)) != 0 else {
+                throw PDFInternalTextEditError.failed("置換文字objectを挿入できませんでした。")
+            }
+        }
+        var position = Int(match.objectIndex)
+        // before → replacement → after のcontent順を維持する。
+        while !pending.isEmpty {
+            // 失敗時もPDFiumへ所有権が移る（pendingに残すと二重解放になる）。
+            let item = pending.removeFirst()
+            if hasReplacement && !item.before && position == Int(match.objectIndex) + match.retainedGlyphs.filter(\.beforeSelection).count {
+                position += 1
+            }
+            guard api.insertPageObject(page, item.object, position) != 0 else {
+                throw PDFInternalTextEditError.failed("未選択文字objectを挿入できませんでした。")
+            }
+            position += 1
+        }
+        completed = true
+        return replacementFont
+    }
+
+    private static func createPositionedObject(
+        document: PDFiumHandle, font: PDFiumHandle, size: CGFloat,
+        codes: [UInt32], origin: CGPoint, color: ObjectColor, api: PDFiumAPI
+    ) throws -> PDFiumHandle {
+        guard !codes.isEmpty, let object = api.createTextObject(document, font, Float(size)) else {
+            throw PDFInternalTextEditError.failed("文字objectを再構成できませんでした。")
+        }
+        var success = false
+        defer { if !success { api.destroyPageObject(object) } }
+        var matrix = PDFiumMatrix(a: 1, d: 1, e: Float(origin.x), f: Float(origin.y))
+        let didSet = codes.withUnsafeBufferPointer { api.setCharcodes(object, $0.baseAddress, $0.count) }
+        guard didSet != 0,
+              withUnsafePointer(to: &matrix, { api.setPageObjectMatrix(object, UnsafeRawPointer($0)) }) != 0,
+              api.setPageObjectFillColor(object, color.red, color.green, color.blue, color.alpha) != 0 else {
+            throw PDFInternalTextEditError.failed("再構成文字のcode・origin・色を設定できませんでした。")
+        }
+        success = true
+        return object
     }
 
     private static func replaceTextObject(
@@ -309,14 +588,95 @@ enum PDFInternalTextEditEngine {
         for edit in edits where !edit.storage.isInternal {
             throw PDFInternalTextEditError.failed("overlay編集が内部置換処理へ渡されました。")
         }
-        for (index, edit) in edits.enumerated() {
-            for other in edits.dropFirst(index + 1) {
-                if edit.sourceText.contains(other.replacement)
-                    || other.sourceText.contains(edit.replacement)
-                    || edit.replacement.contains(other.sourceText)
-                    || other.replacement.contains(edit.sourceText) {
-                    throw PDFInternalTextEditError.unsupported("置換文字列が別の内部編集と衝突します。")
+        guard Set(edits.map(\.id)).count == edits.count else {
+            throw PDFInternalTextEditError.unsupported("同じ編集が重複しています。")
+        }
+    }
+
+    /// UI上の選択は一つのまま、原文除去だけを元indexのshowごとへ分割する。
+    /// 通常置換は単一objectのまま扱い、複数showの新文字はplannerの前景描画へ渡す。
+    private static func expandedSourceRemovals(
+        _ edits: [ReplacementEdit], sourcePDF: PDFDocument
+    ) throws -> [ReplacementEdit] {
+        var indexes: [Int: PageTextIndex] = [:]
+        return try edits.flatMap { edit -> [ReplacementEdit] in
+            guard edit.replacement.isEmpty, !edit.sourceIsPlainTextObject else { return [edit] }
+            guard edit.kind == .replacement, edit.destinationOrigin == nil, !edit.composesLineEdits,
+                  edit.lineReplacements.count <= 1, !edit.sourceSelectionIsAmbiguous,
+                  edit.hasExplicitSourceMapping, let key = edit.sourceFontKey,
+                  let page = sourcePDF.page(at: edit.pageIndex),
+                  let color = edit.fontColor.usingColorSpace(.deviceRGB) else {
+                throw PDFInternalTextEditError.unsupported("複数showの削除対象を一意に照合できません。")
+            }
+            let scalars = Array(edit.sourceText.unicodeScalars)
+            guard !scalars.isEmpty, scalars.count == edit.sourceGlyphBounds.count else {
+                throw PDFInternalTextEditError.unsupported("複数showの元文字とbboxの対応がありません。")
+            }
+            let index: PageTextIndex
+            if let cached = indexes[edit.pageIndex] { index = cached }
+            else {
+                index = PDFGlyphIndex.makeIndex(for: page)
+                indexes[edit.pageIndex] = index
+            }
+            let glyphs = index.runs.flatMap(\.glyphs).filter(\.isVisible)
+            var selected: [ScannedGlyph] = []
+            var orders = Set<Int>()
+            for (scalar, box) in zip(scalars, edit.sourceGlyphBounds) {
+                let candidates = glyphs.filter {
+                    $0.fontKey == key && $0.advanceBox.approximatelyEquals(box, tolerance: 0.001)
                 }
+                guard candidates.count == 1, let glyph = candidates.first,
+                      glyph.text == String(scalar), glyph.hasExplicitToUnicodeMapping,
+                      glyph.sourceCharacterCode != nil, glyph.showOperationID >= 0,
+                      glyph.showOperator != .unknown, glyph.textRenderingMode == 0,
+                      !glyph.isInsideForm, !glyph.isInsideMarkedContent, !glyph.isClipped,
+                      abs(glyph.fontSize - edit.sourceFontSize) <= 0.01,
+                      abs(glyph.baseline - edit.baseline) <= 0.01,
+                      let glyphColor = glyph.fillColor.usingColorSpace(.deviceRGB),
+                      abs(glyphColor.redComponent - color.redComponent) <= 0.01,
+                      abs(glyphColor.greenComponent - color.greenComponent) <= 0.01,
+                      abs(glyphColor.blueComponent - color.blueComponent) <= 0.01,
+                      abs(glyphColor.alphaComponent - color.alphaComponent) <= 0.01,
+                      orders.insert(glyph.paintOrder).inserted else {
+                    throw PDFInternalTextEditError.unsupported("複数showの元文字・位置・font・styleが一致しません。")
+                }
+                selected.append(glyph)
+            }
+            guard !glyphs.contains(where: { glyph in
+                !orders.contains(glyph.paintOrder)
+                    && selected.contains(where: { $0.advanceBox.intersects(glyph.advanceBox) })
+            }) else {
+                throw PDFInternalTextEditError.unsupported("複数showの選択位置に別の可視文字が重なっています。")
+            }
+            let byOperation = Dictionary(grouping: glyphs, by: \.showOperationID)
+            var groups: [[ScannedGlyph]] = []
+            for glyph in selected {
+                if let last = groups.last?.last,
+                   last.showOperationID == glyph.showOperationID,
+                   let operationGlyphs = byOperation[glyph.showOperationID]?.sorted(by: { $0.paintOrder < $1.paintOrder }),
+                   let previous = operationGlyphs.firstIndex(where: { $0.paintOrder == last.paintOrder }),
+                   previous + 1 < operationGlyphs.count,
+                   operationGlyphs[previous + 1].paintOrder == glyph.paintOrder {
+                    groups[groups.count - 1].append(glyph)
+                } else { groups.append([glyph]) }
+            }
+            return groups.enumerated().map { position, group in
+                let first = group[0]
+                let bounds = group.dropFirst().reduce(first.advanceBox) { $0.union($1.advanceBox) }
+                let target = TextTarget(
+                    pageIndex: edit.pageIndex, bounds: bounds, baseline: first.baseline,
+                    originalText: group.map(\.text).joined(), fontSize: first.fontSize,
+                    fontColor: first.fillColor, fontKey: first.fontKey, fontIsExact: edit.sourceFontIsExact,
+                    coverBounds: bounds, maxWidth: bounds.width,
+                    hasExplicitSourceMapping: true,
+                    fontPostScriptNameOverride: edit.fontPostScriptNameOverride,
+                    nearbyTextBounds: edit.sourceNearbyTextBounds,
+                    sourceGlyphBounds: group.map(\.advanceBox),
+                    sourceSelectionIsAmbiguous: false, sourceIsPlainTextObject: true
+                )
+                var removal = ReplacementEdit(deleting: target, id: position == 0 ? edit.id : UUID())
+                removal.storage = edit.storage
+                return removal
             }
         }
     }
@@ -340,6 +700,9 @@ enum PDFInternalTextEditEngine {
         let savedReplacementGlyphs: [UInt32]
         let sourceDeclaredWidths: [CGFloat]
         let replacementDeclaredWidths: [CGFloat]
+        let sourceCodesByUnicode: [UInt32: UInt32]
+        let sourceWidthsByUnicode: [UInt32: CGFloat]
+        var rawCharacterSpacing: CGFloat = 0
     }
 
     private struct ReplacementFontCandidate {
@@ -366,13 +729,20 @@ enum PDFInternalTextEditEngine {
         let fillColor: ObjectColor
         let sourceWidth: CGFloat
         let replacementWidth: CGFloat
+        let retainedGlyphs: [RetainedGlyph]
+        let requiresReconstruction: Bool
+        let sourceFontName: String
+        let selectedCharacterIndices: Set<Int32>
+        let replacementAdvances: [CGFloat]
     }
 
-    private static func sourceFontEvidence(sourceURL: URL, edit: ReplacementEdit) throws -> SourceFontEvidence {
-        guard let sourcePDF = PDFDocument(url: sourceURL) else {
-            throw PDFInternalTextEditError.unsupported("元PDFのフォント資源を開けません。")
-        }
-        return try sourceFontEvidence(sourcePDF: sourcePDF, edit: edit)
+    private struct RetainedGlyph {
+        let unicode: UInt32
+        let code: UInt32
+        let origin: CGPoint
+        let beforeSelection: Bool
+        let sourceIndex: Int32
+        let declaredWidth: CGFloat
     }
 
     private static func sourceFontEvidence(
@@ -385,9 +755,44 @@ enum PDFInternalTextEditEngine {
             throw PDFInternalTextEditError.unsupported("元フォント資源を一意に取得できません。")
         }
         let info = PDFFontInfoLoader.load(from: fontDictionary)
+        let rawCharacterSpacing: CGFloat
+        if let firstBox = edit.sourceGlyphBounds.first,
+           let first = PDFGlyphIndex.makeIndex(for: page).runs.flatMap(\.glyphs).first(where: {
+               $0.fontKey == fontKey && abs($0.advanceBox.minX - firstBox.minX) <= 0.001
+                   && abs($0.advanceBox.minY - firstBox.minY) <= 0.001
+           }), let code = first.sourceCharacterCode {
+            rawCharacterSpacing = first.advance - info.width(for: code) * edit.sourceFontSize
+        } else { rawCharacterSpacing = 0 }
         let description = PDFEmbeddedFontLoader.describe(fontDict: fontDictionary)
+        // 同じUnicodeへ複数codeが写るfontは逆引きで元glyphを推測しない。
+        let codeGroups = Dictionary(grouping: info.toUnicode.filter { $0.value.unicodeScalars.count == 1 }, by: { $0.value })
+        var sourceCodesByUnicode: [UInt32: UInt32] = [:]
+        var sourceWidthsByUnicode: [UInt32: CGFloat] = [:]
+        for (text, entries) in codeGroups where entries.count == 1 {
+            guard let entry = entries.first, let scalar = text.unicodeScalars.first,
+                  info.explicitToUnicodeCodes.contains(entry.key), entry.key >= 0 else { continue }
+            sourceCodesByUnicode[scalar.value] = UInt32(entry.key)
+            sourceWidthsByUnicode[scalar.value] = info.width(for: entry.key) * edit.sourceFontSize
+        }
 
         if description.hasEmbeddedProgram {
+            if edit.replacement.isEmpty {
+                // 削除と選択外glyphの保持には、元PDF fontの一意なcharcodeを使う。
+                // CFFをCoreTextのGIDへ再解釈せず、後段でPDFiumの実path/widthと照合する。
+                let scalars = Array(edit.sourceText.unicodeScalars)
+                let codes = scalars.compactMap { sourceCodesByUnicode[$0.value] }
+                let widths = scalars.compactMap { sourceWidthsByUnicode[$0.value] }
+                guard !scalars.isEmpty, codes.count == scalars.count, widths.count == scalars.count else {
+                    throw PDFInternalTextEditError.unsupported("削除対象の一意な明示ToUnicode charcodeを取得できません。")
+                }
+                return SourceFontEvidence(
+                    isEmbedded: true, replacementCharcodes: [], replacementFontData: nil,
+                    replacementTrueTypeGlyphs: nil, sourceGlyphs: scalars.map(\.value), replacementGlyphs: [],
+                    savedReplacementGlyphs: [], sourceDeclaredWidths: widths,
+                    replacementDeclaredWidths: [], sourceCodesByUnicode: sourceCodesByUnicode,
+                    sourceWidthsByUnicode: sourceWidthsByUnicode, rawCharacterSpacing: rawCharacterSpacing
+                )
+            }
             guard let embeddedFont = PDFEmbeddedFontLoader.loadEmbeddedFont(
                 fontDict: fontDictionary,
                 size: edit.sourceFontSize
@@ -432,7 +837,10 @@ enum PDFInternalTextEditEngine {
 
             let replacementExact: [(glyph: CGGlyph, emWidth: CGFloat)]
             let replacementFontData: Data?
-            if replacementHasExplicitCodes {
+            if replacementCharacters.isEmpty {
+                replacementExact = []
+                replacementFontData = nil
+            } else if replacementHasExplicitCodes {
                 guard replacementCodes.count == replacementCharacters.count,
                       let resolution = PDFEmbeddedFontLoader.embeddedFontResolution(
                           font: embeddedFont,
@@ -468,14 +876,15 @@ enum PDFInternalTextEditEngine {
                 replacementCharcodes: replacementHasExplicitCodes ? replacementCodes.map(UInt32.init) : nil,
                 replacementFontData: replacementFontData,
                 replacementTrueTypeGlyphs: replacementHasExplicitCodes ? nil : replacementExact.map(\.glyph),
-                // PDFiumのFont APIは当該PDF font内のglyph識別子（文字コード）を受ける。
-                // CoreText側のexactGlyphsはcode→実GIDが一意である証明にだけ使う。
-                sourceGlyphs: sourceCodes.map(UInt32.init),
-                replacementGlyphs: replacementHasExplicitCodes ? replacementCodes.map(UInt32.init) : [],
-                savedReplacementGlyphs: replacementHasExplicitCodes
-                    ? replacementCodes.map(UInt32.init) : replacementExact.map { UInt32($0.glyph) },
+                // FPDFFont_GetGlyphPath/WidthはUnicodeからfont内charcodeへ逆引きする。
+                // SetCharcodesの実code、CoreTextのGID証明とは別に保持する。
+                sourceGlyphs: edit.sourceText.unicodeScalars.map(\.value),
+                replacementGlyphs: replacementHasExplicitCodes ? edit.replacement.unicodeScalars.map(\.value) : [],
+                savedReplacementGlyphs: edit.replacement.unicodeScalars.map(\.value),
                 sourceDeclaredWidths: sourceExact.map { $0.emWidth * edit.sourceFontSize },
-                replacementDeclaredWidths: replacementExact.map { $0.emWidth * edit.sourceFontSize }
+                replacementDeclaredWidths: replacementExact.map { $0.emWidth * edit.sourceFontSize },
+                sourceCodesByUnicode: sourceCodesByUnicode,
+                sourceWidthsByUnicode: sourceWidthsByUnicode, rawCharacterSpacing: rawCharacterSpacing
             )
         }
 
@@ -493,7 +902,9 @@ enum PDFInternalTextEditEngine {
         let replacementScalars = Array(edit.replacement.unicodeScalars)
         guard sourceScalars.count == edit.sourceText.count,
               replacementScalars.count == edit.replacement.count,
-              sourceScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }),
+              sourceScalars.allSatisfy({
+                  ((edit.replacement.isEmpty ? 0x20 : 0x21)...0x7E).contains($0.value)
+              }),
               replacementScalars.allSatisfy({ (0x21...0x7E).contains($0.value) }) else {
             throw PDFInternalTextEditError.unsupported(
                 "非埋込のPDF標準14書体は空白を含まないASCII glyphだけを証明できます。"
@@ -514,7 +925,9 @@ enum PDFInternalTextEditEngine {
             replacementGlyphs: replacementScalars.map(\.value),
             savedReplacementGlyphs: replacementScalars.map(\.value),
             sourceDeclaredWidths: widths(for: sourceScalars),
-            replacementDeclaredWidths: widths(for: replacementScalars)
+            replacementDeclaredWidths: widths(for: replacementScalars),
+            sourceCodesByUnicode: sourceCodesByUnicode,
+            sourceWidthsByUnicode: sourceWidthsByUnicode, rawCharacterSpacing: rawCharacterSpacing
         )
     }
 
@@ -596,40 +1009,12 @@ enum PDFInternalTextEditEngine {
         document: PDFiumHandle,
         api: PDFiumAPI
     ) throws -> Match {
-        try requireUniqueSourceText(edit.sourceText, in: document, api: api)
         return try matchByLoadingPage(
             edit: edit,
             fontEvidence: fontEvidence,
             document: document,
             api: api
         )
-    }
-
-    private static func requireUniqueSourceText(
-        _ sourceText: String,
-        in document: PDFiumHandle,
-        api: PDFiumAPI
-    ) throws {
-        var occurrences = 0
-        let pageCount = api.pageCount(document)
-        guard pageCount > 0 else {
-            throw PDFInternalTextEditError.unsupported("文書のページ数を検証できません。")
-        }
-        for pageIndex in 0..<pageCount {
-            guard let page = api.loadPage(document, pageIndex) else {
-                throw PDFInternalTextEditError.unsupported("全ページの文字を検証できません。")
-            }
-            guard let textPage = api.loadTextPage(page) else {
-                api.closePage(page)
-                throw PDFInternalTextEditError.unsupported("全ページの文字を検証できません。")
-            }
-            occurrences += api.extractedText(textPage).components(separatedBy: sourceText).count - 1
-            api.closeTextPage(textPage)
-            api.closePage(page)
-        }
-        guard occurrences == 1 else {
-            throw PDFInternalTextEditError.unsupported("元文字列が文書内に複数あるか、抽出結果と一致しません。")
-        }
     }
 
     private static func matchByLoadingPage(
@@ -670,18 +1055,18 @@ enum PDFInternalTextEditEngine {
             throw PDFInternalTextEditError.unsupported("選択位置に別の可視文字が重なっており対象objectが曖昧です。")
         }
         guard edit.sourceIsPlainTextObject else {
-            throw PDFInternalTextEditError.unsupported("単一Tjまたは単一文字列TJ以外（複数show・調整付きTJ・Form・marked content・clip）は対象外です。")
+            throw PDFInternalTextEditError.unsupported("複数show・Form・marked content・clipは対象外です。")
         }
         guard edit.hasExplicitSourceMapping else {
             throw PDFInternalTextEditError.unsupported("選択文字の明示ToUnicodeがありません。")
         }
         let sourceScalars = Array(edit.sourceText.unicodeScalars)
-        guard !sourceScalars.isEmpty, !edit.replacement.isEmpty,
+        guard !sourceScalars.isEmpty,
               sourceScalars.count == edit.sourceGlyphBounds.count else {
             throw PDFInternalTextEditError.unsupported("元文字の文字単位bboxを一意に照合できません。")
         }
-        guard edit.sourceText != edit.replacement, !edit.replacement.contains(edit.sourceText) else {
-            throw PDFInternalTextEditError.unsupported("元文字の不在を保存後に検証できない置換です。")
+        guard edit.sourceText != edit.replacement else {
+            throw PDFInternalTextEditError.unsupported("元文字と置換文字が同一です。")
         }
         guard edit.outputFontSelection == .automatic,
               abs(edit.fontSize - edit.sourceFontSize) <= 0.01 else {
@@ -690,20 +1075,12 @@ enum PDFInternalTextEditEngine {
         guard api.pageHasTransparency(page) == 0 else {
             throw PDFInternalTextEditError.unsupported("透明効果を含むページは対象外です。")
         }
-        let extractedPageText = api.extractedText(textPage)
-        guard extractedPageText.components(separatedBy: edit.sourceText).count - 1 == 1 else {
-            throw PDFInternalTextEditError.unsupported("元文字列がページ内に複数あり、対象objectが曖昧です。")
-        }
 
         let charCount = api.textCountChars(textPage)
         guard charCount > 0 else { throw PDFInternalTextEditError.unsupported("文字を抽出できません。") }
-        var indicesByObject: [UInt: [Int32]] = [:]
-        for index in 0..<charCount {
-            guard let object = api.textObjectForCharacter(textPage, index) else { continue }
-            indicesByObject[UInt(bitPattern: object), default: []].append(index)
-        }
+        let indicesByObject = api.characterIndicesByObject(textPage)
 
-        var matchingTextObjects: [(object: PDFiumHandle, index: Int32)] = []
+        var candidates: [Match] = []
         let objectCount = api.pageObjectCount(page)
         guard objectCount >= 0 else { throw PDFInternalTextEditError.unsupported("page objectを列挙できません。") }
         for objectIndex in 0..<objectCount {
@@ -711,45 +1088,24 @@ enum PDFInternalTextEditEngine {
                 throw PDFInternalTextEditError.unsupported("page objectを取得できません。")
             }
             guard api.pageObjectType(object) == 1 else { continue }
-            guard api.objectText(object, textPage: textPage) == edit.sourceText else { continue }
-            var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
-            guard api.pageObjectBounds(object, &left, &bottom, &right, &top) != 0 else { continue }
-            let objectBounds = CGRect(
-                x: CGFloat(left), y: CGFloat(bottom),
-                width: CGFloat(right - left), height: CGFloat(top - bottom)
-            )
-            let locationWindow = edit.bounds.insetBy(
-                dx: -edit.sourceFontSize * 0.5,
-                dy: -edit.sourceFontSize * 0.5
-            )
-            guard objectBounds.intersects(locationWindow),
-                  abs(objectBounds.midX - edit.bounds.midX) <= edit.sourceFontSize,
-                  abs(objectBounds.midY - edit.bounds.midY) <= edit.sourceFontSize else { continue }
-            matchingTextObjects.append((object, objectIndex))
-        }
-        guard matchingTextObjects.count == 1 else {
-            let reason = matchingTextObjects.isEmpty
-                ? "選択範囲と完全一致する単一text objectを証明できません。"
-                : "同じ文字・位置のtext objectが複数あり曖昧です。"
-            throw PDFInternalTextEditError.unsupported(reason)
-        }
-
-        var candidates: [Match] = []
-        for matched in matchingTextObjects {
-            let object = matched.object
             guard let charIndices = indicesByObject[UInt(bitPattern: object)],
-                  charIndices.count == sourceScalars.count else { continue }
-            if let match = try objectMatch(
+                  charIndices.count >= sourceScalars.count else { continue }
+            for start in 0...(charIndices.count - sourceScalars.count) {
+                let selection = Array(charIndices[start..<(start + sourceScalars.count)])
+                guard zip(selection, sourceScalars).allSatisfy({ api.textUnicode(textPage, $0.0) == $0.1.value }) else { continue }
+                if let match = try objectMatch(
                 object: object,
-                objectIndex: matched.index,
-                charIndices: charIndices,
+                objectIndex: objectIndex,
+                charIndices: selection,
+                allCharIndices: charIndices,
                 sourceScalars: sourceScalars,
                 fontEvidence: fontEvidence,
                 edit: edit,
                 textPage: textPage,
                 api: api
             ) {
-                candidates.append(match)
+                    candidates.append(match)
+                }
             }
         }
         guard candidates.count == 1, let candidate = candidates.first else {
@@ -764,6 +1120,7 @@ enum PDFInternalTextEditEngine {
         object: PDFiumHandle,
         objectIndex: Int32,
         charIndices: [Int32],
+        allCharIndices: [Int32],
         sourceScalars: [Unicode.Scalar],
         fontEvidence: SourceFontEvidence,
         edit: ReplacementEdit,
@@ -788,25 +1145,27 @@ enum PDFInternalTextEditEngine {
         let hasMatrix = withUnsafeMutablePointer(to: &matrix) {
             api.pageObjectMatrix(object, UnsafeMutableRawPointer($0))
         }
-        guard hasMatrix != 0,
-              abs(matrix.a - 1) <= 0.0001, abs(matrix.d - 1) <= 0.0001,
+        guard hasMatrix != 0, matrix.a.isFinite, matrix.a > 0,
+              abs(matrix.a - matrix.d) <= 0.0001,
               abs(matrix.b) <= 0.0001, abs(matrix.c) <= 0.0001 else {
             return reject("matrix=\(matrix)")
         }
         var objectFontSize: Float = 0
         guard api.textObjectFontSize(object, &objectFontSize) != 0,
-              abs(CGFloat(objectFontSize) - edit.sourceFontSize) <= 0.05,
+              objectFontSize > 0,
+              abs(CGFloat(objectFontSize * matrix.a) - edit.sourceFontSize) <= 0.05,
               let font = api.textObjectFont(object),
               (api.fontIsEmbedded(font) != 0) == fontEvidence.isEmbedded else {
             return reject("font sizeまたは埋込状態: object=\(objectFontSize), source=\(edit.sourceFontSize)")
         }
+        let effectiveFontSize = objectFontSize * matrix.a
 
         let sourceColor = edit.fontColor.usingColorSpace(.deviceRGB)
         for (offset, charIndex) in charIndices.enumerated() {
             guard api.textIsGenerated(textPage, charIndex) == 0,
                   api.textHasUnicodeMapError(textPage, charIndex) == 0,
                   api.textUnicode(textPage, charIndex) == sourceScalars[offset].value,
-                  abs(api.textFontSize(textPage, charIndex) - Double(edit.sourceFontSize)) <= 0.05,
+                  abs(api.effectiveCharacterFontSize(textPage, index: charIndex) - Double(edit.sourceFontSize)) <= 0.05,
                   abs(api.textCharAngle(textPage, charIndex)) <= 0.0001 else {
                 return reject("char metadata index=\(charIndex), unicode=\(api.textUnicode(textPage, charIndex)), fontSize=\(api.textFontSize(textPage, charIndex)), angle=\(api.textCharAngle(textPage, charIndex))")
             }
@@ -835,34 +1194,74 @@ enum PDFInternalTextEditEngine {
 
         }
 
-        guard let sourceWidth = provenGlyphWidth(
-            glyphs: fontEvidence.sourceGlyphs,
-            declaredWidths: fontEvidence.sourceDeclaredWidths,
-            font: font,
-            fontSize: objectFontSize,
-            api: api
-        ) else {
-            return reject("元glyphのpath・幅を証明できません")
+        guard fontEvidence.sourceGlyphs.count == sourceScalars.count,
+              fontEvidence.sourceDeclaredWidths.count == sourceScalars.count else { return nil }
+        var sourceWidth: CGFloat = 0
+        for offset in sourceScalars.indices {
+            guard let width = provenGlyphWidth(
+                glyphs: [fontEvidence.sourceGlyphs[offset]],
+                declaredWidths: [fontEvidence.sourceDeclaredWidths[offset]],
+                font: font, fontSize: effectiveFontSize, api: api,
+                allowEmptyPath: isBlankUnicode(sourceScalars[offset].value)
+            ) else { return reject("元glyphのpath・幅を証明できません") }
+            sourceWidth += width
         }
         let replacementWidth: CGFloat
-        if fontEvidence.replacementFontData != nil {
+        let replacementAdvances: [CGFloat]
+        if edit.replacement.isEmpty {
+            replacementWidth = 0
+            replacementAdvances = []
+        } else if fontEvidence.replacementFontData != nil {
             guard !fontEvidence.replacementDeclaredWidths.isEmpty,
                   fontEvidence.replacementDeclaredWidths.allSatisfy({ $0.isFinite && $0 > 0 }) else {
                 return reject("同一書体の置換glyph幅を証明できません")
             }
             replacementWidth = fontEvidence.replacementDeclaredWidths.reduce(0, +)
+            replacementAdvances = fontEvidence.replacementDeclaredWidths
         } else if let width = provenGlyphWidth(
             glyphs: fontEvidence.replacementGlyphs,
             declaredWidths: fontEvidence.replacementDeclaredWidths,
             font: font,
-            fontSize: objectFontSize,
+            fontSize: effectiveFontSize,
             api: api
         ) {
             replacementWidth = width
+            replacementAdvances = fontEvidence.replacementGlyphs.map { glyph in
+                var advance: Float = 0
+                _ = api.fontGlyphWidth(font, glyph, effectiveFontSize, &advance)
+                return CGFloat(advance)
+            }
         } else {
             return reject("glyph path・幅を証明できないか、置換後の幅が元objectを超えます")
         }
-        guard replacementWidth <= sourceWidth + max(0.1, CGFloat(objectFontSize) * 0.02) else {
+        let selectedIndices = Set(charIndices)
+        var retained: [RetainedGlyph] = []
+        for index in allCharIndices where !selectedIndices.contains(index) {
+            let unicode = api.textUnicode(textPage, index)
+            guard api.textIsGenerated(textPage, index) == 0,
+                  api.textHasUnicodeMapError(textPage, index) == 0,
+                  let code = fontEvidence.sourceCodesByUnicode[unicode],
+                  let width = fontEvidence.sourceWidthsByUnicode[unicode],
+                  provenGlyphWidth(glyphs: [unicode], declaredWidths: [width], font: font, fontSize: effectiveFontSize, api: api, allowEmptyPath: isBlankUnicode(unicode)) != nil,
+                  let origin = api.characterOrigin(textPage, index: index),
+                  abs(api.textCharAngle(textPage, index)) <= 0.0001,
+                  abs(api.effectiveCharacterFontSize(textPage, index: index) - Double(edit.sourceFontSize)) <= 0.05 else {
+                return reject("未選択glyphの元charcode・幅・originを証明できません")
+            }
+            retained.append(RetainedGlyph(
+                unicode: unicode, code: code, origin: origin,
+                beforeSelection: index < charIndices[0], sourceIndex: index, declaredWidth: width
+            ))
+        }
+        let actualSelectionWidth: CGFloat
+        if let first = charIndices.first, let last = charIndices.last,
+           let firstOrigin = api.characterOrigin(textPage, index: first),
+           let lastOrigin = api.characterOrigin(textPage, index: last),
+           let lastWidth = fontEvidence.sourceDeclaredWidths.last {
+            actualSelectionWidth = lastOrigin.x + lastWidth - firstOrigin.x
+        } else { return reject("選択範囲の実送り幅を取得できません") }
+        let allowedWidth = min(sourceWidth, actualSelectionWidth)
+        guard replacementWidth <= allowedWidth + max(0.1, CGFloat(effectiveFontSize) * 0.02) else {
             return reject("置換後の幅が元objectを超えます")
         }
         guard let firstIndex = charIndices.first,
@@ -872,6 +1271,17 @@ enum PDFInternalTextEditEngine {
               let fillColor = api.objectColor(object, getter: api.pageObjectFillColor) else {
             return reject("文字原点・baselineを照合できません")
         }
+        var expectedX = sourceOrigin.x
+        var hasAdjustedOrigins = false
+        for (index, width) in zip(charIndices, fontEvidence.sourceDeclaredWidths) {
+            guard let origin = api.characterOrigin(textPage, index: index) else { return nil }
+            if abs(origin.x - expectedX) > 0.02 { hasAdjustedOrigins = true }
+            expectedX = origin.x + width
+        }
+        let reconstruct = !retained.isEmpty || hasAdjustedOrigins
+        if reconstruct || fontEvidence.replacementFontData != nil {
+            matrix = PDFiumMatrix(a: 1, d: 1, e: Float(sourceOrigin.x), f: Float(sourceOrigin.y))
+        }
         return Match(
             object: object,
             objectIndex: objectIndex,
@@ -879,8 +1289,13 @@ enum PDFInternalTextEditEngine {
             sourceOrigin: sourceOrigin,
             sourceMatrix: matrix,
             fillColor: fillColor,
-            sourceWidth: sourceWidth,
-            replacementWidth: replacementWidth
+            sourceWidth: allowedWidth,
+            replacementWidth: replacementWidth,
+            retainedGlyphs: retained,
+            requiresReconstruction: reconstruct,
+            sourceFontName: api.baseFontName(font),
+            selectedCharacterIndices: selectedIndices,
+            replacementAdvances: replacementAdvances
         )
     }
 
@@ -889,7 +1304,8 @@ enum PDFInternalTextEditEngine {
         declaredWidths: [CGFloat],
         font: PDFiumHandle,
         fontSize: Float,
-        api: PDFiumAPI
+        api: PDFiumAPI,
+        allowEmptyPath: Bool = false
     ) -> CGFloat? {
         guard !glyphs.isEmpty, glyphs.count == declaredWidths.count else { return nil }
         var total: CGFloat = 0
@@ -897,7 +1313,7 @@ enum PDFInternalTextEditEngine {
             var width: Float = 0
             let path = api.fontGlyphPath(font, glyph, fontSize)
             let gotWidth = api.fontGlyphWidth(font, glyph, fontSize, &width)
-            guard path != nil,
+            guard (path != nil || allowEmptyPath),
                   gotWidth != 0,
                   width.isFinite, width > 0,
                   abs(CGFloat(width) - declaredWidth) <= max(0.15, declaredWidth * 0.05) else {
@@ -913,6 +1329,10 @@ enum PDFInternalTextEditEngine {
             total += CGFloat(width)
         }
         return total
+    }
+
+    private static func isBlankUnicode(_ unicode: UInt32) -> Bool {
+        unicode == 0x20 || unicode == 0xA0 || unicode == 0x3000
     }
 
     private static func boxesMatch(_ indexed: CGRect, _ pdfium: CGRect, fontSize: CGFloat) -> Bool {
@@ -932,12 +1352,26 @@ enum PDFInternalTextEditEngine {
         outputURL: URL,
         edits: [ReplacementEdit],
         api: PDFiumAPI,
-        requireObjectGeometry: Bool
+        requireObjectGeometry: Bool,
+        preservesRetainedGrouping: Bool = false
     ) throws {
         guard let sourcePDF = PDFDocument(url: sourceURL), let outputPDF = PDFDocument(url: outputURL),
               sourcePDF.pageCount == outputPDF.pageCount else {
             throw PDFInternalTextEditError.failed("保存後のページ数が一致しません。")
         }
+        let edits = try expandedSourceRemovals(edits.map { edit in
+            guard !requireObjectGeometry, edit.storage.needsForeground else { return edit }
+            var removal = edit.sourceRemoval()
+            // 新しい前景の検証はplannerが行う。分割後もその役割を保持する。
+            removal.storage = edit.storage
+            return removal
+        }, sourcePDF: sourcePDF)
+        try validateEditSet(edits)
+        let rawCandidate: Data? = !requireObjectGeometry && !preservesRetainedGrouping
+            ? try PDFContentTextRemovalWriter.rewritingTextShows(
+                sourceURL: sourceURL, sourcePDF: sourcePDF,
+                edits: edits.map { $0.storage.needsForeground ? $0.sourceRemoval() : $0 }
+            ) : nil
         let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
         for pageIndex in 0..<sourcePDF.pageCount {
             guard let sourcePage = sourcePDF.page(at: pageIndex), let outputPage = outputPDF.page(at: pageIndex),
@@ -954,15 +1388,16 @@ enum PDFInternalTextEditEngine {
         }
         let sourceDocument: PDFiumHandle?
         let sourceMatches: [UUID: Match]
-        if requireObjectGeometry {
+        do {
             let openedSource = try api.openDocument(sourceURL)
             sourceDocument = openedSource
             var matches: [UUID: Match] = [:]
             do {
                 for edit in edits {
-                    let evidence = try sourceFontEvidence(sourcePDF: sourcePDF, edit: edit)
+                    let proofEdit = !requireObjectGeometry && edit.storage.needsForeground ? edit.sourceRemoval() : edit
+                    let evidence = try sourceFontEvidence(sourcePDF: sourcePDF, edit: proofEdit)
                     matches[edit.id] = try match(
-                        edit: edit,
+                        edit: proofEdit,
                         fontEvidence: evidence,
                         document: openedSource,
                         api: api
@@ -973,13 +1408,11 @@ enum PDFInternalTextEditEngine {
                 throw error
             }
             sourceMatches = matches
-        } else {
-            sourceDocument = nil
-            sourceMatches = [:]
         }
         defer { if let sourceDocument { api.closeDocument(sourceDocument) } }
+        let usesRawTextShows = preservesRetainedGrouping || (rawCandidate != nil
+            && Set(sourceMatches.values.map(\.objectIndex)).count == sourceMatches.count)
 
-        var pageTexts: [String] = []
         for pageIndex in 0..<sourcePDF.pageCount {
             guard let page = api.loadPage(outputDocument, Int32(pageIndex)) else {
                 throw PDFInternalTextEditError.failed("保存後の文字を再抽出できません。")
@@ -988,7 +1421,31 @@ enum PDFInternalTextEditEngine {
                 api.closePage(page)
                 throw PDFInternalTextEditError.failed("保存後の文字を再抽出できません。")
             }
-            pageTexts.append(api.extractedText(textPage))
+            defer { api.closeTextPage(textPage); api.closePage(page) }
+            if !requireObjectGeometry {
+                guard let sourceDocument else { throw PDFInternalTextEditError.failed("元文書を再読込できません。") }
+                try verifyFinalCharacters(
+                    pageIndex: pageIndex, sourceDocument: sourceDocument,
+                    outputTextPage: textPage, edits: edits,
+                    sourceMatches: sourceMatches, api: api, usesRawTextShows: usesRawTextShows,
+                    outputPage: page, outputPDFPage: outputPDF.page(at: pageIndex)
+                )
+                continue
+            }
+            var outputTargetIndices = Set<Int32>()
+            for edit in edits where edit.pageIndex == pageIndex {
+                guard let sourceMatch = sourceMatches[edit.id] else {
+                    throw PDFInternalTextEditError.failed("保存前の対象objectを再照合できません。")
+                }
+                outputTargetIndices.formUnion(try verifyEditedGeometry(
+                    edit, sourceMatch: sourceMatch,
+                    editedSourceIndices: Set(edits.filter { $0.pageIndex == pageIndex }.compactMap {
+                        sourceMatches[$0.id]
+                    }.filter { $0.objectIndex == sourceMatch.objectIndex }.flatMap(\.selectedCharacterIndices)),
+                    page: page, textPage: textPage, pdfPage: outputPDF.page(at: pageIndex), api: api,
+                    preservesRetainedGrouping: preservesRetainedGrouping
+                ))
+            }
             if requireObjectGeometry {
                 do {
                     guard let sourceDocument,
@@ -1001,19 +1458,11 @@ enum PDFInternalTextEditEngine {
                         api.closePage(sourcePage)
                     }
                     var sourceTargetIndices = Set<Int32>()
-                    var outputTargetIndices = Set<Int32>()
                     for edit in edits where edit.pageIndex == pageIndex {
                         guard let sourceMatch = sourceMatches[edit.id] else {
                             throw PDFInternalTextEditError.failed("保存前の対象objectを再照合できません。")
                         }
                         sourceTargetIndices.insert(sourceMatch.objectIndex)
-                        outputTargetIndices.insert(try verifyEditedGeometry(
-                            edit,
-                            sourceMatch: sourceMatch,
-                            page: page,
-                            textPage: textPage,
-                            api: api
-                        ))
                     }
                     try verifyUneditedObjects(
                         sourcePage: sourcePage,
@@ -1024,21 +1473,136 @@ enum PDFInternalTextEditEngine {
                         outputTargetIndices: outputTargetIndices,
                         api: api
                     )
+                    try verifyFinalCharacters(
+                        pageIndex: pageIndex, sourceDocument: sourceDocument,
+                        outputTextPage: textPage, edits: edits, sourceMatches: sourceMatches, api: api,
+                        usesRawTextShows: usesRawTextShows,
+                        outputPage: page, outputPDFPage: outputPDF.page(at: pageIndex)
+                    )
                 } catch {
-                    api.closeTextPage(textPage)
-                    api.closePage(page)
                     throw error
                 }
             }
-            api.closeTextPage(textPage)
-            api.closePage(page)
         }
-        let allText = pageTexts.joined(separator: "\n")
-        for edit in edits {
-            guard pageTexts.indices.contains(edit.pageIndex),
-                  pageTexts[edit.pageIndex].contains(edit.replacement),
-                  !allText.contains(edit.sourceText) else {
-                throw PDFInternalTextEditError.failed("保存後に置換文字を確認できないか、元文字が抽出結果に残っています。")
+    }
+
+    private struct CharacterSnapshot {
+        let index: Int32
+        let unicode: UInt32
+        let origin: CGPoint
+        let fontSize: Double
+        let color: ObjectColor
+
+        func matches(_ other: CharacterSnapshot) -> Bool {
+            unicode == other.unicode
+                && abs(origin.x - other.origin.x) <= 0.1
+                && abs(origin.y - other.origin.y) <= 0.1
+                && abs(fontSize - other.fontSize) <= 0.05
+                && color == other.color
+        }
+    }
+
+    private static func characterSnapshots(textPage: PDFiumHandle, api: PDFiumAPI) throws -> [CharacterSnapshot] {
+        let count = api.textCountChars(textPage)
+        guard count >= 0 else { throw PDFInternalTextEditError.failed("保存後の文字を列挙できません。") }
+        return try (0..<count).compactMap { index in
+            // PDFiumが字間や改行から生成した文字は実glyphと区別する。
+            guard api.textIsGenerated(textPage, index) == 0 else { return nil }
+            var red: UInt32 = 0, green: UInt32 = 0, blue: UInt32 = 0, alpha: UInt32 = 0
+            var matrix = PDFiumMatrix()
+            guard let origin = api.characterOrigin(textPage, index: index),
+                  withUnsafeMutablePointer(to: &matrix, {
+                      api.textMatrix(textPage, index, UnsafeMutableRawPointer($0))
+                  }) != 0,
+                  api.textFillColor(textPage, index, &red, &green, &blue, &alpha) != 0 else {
+                throw PDFInternalTextEditError.failed("保存後の文字原点・色を取得できません。")
+            }
+            return CharacterSnapshot(
+                index: index, unicode: api.textUnicode(textPage, index), origin: origin,
+                // Quartzは「1 Tf＋14倍Tm」のように同じ文字サイズを再符号化する。
+                // 文字matrixにはFormの変換も含まれるため、実効サイズで比較する。
+                fontSize: api.textFontSize(textPage, index) * Double(hypot(matrix.c, matrix.d)),
+                color: ObjectColor(red: red, green: green, blue: blue, alpha: alpha)
+            )
+        }
+    }
+
+    /// Quartzの再符号化ではfont key・charcode・object分割が変わるため、
+    /// 最終出力だけは文字そのものとページ上の位置・サイズ・色を比較する。
+    private static func verifyFinalCharacters(
+        pageIndex: Int, sourceDocument: PDFiumHandle, outputTextPage: PDFiumHandle,
+        edits: [ReplacementEdit], sourceMatches: [UUID: Match], api: PDFiumAPI,
+        usesRawTextShows: Bool = false,
+        outputPage: PDFiumHandle, outputPDFPage: PDFPage?
+    ) throws {
+        guard let sourcePage = api.loadPage(sourceDocument, Int32(pageIndex)) else {
+            throw PDFInternalTextEditError.failed("保存前の文字を開けません。")
+        }
+        defer { api.closePage(sourcePage) }
+        guard let sourceTextPage = api.loadTextPage(sourcePage) else {
+            throw PDFInternalTextEditError.failed("保存前の文字を抽出できません。")
+        }
+        defer { api.closeTextPage(sourceTextPage) }
+        let pageEdits = edits.filter { $0.pageIndex == pageIndex }
+        let selectedIndices = Set(pageEdits.compactMap { sourceMatches[$0.id] }.flatMap(\.selectedCharacterIndices))
+        let source = try characterSnapshots(textPage: sourceTextPage, api: api)
+        let output = try characterSnapshots(textPage: outputTextPage, api: api)
+        let outputByUnicode = Dictionary(grouping: output, by: \.unicode)
+        var consumed = Set<Int32>()
+        for character in source where !selectedIndices.contains(character.index) {
+            guard let saved = outputByUnicode[character.unicode]?.first(where: {
+                !consumed.contains($0.index) && character.matches($0)
+            }) else {
+                // 独立space objectはPDFiumが抽出indexを省略する。この場合も、元の
+                // 実code・Unicode・font・origin・size・色をcontentとobjectから証明する。
+                if isBlankUnicode(character.unicode),
+                   let match = pageEdits.compactMap({ sourceMatches[$0.id] }).first(where: {
+                       $0.retainedGlyphs.contains { $0.sourceIndex == character.index }
+                   }), let glyph = match.retainedGlyphs.first(where: { $0.sourceIndex == character.index }) {
+                    _ = try verifyBlankGlyph(glyph, sourceMatch: match, pdfPage: outputPDFPage,
+                                             page: outputPage, api: api)
+                    continue
+                }
+                throw PDFInternalTextEditError.failed("最終出力で対象外文字のUnicode・origin・サイズ・色が変化しました。")
+            }
+            consumed.insert(saved.index)
+        }
+        for edit in pageEdits where !edit.storage.needsForeground {
+            guard let match = sourceMatches[edit.id] else {
+                throw PDFInternalTextEditError.failed("最終出力の対象文字を再照合できません。")
+            }
+            if edit.replacement.isEmpty {
+                for character in source where match.selectedCharacterIndices.contains(character.index) {
+                    guard output.allSatisfy({
+                        abs($0.origin.x - character.origin.x) > 0.1 || abs($0.origin.y - character.origin.y) > 0.1
+                    }) else {
+                        throw PDFInternalTextEditError.failed("最終出力の削除対象位置に文字が残っています。")
+                    }
+                }
+                continue
+            }
+            let scalars = Array(edit.replacement.unicodeScalars)
+            guard scalars.count == match.replacementAdvances.count else {
+                throw PDFInternalTextEditError.failed("最終出力の文字と送り幅を対応付けられません。")
+            }
+            var x = match.sourceOrigin.x
+            for (scalar, advance) in zip(scalars, match.replacementAdvances) {
+                let expected = CharacterSnapshot(
+                    index: -1, unicode: scalar.value,
+                    origin: CGPoint(x: x, y: match.sourceOrigin.y),
+                    fontSize: Double(edit.sourceFontSize), color: match.fillColor
+                )
+                let candidates = outputByUnicode[scalar.value, default: []].filter {
+                    !consumed.contains($0.index) && expected.matches($0)
+                }
+                guard candidates.count == 1, let saved = candidates.first else {
+                    if ProcessInfo.processInfo.environment["PDFIUM_DIAGNOSTICS"] == "1" {
+                        fputs("PDFium final expected=\(expected), candidates=\(outputByUnicode[scalar.value, default: []])\n", stderr)
+                    }
+                    throw PDFInternalTextEditError.failed("最終出力の置換文字をUnicode・origin・サイズ・色から一意に照合できません。")
+                }
+                consumed.insert(saved.index)
+                x += advance + (usesRawTextShows ? match.fontEvidence.rawCharacterSpacing : 0)
             }
         }
     }
@@ -1046,28 +1610,101 @@ enum PDFInternalTextEditEngine {
     private static func verifyEditedGeometry(
         _ edit: ReplacementEdit,
         sourceMatch: Match,
+        editedSourceIndices: Set<Int32>,
         page: PDFiumHandle,
         textPage: PDFiumHandle,
-        api: PDFiumAPI
-    ) throws -> Int32 {
+        pdfPage: PDFPage?,
+        api: PDFiumAPI,
+        preservesRetainedGrouping: Bool = false
+    ) throws -> Set<Int32> {
         let replacementScalars = Array(edit.replacement.unicodeScalars)
         let charCount = api.textCountChars(textPage)
         let objectCount = api.pageObjectCount(page)
-        guard charCount > 0, objectCount > sourceMatch.objectIndex, !replacementScalars.isEmpty else {
+        guard charCount >= 0, objectCount >= 0 else {
             throw PDFInternalTextEditError.failed("保存後の文字単位geometryを照合できません。")
         }
-        var indicesByObject: [UInt: [Int32]] = [:]
-        for index in 0..<charCount {
-            guard let object = api.textObjectForCharacter(textPage, index) else { continue }
-            indicesByObject[UInt(bitPattern: object), default: []].append(index)
+        let indicesByObject = api.characterIndicesByObject(textPage)
+        var retainedIndices = Set<Int32>()
+        var retainedCharacterIndices = Set<Int32>()
+        let scannedGlyphs = preservesRetainedGrouping
+            ? pdfPage.map { PDFGlyphIndex.makeIndex(for: $0).runs.flatMap(\.glyphs) } ?? [] : []
+        for glyph in sourceMatch.retainedGlyphs where !editedSourceIndices.contains(glyph.sourceIndex) {
+            if isBlankUnicode(glyph.unicode) && !preservesRetainedGrouping {
+                let index = try verifyBlankGlyph(glyph, sourceMatch: sourceMatch, pdfPage: pdfPage, page: page, api: api)
+                guard retainedIndices.insert(index).inserted else {
+                    throw PDFInternalTextEditError.failed("未選択spaceのobjectが重複しています。")
+                }
+                continue
+            }
+            var matches: [(object: Int32, character: Int32)] = []
+            for objectIndex in 0..<objectCount {
+                guard let object = api.pageObject(page, objectIndex), api.pageObjectType(object) == 1,
+                      let indices = indicesByObject[UInt(bitPattern: object)],
+                      preservesRetainedGrouping || indices.count == 1 else { continue }
+                for index in indices {
+                guard api.textUnicode(textPage, index) == glyph.unicode,
+                      let origin = api.characterOrigin(textPage, index: index),
+                      abs(origin.x - glyph.origin.x) <= 0.02, abs(origin.y - glyph.origin.y) <= 0.02,
+                      abs(api.effectiveCharacterFontSize(textPage, index: index) - Double(edit.sourceFontSize)) <= 0.02,
+                      let font = api.textObjectFont(object),
+                      api.baseFontName(font) == sourceMatch.sourceFontName,
+                      provenGlyphWidth(glyphs: [glyph.unicode], declaredWidths: [glyph.declaredWidth], font: font, fontSize: Float(edit.sourceFontSize), api: api, allowEmptyPath: isBlankUnicode(glyph.unicode)) != nil,
+                      api.objectColor(object, getter: api.pageObjectFillColor) == sourceMatch.fillColor else { continue }
+                if preservesRetainedGrouping {
+                    let scanned = scannedGlyphs.filter {
+                        $0.sourceCharacterCode == Int(glyph.code) && $0.text.unicodeScalars.first?.value == glyph.unicode
+                            && $0.fontKey == edit.sourceFontKey
+                            && abs($0.advanceBox.minX - glyph.origin.x) <= 0.02
+                            && abs($0.baseline - glyph.origin.y) <= 0.02
+                            && abs($0.fontSize - edit.sourceFontSize) <= 0.02
+                    }
+                    guard scanned.count == 1 else { continue }
+                }
+                matches.append((objectIndex, index))
+                }
+            }
+            guard matches.count == 1, let match = matches.first,
+                  retainedCharacterIndices.insert(match.character).inserted,
+                  preservesRetainedGrouping || !retainedIndices.contains(match.object) else {
+                throw PDFInternalTextEditError.failed("再構成した未選択文字のUnicode・origin・font・サイズ・色が一致しません。")
+            }
+            retainedIndices.insert(match.object)
+        }
+        if preservesRetainedGrouping && replacementScalars.isEmpty {
+            for objectIndex in retainedIndices {
+                guard let object = api.pageObject(page, objectIndex),
+                      let indices = indicesByObject[UInt(bitPattern: object)],
+                      Set(indices).isSubset(of: retainedCharacterIndices) else {
+                    throw PDFInternalTextEditError.failed("保持したprefix objectに未照合の文字が残っています。")
+                }
+            }
+        }
+        if replacementScalars.isEmpty {
+            // 削除対象と同じ位置に実glyphが残っていないことも確認する。
+            for index in 0..<charCount {
+                guard let object = api.textObjectForCharacter(textPage, index),
+                      let objectIndex = (0..<objectCount).first(where: { api.pageObject(page, $0) == object }),
+                      !retainedIndices.contains(objectIndex),
+                      api.textIsGenerated(textPage, index) == 0,
+                      let origin = api.characterOrigin(textPage, index: index) else { continue }
+                if abs(origin.y - sourceMatch.sourceOrigin.y) <= 0.1,
+                   origin.x >= sourceMatch.sourceOrigin.x - 0.02,
+                   origin.x < sourceMatch.sourceOrigin.x + sourceMatch.sourceWidth - 0.02 {
+                    throw PDFInternalTextEditError.failed("削除対象位置に文字glyphが残っています。")
+                }
+            }
+            return retainedIndices
         }
         var candidates: [(index: Int32, object: PDFiumHandle, indices: [Int32])] = []
         for objectIndex in 0..<objectCount {
             guard let object = api.pageObject(page, objectIndex), api.pageObjectType(object) == 1,
-                  api.objectText(object, textPage: textPage) == edit.replacement,
                   let indices = indicesByObject[UInt(bitPattern: object)],
-                  indices.count == replacementScalars.count,
-                  let firstIndex = indices.first,
+                  indices.count >= replacementScalars.count,
+                  preservesRetainedGrouping || indices.count == replacementScalars.count else { continue }
+            for start in 0...(indices.count - replacementScalars.count) {
+            let selected = Array(indices[start..<(start + replacementScalars.count)])
+            guard api.unicodeText(textPage, indices: selected) == edit.replacement,
+                  let firstIndex = selected.first,
                   let origin = api.characterOrigin(textPage, index: firstIndex) else { continue }
             if ProcessInfo.processInfo.environment["PDFIUM_DIAGNOSTICS"] == "1" {
                 fputs(
@@ -1079,17 +1716,46 @@ enum PDFInternalTextEditEngine {
             guard
                   abs(origin.x - sourceMatch.sourceOrigin.x) <= 0.1,
                   abs(origin.y - sourceMatch.sourceOrigin.y) <= 0.1 else { continue }
-            candidates.append((objectIndex, object, indices))
+            candidates.append((objectIndex, object, selected))
+            }
         }
         guard candidates.count == 1, let saved = candidates.first else {
             throw PDFInternalTextEditError.failed("保存後の対象文字objectをorigin・baselineから一意に再特定できません。")
         }
         let object = saved.object
         let indices = saved.indices
+        if preservesRetainedGrouping {
+            let allowed = retainedCharacterIndices.union(indices)
+            for index in retainedIndices.union([saved.index]) {
+                guard let object = api.pageObject(page, index),
+                      let objectIndices = indicesByObject[UInt(bitPattern: object)],
+                      Set(objectIndices).isSubset(of: allowed) else {
+                    throw PDFInternalTextEditError.failed("局所置換したobjectに未照合の文字が残っています。")
+                }
+            }
+        }
         for (offset, index) in indices.enumerated() {
+            let expectedX = sourceMatch.sourceOrigin.x + sourceMatch.replacementAdvances.prefix(offset).reduce(0, +)
+                + (preservesRetainedGrouping ? CGFloat(offset) * sourceMatch.fontEvidence.rawCharacterSpacing : 0)
             guard api.textUnicode(textPage, index) == replacementScalars[offset].value,
-                  abs(api.textFontSize(textPage, index) - Double(edit.sourceFontSize)) <= 0.05 else {
+                  abs(api.effectiveCharacterFontSize(textPage, index: index) - Double(edit.sourceFontSize)) <= 0.05,
+                  let origin = api.characterOrigin(textPage, index: index),
+                  abs(origin.x - expectedX) <= 0.1,
+                  abs(origin.y - sourceMatch.sourceOrigin.y) <= 0.1,
+                  api.objectColor(object, getter: api.pageObjectFillColor) == sourceMatch.fillColor else {
                 throw PDFInternalTextEditError.failed("保存後の文字サイズ・位置を維持できませんでした。")
+            }
+            if preservesRetainedGrouping {
+                let code = sourceMatch.fontEvidence.replacementCharcodes?[offset] ?? replacementScalars[offset].value
+                let scanned = scannedGlyphs.filter {
+                    $0.sourceCharacterCode == Int(code) && $0.text == String(replacementScalars[offset])
+                        && $0.fontKey == edit.sourceFontKey
+                        && abs($0.advanceBox.minX - expectedX) <= 0.1
+                        && abs($0.baseline - sourceMatch.sourceOrigin.y) <= 0.1
+                }
+                guard scanned.count == 1 else {
+                    throw PDFInternalTextEditError.failed("局所置換した実charcode・Unicode・originが一致しません。")
+                }
             }
         }
         guard let firstIndex = indices.first,
@@ -1103,7 +1769,8 @@ enum PDFInternalTextEditEngine {
         if sourceMatch.fontEvidence.replacementFontData != nil {
             guard let glyphs = sourceMatch.fontEvidence.replacementTrueTypeGlyphs,
                   !glyphs.isEmpty,
-                  glyphs.allSatisfy({ api.fontGlyphPath(font, UInt32($0), Float(edit.sourceFontSize)) != nil }) else {
+                  glyphs.count == replacementScalars.count,
+                  replacementScalars.allSatisfy({ api.fontGlyphPath(font, $0.value, Float(edit.sourceFontSize)) != nil }) else {
                 throw PDFInternalTextEditError.failed("保存後の埋込フォントから置換glyphを再取得できませんでした。")
             }
             var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
@@ -1135,7 +1802,49 @@ enum PDFInternalTextEditEngine {
         guard savedWidth <= sourceMatch.sourceWidth + max(0.1, edit.sourceFontSize * 0.02) else {
             throw PDFInternalTextEditError.failed("保存後の置換幅が許容範囲を超えました。")
         }
-        return saved.index
+        retainedIndices.insert(saved.index)
+        return retainedIndices
+    }
+
+    /// spaceだけのobjectにはPDFiumが抽出indexを割り当てないことがある。
+    /// この場合もcontentの明示code/Unicodeとobjectのfont/matrix/色を検証する。
+    private static func verifyBlankGlyph(
+        _ glyph: RetainedGlyph, sourceMatch: Match, pdfPage: PDFPage?,
+        page: PDFiumHandle, api: PDFiumAPI
+    ) throws -> Int32 {
+        guard let pdfPage else { throw PDFInternalTextEditError.failed("未選択spaceを再走査できません。") }
+        let scannedGlyphs: [ScannedGlyph] = PDFGlyphIndex.makeIndex(for: pdfPage).runs.flatMap(\.glyphs)
+        let scanned: [ScannedGlyph] = scannedGlyphs.filter { scannedGlyph in
+            guard scannedGlyph.sourceCharacterCode == Int(glyph.code),
+                  scannedGlyph.text.unicodeScalars.count == 1,
+                  scannedGlyph.text.unicodeScalars.first?.value == glyph.unicode else { return false }
+            return abs(scannedGlyph.advanceBox.minX - glyph.origin.x) <= 0.02
+                && abs(scannedGlyph.baseline - glyph.origin.y) <= 0.02
+        }
+        guard scanned.count == 1 else {
+            throw PDFInternalTextEditError.failed("未選択spaceの元charcode・Unicode・originを再照合できません。")
+        }
+        var candidates: [Int32] = []
+        for index in 0..<api.pageObjectCount(page) {
+            guard let object = api.pageObject(page, index), api.pageObjectType(object) == 1,
+                  let font = api.textObjectFont(object), api.baseFontName(font) == sourceMatch.sourceFontName,
+                  api.objectColor(object, getter: api.pageObjectFillColor) == sourceMatch.fillColor else { continue }
+            var matrix = PDFiumMatrix()
+            var size: Float = 0
+            guard withUnsafeMutablePointer(to: &matrix, { api.pageObjectMatrix(object, UnsafeMutableRawPointer($0)) }) != 0,
+                  abs(CGFloat(matrix.e) - glyph.origin.x) <= 0.02,
+                  abs(CGFloat(matrix.f) - glyph.origin.y) <= 0.02,
+                  abs(matrix.a - 1) <= 0.0001, abs(matrix.d - 1) <= 0.0001,
+                  abs(matrix.b) <= 0.0001, abs(matrix.c) <= 0.0001,
+                  api.textObjectFontSize(object, &size) != 0,
+                  abs(CGFloat(size) - scanned[0].fontSize) <= 0.02,
+                  provenGlyphWidth(glyphs: [glyph.unicode], declaredWidths: [glyph.declaredWidth], font: font, fontSize: size, api: api, allowEmptyPath: true) != nil else { continue }
+            candidates.append(index)
+        }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            throw PDFInternalTextEditError.failed("未選択spaceのfont・matrix・サイズ・色を再照合できません。")
+        }
+        return candidate
     }
 
     fileprivate struct ObjectColor: Equatable {
@@ -1155,6 +1864,8 @@ enum PDFInternalTextEditEngine {
         let fillColor: ObjectColor?
         let strokeColor: ObjectColor?
         let text: String?
+        let fontName: String?
+        let fontSize: Float?
 
         func approximatelyEquals(_ other: ObjectSnapshot) -> Bool {
             type == other.type
@@ -1166,6 +1877,8 @@ enum PDFInternalTextEditEngine {
                 && fillColor == other.fillColor
                 && strokeColor == other.strokeColor
                 && text == other.text
+                && fontName == other.fontName
+                && fontSize == other.fontSize
         }
     }
 
@@ -1197,6 +1910,7 @@ enum PDFInternalTextEditEngine {
     ) throws -> [ObjectSnapshot] {
         let count = api.pageObjectCount(page)
         guard count >= 0 else { throw PDFInternalTextEditError.failed("page objectを列挙できません。") }
+        let indicesByObject = api.characterIndicesByObject(textPage)
         return try (0..<count).map { index in
             guard let object = api.pageObject(page, index) else {
                 throw PDFInternalTextEditError.failed("page objectを取得できません。")
@@ -1209,6 +1923,9 @@ enum PDFInternalTextEditEngine {
                   }) != 0 else {
                 throw PDFInternalTextEditError.failed("page objectのgeometryを取得できません。")
             }
+            var fontSize: Float = 0
+            let isText = api.pageObjectType(object) == 1
+            let hasFontSize = isText && api.textObjectFontSize(object, &fontSize) != 0
             return ObjectSnapshot(
                 type: api.pageObjectType(object),
                 bounds: CGRect(
@@ -1221,7 +1938,9 @@ enum PDFInternalTextEditEngine {
                 clipPathCount: api.clipPathCount(object),
                 fillColor: api.objectColor(object, getter: api.pageObjectFillColor),
                 strokeColor: api.objectColor(object, getter: api.pageObjectStrokeColor),
-                text: api.pageObjectType(object) == 1 ? api.objectText(object, textPage: textPage) : nil
+                text: isText ? api.unicodeText(textPage, indices: indicesByObject[UInt(bitPattern: object), default: []]) : nil,
+                fontName: isText ? api.textObjectFont(object).map(api.baseFontName) : nil,
+                fontSize: hasFontSize ? fontSize : nil
             )
         }
     }
@@ -1296,6 +2015,7 @@ private final class PDFiumAPI {
     let textCharAngle: @convention(c) (PDFiumHandle?, Int32) -> Float
     let textLooseCharBox: @convention(c) (PDFiumHandle?, Int32, UnsafeMutableRawPointer?) -> Int32
     let textCharOrigin: @convention(c) (PDFiumHandle?, Int32, UnsafeMutablePointer<Double>?, UnsafeMutablePointer<Double>?) -> Int32
+    let textMatrix: @convention(c) (PDFiumHandle?, Int32, UnsafeMutableRawPointer?) -> Int32
     let pageObjectCount: @convention(c) (PDFiumHandle?) -> Int32
     let pageObject: @convention(c) (PDFiumHandle?, Int32) -> PDFiumHandle?
     let pageObjectType: @convention(c) (PDFiumHandle?) -> Int32
@@ -1352,6 +2072,7 @@ private final class PDFiumAPI {
         textCharAngle = try Self.symbol(handle, "FPDFText_GetCharAngle")
         textLooseCharBox = try Self.symbol(handle, "FPDFText_GetLooseCharBox")
         textCharOrigin = try Self.symbol(handle, "FPDFText_GetCharOrigin")
+        textMatrix = try Self.symbol(handle, "FPDFText_GetMatrix")
         pageObjectCount = try Self.symbol(handle, "FPDFPage_CountObjects")
         pageObject = try Self.symbol(handle, "FPDFPage_GetObject")
         pageObjectType = try Self.symbol(handle, "FPDFPageObj_GetType")
@@ -1430,11 +2151,35 @@ private final class PDFiumAPI {
         return String(decoding: units, as: UTF16.self)
     }
 
+    func characterIndicesByObject(_ textPage: PDFiumHandle) -> [UInt: [Int32]] {
+        let count = textCountChars(textPage)
+        guard count > 0 else { return [:] }
+        var result: [UInt: [Int32]] = [:]
+        for index in 0..<count {
+            guard textIsGenerated(textPage, index) == 0,
+                  let object = textObjectForCharacter(textPage, index) else { continue }
+            result[UInt(bitPattern: object), default: []].append(index)
+        }
+        return result
+    }
+
+    func unicodeText(_ textPage: PDFiumHandle, indices: [Int32]) -> String {
+        String(String.UnicodeScalarView(indices.compactMap { Unicode.Scalar(textUnicode(textPage, $0)) }))
+    }
+
     func characterOrigin(_ textPage: PDFiumHandle, index: Int32) -> CGPoint? {
         var x: Double = 0
         var y: Double = 0
         guard textCharOrigin(textPage, index, &x, &y) != 0, x.isFinite, y.isFinite else { return nil }
         return CGPoint(x: x, y: y)
+    }
+
+    func effectiveCharacterFontSize(_ textPage: PDFiumHandle, index: Int32) -> Double {
+        var matrix = PDFiumMatrix()
+        guard withUnsafeMutablePointer(to: &matrix, {
+            textMatrix(textPage, index, UnsafeMutableRawPointer($0))
+        }) != 0 else { return .nan }
+        return textFontSize(textPage, index) * Double(hypot(matrix.c, matrix.d))
     }
 
     func clipPathCount(_ object: PDFiumHandle) -> Int32 {
