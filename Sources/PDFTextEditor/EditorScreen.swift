@@ -1,3 +1,4 @@
+import AppKit
 import PDFKit
 import SwiftUI
 
@@ -121,15 +122,11 @@ struct EditorScreen: View {
 
     private var topBar: some View {
         HStack(spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(NihoPalette.ink)
-                Text("T/")
-                    .font(.system(size: 10, weight: .heavy))
-                    .foregroundStyle(Color.white)
-            }
-            .frame(width: 22, height: 22)
-            .accessibilityHidden(true)
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 22, height: 22)
+                .accessibilityHidden(true)
 
             Text(model.document == nil ? "PDF editor" : (model.sourceURL?.lastPathComponent ?? "PDF editor"))
                 .font(.system(size: 14, weight: .bold))
