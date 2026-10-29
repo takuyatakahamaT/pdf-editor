@@ -385,7 +385,8 @@ struct PDFWorkflowTests {
         let marker = PDFEditEngine.annotationMarkerPrefix + firstInsertion.id.uuidString
         model.moveInsertion(marker: marker, pageIndex: 0, bounds: movedBounds)
 
-        #expect(model.edits.first?.replacement?.bounds == movedBounds)
+        #expect(model.activeReplacements.first?.bounds == movedBounds)
+        #expect(model.edits.count == 2)
         #expect(!model.canRedo)
     }
 

@@ -125,17 +125,25 @@ struct PDFEditEngineTests {
         #expect(abs(b.advanceBox.minX - a.advanceBox.minX - a.advanceBox.width) < 0.01)
     }
 
-    @Test("insertion text keeps its existing bounded-box fitting behavior")
-    func insertionFitsLongTextInsideItsBox() {
-        let font = PDFEditEngine.fittedFont(
-            named: nil,
-            preferredSize: 18,
-            text: "かなり長い置換後テキスト",
-            bounds: CGRect(x: 0, y: 0, width: 90, height: 22)
+    @Test("insertion text keeps the requested size and reports bounded-box overflow")
+    func insertionRejectsOverflowWithoutShrinking() {
+        let plan = PDFEditEngine.insertionRenderPlan(
+            text: "かなり長い追加テキスト",
+            fontName: "Hiragino Sans",
+            fontSize: 18,
+            fontColor: .black
+        )
+        let fit = PDFEditEngine.insertionFitResult(
+            text: "かなり長い追加テキスト",
+            fontName: "Hiragino Sans",
+            fontSize: 18,
+            bounds: CGRect(x: 0, y: 0, width: 90, height: 22),
+            pageBounds: CGRect(x: 0, y: 0, width: 300, height: 200)
         )
 
-        #expect(font.pointSize < 18)
-        #expect(font.pointSize >= 6)
+        #expect(CTFontGetSize(plan.font) == 18)
+        #expect(!fit.fits)
+        #expect(fit.overflow > 0)
     }
 
     @Test("unavailable MS Gothic keeps a Japanese Gothic fallback for numeric replacement")

@@ -203,7 +203,8 @@ struct ReplacementEdit {
         fontName: String?,
         fontSize: CGFloat,
         fontColor: NSColor,
-        id: UUID = UUID()
+        id: UUID = UUID(),
+        outputFontSelection: ReplacementFontSelection = .automatic
     ) {
         self.id = id
         kind = .insertion
@@ -232,7 +233,7 @@ struct ReplacementEdit {
         exactGlyphs = nil
         hasExplicitSourceMapping = true
         fontPostScriptNameOverride = nil
-        outputFontSelection = .automatic
+        self.outputFontSelection = outputFontSelection
     }
 
     func moved(to newBounds: CGRect) -> ReplacementEdit {
@@ -243,7 +244,8 @@ struct ReplacementEdit {
             fontName: fontName,
             fontSize: fontSize,
             fontColor: fontColor,
-            id: id
+            id: id,
+            outputFontSelection: outputFontSelection
         )
     }
 
@@ -273,7 +275,8 @@ struct ReplacementEdit {
     }
 
     var displayedTextBounds: CGRect {
-        let font = resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
+        let font = resolvedFont
+            ?? CTFontCreateWithName((fontName ?? "Helvetica") as CFString, fontSize, nil)
         let renderedWidth: CGFloat
         if let exactGlyphs, !exactGlyphs.isEmpty {
             renderedWidth = exactGlyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
@@ -491,13 +494,23 @@ enum PDFExportEngine {
                 width: visibleBounds.width / mediaBox.width,
                 height: visibleBounds.height / mediaBox.height
             )
+            let insertionFont = edit.kind == .insertion
+                ? PDFEditEngine.insertionRenderPlan(
+                    text: edit.replacement,
+                    fontName: edit.fontName ?? "Hiragino Sans",
+                    fontSize: edit.fontSize,
+                    fontColor: edit.fontColor
+                ).font
+                : nil
             linesByPage[edit.pageIndex, default: []].append(PDFOCRLine(
                 pageIndex: edit.pageIndex,
                 text: edit.replacement,
                 confidence: 1,
                 bounds: normalizedBounds,
-                fontPostScriptName: edit.resolvedFont.map { CTFontCopyPostScriptName($0) as String },
-                fontSize: edit.resolvedFont.map(CTFontGetSize)
+                fontPostScriptName: (edit.resolvedFont ?? insertionFont).map {
+                    CTFontCopyPostScriptName($0) as String
+                },
+                fontSize: (edit.resolvedFont ?? insertionFont).map(CTFontGetSize)
             ))
         }
         guard !linesByPage.isEmpty else { return data }
@@ -687,36 +700,19 @@ enum PDFExportEngine {
         return renderedPage
     }
 
-    /// テキスト追加モードの描画（従来どおり）。置換 (`.replacement`) は
-    /// `PDFTextRenderer.draw` に一本化され、ここでは扱わない。
+    /// テキスト追加モードの描画。プレビューで確定したfont face/point sizeをそのまま使い、
+    /// 書き出し時の暗黙縮小・変形は行わない。
     private static func drawInsertion(_ edit: ReplacementEdit, in context: CGContext) {
         context.saveGState()
-        let textBounds = edit.bounds
-
-        let font = PDFEditEngine.fittedFont(
-            named: edit.fontName,
-            preferredSize: edit.fontSize,
+        let plan = PDFEditEngine.insertionRenderPlan(
             text: edit.replacement,
-            bounds: textBounds
+            fontName: edit.fontName ?? "Hiragino Sans",
+            fontSize: edit.fontSize,
+            fontColor: edit.fontColor
         )
-        let coreTextFont = CTFontCreateWithName(font.fontName as CFString, font.pointSize, nil)
-        let attributed = NSAttributedString(
-            string: edit.replacement,
-            attributes: [
-                NSAttributedString.Key(kCTFontAttributeName as String): coreTextFont,
-                NSAttributedString.Key(kCTForegroundColorAttributeName as String): edit.fontColor.cgColor
-            ]
-        )
-        let line = CTLineCreateWithAttributedString(attributed)
-        var ascent: CGFloat = 0
-        var descent: CGFloat = 0
-        var leading: CGFloat = 0
-        CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
-
-        let baselineY = edit.bounds.midY - ((ascent - descent) / 2)
         context.setFillColor(edit.fontColor.cgColor)
-        context.translateBy(x: edit.bounds.minX, y: baselineY)
-        PDFTextRenderer.drawGlyphOutlines(for: line, in: context)
+        context.translateBy(x: edit.bounds.minX, y: plan.baselineY(in: edit.bounds))
+        PDFTextRenderer.drawGlyphOutlines(for: plan.line, in: context)
         context.restoreGState()
     }
 }

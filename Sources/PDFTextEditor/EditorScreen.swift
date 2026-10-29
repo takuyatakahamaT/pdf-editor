@@ -313,6 +313,7 @@ struct EditorScreen: View {
             onMoveInsertion: { marker, pageIndex, bounds in
                 model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
             },
+            onBeginExistingInsertionEditing: { id in model.beginReeditingInsertion(id: id) },
             onMoveSelection: { delta in model.moveSelection(by: delta) },
             onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
             onBeginExistingReplacementEditing: { id in model.beginReeditingReplacement(id: id) },
@@ -672,9 +673,13 @@ private struct ContextPanel: View {
                     .labelsHidden()
                 }
 
-                Button("追加する", action: model.commitEditorText)
-                    .buttonStyle(PillButtonStyle(kind: .primary))
-                    .disabled(!model.canCommit)
+                HStack(spacing: 8) {
+                    Button(model.isReeditingInsertion ? "更新する" : "追加する", action: model.commitEditorText)
+                        .buttonStyle(PillButtonStyle(kind: .primary))
+                        .disabled(!model.canCommit)
+                    Button("キャンセル", action: model.cancelInsertionEditing)
+                        .buttonStyle(PillButtonStyle(kind: .ghost))
+                }
             }
         }
     }

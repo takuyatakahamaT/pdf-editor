@@ -3,6 +3,30 @@ import CoreText
 import PDFKit
 
 enum PDFEditEngine {
+    struct InsertionRenderPlan {
+        let line: CTLine
+        let font: CTFont
+        let requiredSize: CGSize
+        let ascent: CGFloat
+        let descent: CGFloat
+
+        func baselineY(in bounds: CGRect) -> CGFloat {
+            bounds.midY - ((ascent - descent) / 2)
+        }
+
+        func inkBounds(in bounds: CGRect) -> CGRect {
+            CTLineGetImageBounds(line, nil).offsetBy(
+                dx: bounds.minX,
+                dy: baselineY(in: bounds)
+            )
+        }
+    }
+
+    struct InsertionFitResult {
+        let fits: Bool
+        let overflow: CGFloat
+    }
+
     static let annotationMarkerPrefix = "PDFTextBench:"
     static let draftMarker = "PDFTextBench:draft"
 
@@ -183,11 +207,15 @@ enum PDFEditEngine {
         fontSize: CGFloat,
         pageBounds: CGRect
     ) -> CGRect {
-        let font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
         let content = text.isEmpty ? "テキストを入力" : text
-        let measured = (content as NSString).size(withAttributes: [.font: font])
-        let width = min(max(measured.width + 12, 72), max(pageBounds.width, 72))
-        let height = max(measured.height + 8, fontSize * 1.45)
+        let plan = insertionRenderPlan(
+            text: content,
+            fontName: fontName,
+            fontSize: fontSize,
+            fontColor: .black
+        )
+        let width = min(max(plan.requiredSize.width, 72), pageBounds.width)
+        let height = min(plan.requiredSize.height, pageBounds.height)
         var origin = CGPoint(x: point.x, y: point.y - height / 2)
         origin.x = min(max(origin.x, pageBounds.minX), max(pageBounds.maxX - width, pageBounds.minX))
         origin.y = min(max(origin.y, pageBounds.minY), max(pageBounds.maxY - height, pageBounds.minY))
@@ -221,43 +249,85 @@ enum PDFEditEngine {
         text: String,
         fontName: String,
         fontSize: CGFloat,
-        fontColor: NSColor
+        fontColor: NSColor,
+        resizesBounds: Bool = true
     ) {
-        let oldBounds = annotation.bounds
-        let pageBounds = page.bounds(for: .mediaBox)
-        let point = CGPoint(x: oldBounds.minX, y: oldBounds.midY)
-        annotation.bounds = insertionBounds(
-            at: point,
-            text: text,
-            fontName: fontName,
-            fontSize: fontSize,
-            pageBounds: pageBounds
-        )
+        if resizesBounds {
+            let oldBounds = annotation.bounds
+            let pageBounds = page.bounds(for: .mediaBox)
+            let point = CGPoint(x: oldBounds.minX, y: oldBounds.midY)
+            annotation.bounds = insertionBounds(
+                at: point,
+                text: text,
+                fontName: fontName,
+                fontSize: fontSize,
+                pageBounds: pageBounds
+            )
+        }
         annotation.contents = text.isEmpty ? "テキストを入力" : text
         annotation.font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
         annotation.fontColor = text.isEmpty ? .secondaryLabelColor : fontColor
     }
 
-    static func fittedFont(
-        named fontName: String?,
-        preferredSize: CGFloat,
+    static func insertionRenderPlan(
         text: String,
-        bounds: CGRect
-    ) -> NSFont {
-        var size = min(max(preferredSize, 6), max(bounds.height * 0.86, 6))
-        let usableWidth = max(bounds.width - 3, 4)
+        fontName: String,
+        fontSize: CGFloat,
+        fontColor: NSColor
+    ) -> InsertionRenderPlan {
+        let appKitFont = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
+        let font = CTFontCreateWithName(appKitFont.fontName as CFString, fontSize, nil)
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): fontColor.cgColor
+            ]
+        )
+        let line = CTLineCreateWithAttributedString(attributed)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let width = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        return InsertionRenderPlan(
+            line: line,
+            font: font,
+            requiredSize: CGSize(
+                width: width + 12,
+                height: max(ascent + descent + leading + 8, fontSize * 1.45)
+            ),
+            ascent: ascent,
+            descent: descent
+        )
+    }
 
-        while size > 6 {
-            let font = fontName.flatMap { NSFont(name: $0, size: size) }
-                ?? NSFont.systemFont(ofSize: size)
-            let measured = (text as NSString).size(withAttributes: [.font: font]).width
-            if measured <= usableWidth {
-                return font
-            }
-            size -= 0.5
-        }
-
-        return fontName.flatMap { NSFont(name: $0, size: 6) }
-            ?? NSFont.systemFont(ofSize: 6)
+    static func insertionFitResult(
+        text: String,
+        fontName: String,
+        fontSize: CGFloat,
+        bounds: CGRect,
+        pageBounds: CGRect
+    ) -> InsertionFitResult {
+        let plan = insertionRenderPlan(
+            text: text,
+            fontName: fontName,
+            fontSize: fontSize,
+            fontColor: .black
+        )
+        let ink = plan.inkBounds(in: bounds)
+        let overflow = max(
+            plan.requiredSize.width - bounds.width,
+            plan.requiredSize.height - bounds.height,
+            pageBounds.minX - bounds.minX,
+            bounds.maxX - pageBounds.maxX,
+            pageBounds.minY - bounds.minY,
+            bounds.maxY - pageBounds.maxY,
+            pageBounds.minX - ink.minX,
+            ink.maxX - pageBounds.maxX,
+            pageBounds.minY - ink.minY,
+            ink.maxY - pageBounds.maxY,
+            0
+        )
+        return InsertionFitResult(fits: overflow <= 0.25, overflow: overflow)
     }
 }

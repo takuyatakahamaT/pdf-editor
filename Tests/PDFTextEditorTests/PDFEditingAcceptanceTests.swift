@@ -754,6 +754,233 @@ struct PDFEditingAcceptanceTests {
         #expect(edgeModel.noticeMessage?.contains("隣接文字またはページ境界") == true)
     }
 
+    @Test("追加済みテキストをA→B→Cと再編集しキャンセル・移動・undo/redoできる")
+    @MainActor
+    func insertionCanBeReeditedCancelledMovedAndReplayed() throws {
+        let source = try makeBlankFixture(pageBounds: CGRect(x: 0, y: 0, width: 300, height: 160))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+        let color = NSColor(calibratedRed: 0.15, green: 0.35, blue: 0.75, alpha: 1)
+        let menlo = try #require(NSFont(name: "Menlo", size: 15))
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 36, y: 72))
+        model.setCustomFontName(menlo.fontName)
+        model.setInsertionFontSize(15)
+        model.setInsertionFontColor(color)
+        model.updateEditorText("A")
+        model.commitEditorText()
+
+        let original = try #require(model.activeReplacements.first)
+        let id = original.id
+        let originalBounds = original.bounds
+        let originalAnnotation = try #require(page.annotations.first)
+        #expect(original.kind == .insertion)
+        #expect(original.outputFontSelection.choice == .custom)
+        #expect(original.outputFontSelection.customFontName == menlo.fontName)
+        #expect(original.fontName == menlo.fontName)
+        #expect(abs(original.fontSize - 15) < 0.01)
+        #expect(originalAnnotation.font?.fontName == menlo.fontName)
+        #expect(abs((originalAnnotation.font?.pointSize ?? 0) - 15) < 0.01)
+        #expect(originalAnnotation.fontColor?.isEqual(color) == true)
+        #expect(page.annotations.count == 1)
+
+        model.beginReeditingInsertion(id: id)
+        #expect(model.replacementText == "A")
+        #expect(model.insertionFontChoice == .custom)
+        #expect(model.customFontName == menlo.fontName)
+        #expect(abs(model.insertionFontSize - 15) < 0.01)
+        #expect(model.insertionFontColor.isEqual(color))
+        #expect(model.insertionDraft?.annotation.bounds == originalBounds)
+        model.updateEditorText("B")
+        model.cancelInsertionEditing()
+        #expect(model.activeReplacements.first?.replacement == "A")
+        #expect(page.annotations.count == 1)
+        #expect(page.annotations.first?.contents == "A")
+
+        model.beginReeditingInsertion(id: id)
+        model.updateEditorText("B")
+        model.commitEditorText()
+        let second = try #require(model.activeReplacements.first)
+        #expect(second.id == id)
+        #expect(second.replacement == "B")
+        #expect(second.bounds == originalBounds)
+        #expect(second.outputFontSelection.choice == .custom)
+        #expect(second.outputFontSelection.customFontName == menlo.fontName)
+        #expect(page.annotations.count == 1)
+
+        model.beginReeditingInsertion(id: id)
+        model.updateEditorText("C")
+        model.commitEditorText()
+        #expect(model.activeReplacements.first?.id == id)
+        #expect(model.activeReplacements.first?.replacement == "C")
+        #expect(page.annotations.count == 1)
+
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "B")
+        #expect(page.annotations.count == 1)
+        #expect(page.annotations.first?.contents == "B")
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "A")
+        #expect(page.annotations.first?.contents == "A")
+        model.redoLastEdit()
+        model.redoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "C")
+        #expect(page.annotations.count == 1)
+
+        let movedBounds = originalBounds.offsetBy(dx: 52, dy: 18)
+        let marker = PDFEditEngine.annotationMarkerPrefix + id.uuidString
+        model.moveInsertion(marker: marker, pageIndex: 0, bounds: movedBounds)
+        #expect(model.activeReplacements.first?.bounds == movedBounds)
+        #expect(page.annotations.count == 1)
+        #expect(page.annotations.first?.bounds == movedBounds)
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.bounds == originalBounds)
+        #expect(page.annotations.first?.bounds == originalBounds)
+        model.redoLastEdit()
+        #expect(model.activeReplacements.first?.bounds == movedBounds)
+        #expect(page.annotations.count == 1)
+
+        model.beginReeditingInsertion(id: id)
+        #expect(model.replacementText == "C")
+        #expect(model.insertionDraft?.annotation.bounds == movedBounds)
+        #expect(model.insertionFontChoice == .custom)
+        #expect(model.customFontName == menlo.fontName)
+        #expect(abs(model.insertionFontSize - 15) < 0.01)
+        model.cancelInsertionEditing()
+        #expect(model.activeReplacements.first?.bounds == movedBounds)
+        #expect(page.annotations.count == 1)
+        #expect(page.annotations.first?.bounds == movedBounds)
+
+        let output = temporaryPDFURL(prefix: "insertion-reedit-size")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: source, edits: model.activeReplacements, to: output)
+        let reopenedDocument = try #require(PDFDocument(url: output))
+        let reopenedPage = try #require(reopenedDocument.page(at: 0))
+        let reopenedGlyph = try #require(PDFGlyphIndex.makeIndex(for: reopenedPage).runs
+            .flatMap(\.glyphs)
+            .filter { $0.text == "C" }
+            .max { $0.paintOrder < $1.paintOrder })
+        #expect(abs(reopenedGlyph.fontSize - 15) < 0.6)
+    }
+
+    @Test("追加テキストは暗黙縮小せずoverflowを拒否し明示した小サイズを受け入れる")
+    @MainActor
+    func insertionOverflowRequiresExplicitSmallerSize() throws {
+        let source = try makeBlankFixture(pageBounds: CGRect(x: 0, y: 0, width: 120, height: 100))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 4, y: 50))
+        model.setInsertionFontChoice(.helveticaNeue)
+        model.setInsertionFontSize(24)
+        model.updateEditorText("MMMMMMMMMMMM")
+        model.commitEditorText()
+        #expect(model.activeReplacements.isEmpty)
+        #expect(model.insertionDraft != nil)
+        #expect(page.annotations.count == 1)
+        #expect(model.noticeMessage?.contains("入力枠またはページ境界") == true)
+        #expect(model.insertionDraft?.annotation.font?.pointSize == 24)
+
+        model.setInsertionFontSize(6)
+        model.commitEditorText()
+        let accepted = try #require(model.activeReplacements.first)
+        #expect(abs(accepted.fontSize - 6) < 0.01)
+        #expect(accepted.outputFontSelection.choice == .helveticaNeue)
+        #expect(page.annotations.count == 1)
+
+        model.beginReeditingInsertion(id: accepted.id)
+        model.setInsertionFontSize(24)
+        model.updateEditorText("MMMMMMMMMMMM")
+        model.commitEditorText()
+        #expect(model.activeReplacements.first?.replacement == "MMMMMMMMMMMM")
+        #expect(model.activeReplacements.first?.fontSize == 6)
+        #expect(model.insertionDraft != nil)
+        #expect(model.noticeMessage?.contains("小さくしてください") == true)
+        model.cancelInsertionEditing()
+        #expect(page.annotations.count == 1)
+        #expect(page.annotations.first?.font?.pointSize == 6)
+    }
+
+    @Test("追加文字の長い再編集は空き幅へ広がり、編集中のUndoは下書きを片付ける")
+    @MainActor
+    func insertionReeditCanGrowAndUndoWhileDrafting() throws {
+        let source = try makeBlankFixture(pageBounds: CGRect(x: 0, y: 0, width: 300, height: 160))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 36, y: 72))
+        model.setInsertionFontChoice(.menlo)
+        model.setInsertionFontSize(14)
+        model.updateEditorText("A")
+        model.commitEditorText()
+        let original = try #require(model.activeReplacements.first)
+
+        model.beginReeditingInsertion(id: original.id)
+        model.updateEditorText("ABCDEFGHIJKL")
+        let grownBounds = try #require(model.insertionDraft?.annotation.bounds)
+        #expect(grownBounds.width > original.bounds.width)
+        #expect(abs(grownBounds.minX - original.bounds.minX) < 0.01)
+        model.commitEditorText()
+        #expect(model.activeReplacements.first?.replacement == "ABCDEFGHIJKL")
+        #expect(model.activeReplacements.first?.bounds == grownBounds)
+        #expect(page.annotations.count == 1)
+
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "A")
+        #expect(page.annotations.first?.bounds == original.bounds)
+        model.beginReeditingInsertion(id: original.id)
+        model.updateEditorText("draft")
+        model.undoLastEdit()
+        #expect(model.insertionDraft == nil)
+        #expect(model.activeReplacements.isEmpty)
+        #expect(page.annotations.isEmpty)
+        model.redoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "A")
+        #expect(page.annotations.count == 1)
+    }
+
+    @Test("利用できない追加書体は要求選択と実出力フォールバックを分けて保持する")
+    @MainActor
+    func insertionUnavailableCustomFontPreservesRequestedChoiceAndResolvedFace() throws {
+        let source = try makeBlankFixture(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 120))
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+        let missingFontName = "PDFEditor-Missing-Font-For-Acceptance-Test"
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 30, y: 60))
+        let resolvedFallbackName = try #require(model.insertionDraft?.automaticFontName)
+        model.setCustomFontName(missingFontName)
+        model.setInsertionFontSize(13)
+        model.updateEditorText("fallback")
+        #expect(model.insertionFontPreviewReason?.contains("利用できない") == true)
+        model.commitEditorText()
+
+        let edit = try #require(model.activeReplacements.first)
+        #expect(edit.outputFontSelection.choice == .custom)
+        #expect(edit.outputFontSelection.customFontName == missingFontName)
+        #expect(edit.fontName == resolvedFallbackName)
+        #expect(abs(edit.fontSize - 13) < 0.01)
+        #expect(page.annotations.first?.font?.fontName
+            == NSFont(name: resolvedFallbackName, size: 13)?.fontName)
+
+        model.beginReeditingInsertion(id: edit.id)
+        #expect(model.insertionFontChoice == .custom)
+        #expect(model.customFontName == missingFontName)
+        #expect(model.effectiveInsertionFontName == resolvedFallbackName)
+        #expect(model.insertionFontPreviewReason?.contains("利用できない") == true)
+        #expect(abs(model.insertionFontSize - 13) < 0.01)
+        model.cancelInsertionEditing()
+        #expect(page.annotations.count == 1)
+    }
+
     private func makeStandaloneReplacementFixture(maxWidth: CGFloat) throws -> (url: URL, target: TextTarget) {
         let font = NSFont(name: "Helvetica", size: 16) ?? .systemFont(ofSize: 16)
         let url = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 120)) { context in
@@ -787,6 +1014,13 @@ struct PDFEditingAcceptanceTests {
             nearbyTextBounds: scanned.nearbyTextBounds
         )
         return (url, target)
+    }
+
+    private func makeBlankFixture(pageBounds: CGRect) throws -> URL {
+        try SyntheticFixture.build(pageBounds: pageBounds) { context in
+            context.setFillColor(NSColor.white.cgColor)
+            context.fill(pageBounds)
+        }
     }
 
     private func makeTwoLineReplacementFixture() throws -> (url: URL, target: TextTarget) {

@@ -20,6 +20,7 @@ struct PDFCanvas: NSViewRepresentable {
     let onSelection: (TextTarget?) -> Void
     let onInsertion: (Int, CGPoint) -> Void
     let onMoveInsertion: (String, Int, CGRect) -> Void
+    let onBeginExistingInsertionEditing: (UUID) -> Void
     let onMoveSelection: (CGPoint) -> Void
     let onMoveExistingEdit: (UUID, CGPoint) -> Void
     let onBeginExistingReplacementEditing: (UUID) -> Void
@@ -37,6 +38,7 @@ struct PDFCanvas: NSViewRepresentable {
             onSelection: onSelection,
             onInsertion: onInsertion,
             onMoveInsertion: onMoveInsertion,
+            onBeginExistingInsertionEditing: onBeginExistingInsertionEditing,
             onMoveSelection: onMoveSelection,
             onMoveExistingEdit: onMoveExistingEdit,
             onBeginExistingReplacementEditing: onBeginExistingReplacementEditing,
@@ -88,6 +90,7 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onSelection = onSelection
         context.coordinator.onInsertion = onInsertion
         context.coordinator.onMoveInsertion = onMoveInsertion
+        context.coordinator.onBeginExistingInsertionEditing = onBeginExistingInsertionEditing
         context.coordinator.onMoveSelection = onMoveSelection
         context.coordinator.onMoveExistingEdit = onMoveExistingEdit
         context.coordinator.onBeginExistingReplacementEditing = onBeginExistingReplacementEditing
@@ -153,6 +156,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.selectionHandler = coordinator.handleSelection
         view.insertionHandler = coordinator.handleInsertion
         view.moveInsertionHandler = coordinator.handleMoveInsertion
+        view.beginExistingInsertionEditingHandler = coordinator.handleBeginExistingInsertionEditing
         view.moveSelectionHandler = coordinator.handleMoveSelection
         view.moveExistingEditHandler = coordinator.handleMoveExistingEdit
         view.beginExistingReplacementEditingHandler = coordinator.handleBeginExistingReplacementEditing
@@ -170,6 +174,7 @@ struct PDFCanvas: NSViewRepresentable {
         var onSelection: (TextTarget?) -> Void
         var onInsertion: (Int, CGPoint) -> Void
         var onMoveInsertion: (String, Int, CGRect) -> Void
+        var onBeginExistingInsertionEditing: (UUID) -> Void
         var onMoveSelection: (CGPoint) -> Void
         var onMoveExistingEdit: (UUID, CGPoint) -> Void
         var onBeginExistingReplacementEditing: (UUID) -> Void
@@ -189,6 +194,7 @@ struct PDFCanvas: NSViewRepresentable {
             onSelection: @escaping (TextTarget?) -> Void,
             onInsertion: @escaping (Int, CGPoint) -> Void,
             onMoveInsertion: @escaping (String, Int, CGRect) -> Void,
+            onBeginExistingInsertionEditing: @escaping (UUID) -> Void,
             onMoveSelection: @escaping (CGPoint) -> Void,
             onMoveExistingEdit: @escaping (UUID, CGPoint) -> Void,
             onBeginExistingReplacementEditing: @escaping (UUID) -> Void,
@@ -207,6 +213,7 @@ struct PDFCanvas: NSViewRepresentable {
             self.onSelection = onSelection
             self.onInsertion = onInsertion
             self.onMoveInsertion = onMoveInsertion
+            self.onBeginExistingInsertionEditing = onBeginExistingInsertionEditing
             self.onMoveSelection = onMoveSelection
             self.onMoveExistingEdit = onMoveExistingEdit
             self.onBeginExistingReplacementEditing = onBeginExistingReplacementEditing
@@ -231,6 +238,9 @@ struct PDFCanvas: NSViewRepresentable {
         func handlePageChange(_ index: Int, _ count: Int) { onPageChange(index, count) }
         func handleMoveInsertion(_ marker: String, _ pageIndex: Int, _ bounds: CGRect) {
             onMoveInsertion(marker, pageIndex, bounds)
+        }
+        func handleBeginExistingInsertionEditing(_ id: UUID) {
+            onBeginExistingInsertionEditing(id)
         }
         func handleMoveSelection(_ delta: CGPoint) { onMoveSelection(delta) }
         func handleMoveExistingEdit(_ id: UUID, _ delta: CGPoint) { onMoveExistingEdit(id, delta) }
@@ -287,6 +297,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var selectionHandler: ((TextTarget?) -> Void)?
     var insertionHandler: ((Int, CGPoint) -> Void)?
     var moveInsertionHandler: ((String, Int, CGRect) -> Void)?
+    var beginExistingInsertionEditingHandler: ((UUID) -> Void)?
     var moveSelectionHandler: ((CGPoint) -> Void)?
     var moveExistingEditHandler: ((UUID, CGPoint) -> Void)?
     var beginExistingReplacementEditingHandler: ((UUID) -> Void)?
@@ -604,8 +615,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             return
         }
         guard let annotation = draggedAnnotation,
-              let page = draggedPage,
-              let document else {
+              let page = draggedPage else {
             super.mouseDragged(with: event)
             return
         }
@@ -645,8 +655,6 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         bounds.origin.x = min(max(bounds.minX, pageBounds.minX), max(pageBounds.maxX - bounds.width, pageBounds.minX))
         bounds.origin.y = min(max(bounds.minY, pageBounds.minY), max(pageBounds.maxY - bounds.height, pageBounds.minY))
         annotation.bounds = bounds
-        let marker = annotation.userName ?? PDFEditEngine.draftMarker
-        moveInsertionHandler?(marker, document.index(for: page), bounds)
         needsDisplay = true
     }
 
@@ -750,7 +758,11 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
             markupCreateHandler?(pageIndex, bounds, points)
             return
         }
-        if draggedAnnotation != nil {
+        if let annotation = draggedAnnotation, let page = draggedPage {
+            if annotation.bounds != dragStartBounds, let document {
+                let marker = annotation.userName ?? PDFEditEngine.draftMarker
+                moveInsertionHandler?(marker, document.index(for: page), annotation.bounds)
+            }
             draggedAnnotation = nil
             draggedPage = nil
             return
@@ -951,6 +963,13 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         if let annotation = page.annotations.reversed().first(where: {
             ($0.userName?.hasPrefix(PDFEditEngine.annotationMarkerPrefix) == true) && $0.bounds.contains(pagePoint)
         }) {
+            if event.clickCount >= 2,
+               let marker = annotation.userName,
+               marker != PDFEditEngine.draftMarker,
+               let id = UUID(uuidString: String(marker.dropFirst(PDFEditEngine.annotationMarkerPrefix.count))) {
+                beginExistingInsertionEditingHandler?(id)
+                return
+            }
             draggedAnnotation = annotation
             draggedPage = page
             dragStartPoint = pagePoint
