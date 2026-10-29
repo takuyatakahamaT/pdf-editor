@@ -364,6 +364,7 @@ enum PDFExportError: Error {
     case unreadableSource
     case cannotCreateContext
     case sourceOverwriteDenied
+    case overlappingEditPaths
 }
 
 private struct PDFInternalLinkRemap: Encodable {
@@ -403,6 +404,15 @@ enum PDFExportEngine {
 
         let internalEdits = edits.filter { $0.storage.isInternal }
         let overlayEdits = edits.filter { !$0.storage.isInternal }
+        for internalEdit in internalEdits {
+            let internalBounds = internalEdit.coverBounds.union(internalEdit.displayedTextBounds)
+            if overlayEdits.contains(where: { overlay in
+                overlay.pageIndex == internalEdit.pageIndex
+                    && internalBounds.intersects(overlay.annotationBounds.union(overlay.displayedTextBounds))
+            }) {
+                throw PDFExportError.overlappingEditPaths
+            }
+        }
         let renderSourceURL: URL
         if internalEdits.isEmpty {
             renderSourceURL = sourceURL

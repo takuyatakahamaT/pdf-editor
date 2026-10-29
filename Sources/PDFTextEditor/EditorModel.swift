@@ -1272,6 +1272,8 @@ final class EditorModel: ObservableObject {
                 to: outputURL
             )
             statusMessage = "保存しました: \(outputURL.lastPathComponent)"
+        } catch PDFExportError.overlappingEditPaths {
+            notice("内部置換と重ね描きが同じ位置で重なるため保存できません。編集位置を離すか、一方の編集を取り消してください。")
         } catch {
             notice("PDFの保存に失敗しました。")
         }

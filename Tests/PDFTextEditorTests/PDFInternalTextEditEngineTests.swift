@@ -265,4 +265,37 @@ struct PDFInternalTextEditEngineTests {
         #expect(!text.contains("A"))
         #expect(page.annotations.contains { $0.contents == "内部置換と併存" })
     }
+
+    @Test("内部置換とoverlayが重なる保存は元の出力を保持して拒否する")
+    @MainActor
+    func overlappingEditPathsAreRejected() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-overlap-\(UUID().uuidString).pdf")
+        let sentinel = Data("既存出力".utf8)
+        try sentinel.write(to: output)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+        let model = try replacementModel(source: source, replacement: "B")
+        let internalEdit = try #require(model.activeReplacements.first)
+        let insertion = ReplacementEdit(
+            insertionOn: 0,
+            bounds: CGRect(x: 20, y: 48, width: 15, height: 16),
+            text: "Z",
+            fontName: "Helvetica",
+            fontSize: 14,
+            fontColor: .black
+        )
+        do {
+            try PDFExportEngine.export(sourceURL: source, edits: [internalEdit, insertion], to: output)
+            Issue.record("重なる編集を保存しました。")
+        } catch PDFExportError.overlappingEditPaths {
+            #expect(try Data(contentsOf: output) == sentinel)
+        } catch {
+            Issue.record("重なり以外のエラーでした: \(error)")
+        }
+    }
 }
