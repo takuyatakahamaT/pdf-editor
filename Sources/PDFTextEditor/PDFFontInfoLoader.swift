@@ -149,8 +149,9 @@ enum PDFFontInfoLoader {
             hasEmbedded = fontFileStream(in: descriptorDict) != nil
         }
 
-        var toUnicode = loadToUnicode(fontDict)
-        let explicitToUnicodeCodes = Set(toUnicode.keys)
+        let explicitToUnicode = loadToUnicode(fontDict)
+        var toUnicode = explicitToUnicode
+        let explicitToUnicodeCodes = Set(explicitToUnicode.keys)
         if toUnicode.isEmpty {
             // `/ToUnicode` を持たない単純フォントも珍しくない
             // (例: 標準14フォントを MacRomanEncoding/WinAnsiEncoding で使う場合)。
@@ -173,7 +174,9 @@ enum PDFFontInfoLoader {
             // 単純 TrueType フォントの文字コードは GID とは限らない。
             // ToUnicode の逆引きは保持し、埋込 TrueType の cmap で code→GID を
             // 解決できたときだけ厳密描画に使う。
-            unicodeToCode: invertToUnicode(toUnicode),
+            // ASCII 補完は選択・警告用の推測にすぎない。誤字を防ぐため、
+            // GID の厳密解決には PDF が明示した ToUnicode だけを使う。
+            unicodeToCode: invertToUnicode(explicitToUnicode),
             simpleEncodingGlyphNames: differencesGlyphNames(in: fontDict),
             isIdentityCIDToGID: false
         )

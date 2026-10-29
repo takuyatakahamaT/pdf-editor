@@ -303,7 +303,9 @@ struct PDFEditEngineTests {
 
         #expect(resolution.isExact)
         #expect(resolution.reason == nil)
-        #expect(resolution.exactGlyphs?.count == 2)
+        // Core Graphics が生成したこのfixtureには明示的なToUnicodeがない。
+        // 埋込フォント自体は維持するが、推測したASCII対応からGIDは生成しない。
+        #expect(resolution.exactGlyphs == nil)
         #expect(CTFontGetGlyphCount(resolution.font) == CTFontGetGlyphCount(embeddedFont))
         #expect(CTFontGetGlyphCount(resolution.font) < CTFontGetGlyphCount(font))
     }
