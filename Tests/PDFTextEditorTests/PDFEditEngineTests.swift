@@ -383,37 +383,6 @@ struct PDFEditEngineTests {
         #expect(embeddedPlan.outputEnd > layout.lineWidth)
     }
 
-    @Test("視認できない幅差では未編集の後続文字を再描画しない")
-    func negligibleWidthDifferenceKeepsOriginalSuffix() {
-        let font = CTFontCreateWithName("HelveticaNeue" as CFString, 9.4395, nil)
-        let line = CTLineCreateWithAttributedString(NSAttributedString(
-            string: "10",
-            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
-        ))
-        let negligible = PDFTextRenderer.ReflowPlan(
-            line: line,
-            shift: -0.0105,
-            outputEnd: 100,
-            scale: 1
-        )
-        let visible = PDFTextRenderer.ReflowPlan(
-            line: line,
-            shift: 0.25,
-            outputEnd: 100.25,
-            scale: 1
-        )
-        let scaled = PDFTextRenderer.ReflowPlan(
-            line: line,
-            shift: 0,
-            outputEnd: 100,
-            scale: 0.98
-        )
-
-        #expect(!PDFTextRenderer.needsSuffixReflow(plan: negligible, fontSize: 9.4395))
-        #expect(PDFTextRenderer.needsSuffixReflow(plan: visible, fontSize: 9.4395))
-        #expect(PDFTextRenderer.needsSuffixReflow(plan: scaled, fontSize: 9.4395))
-    }
-
     @Test("同じ行の複数置換は先の幅変更を後の文字へ累積する")
     func composedReplacementsAccumulateEarlierWidthChanges() throws {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)

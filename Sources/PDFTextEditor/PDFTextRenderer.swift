@@ -149,22 +149,16 @@ enum PDFTextRenderer {
             return
         }
 
-        let redrawsSuffix = needsSuffixReflow(plan: plan, fontSize: edit.fontSize)
-
         // 後続の文字を右へ送って幅を確保する。ページ上の次の文字に当たる場合だけ
         // 縦横比を保ったまま全体を縮め、横方向だけを押しつぶさない。
-        // 幅差が数値誤差程度なら、未編集の後続文字は消去も再描画もしない。
-        // 元 PDF のベクター文字や近接する罫線をそのまま残す。
-        let cover: CGRect
-        if redrawsSuffix {
-            let coverEnd = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
-            var reflowCover = layout.coverBounds
-            reflowCover.origin.x = layout.lineStartX + layout.selectedStartX
-            reflowCover.size.width = max(coverEnd - layout.selectedStartX, 0)
-            cover = reflowCover
-        } else {
-            cover = edit.coverBounds
-        }
+        // 後続グリフが送り幅の左へ張り出す書体でも欠けないよう、
+        // 幅差にかかわらず後続部分は消去して同じフォントで再描画する。
+        // 近接する罫線は layout.coverBounds の縦範囲を文字ボックスに
+        // 限定することで保護する。
+        let coverEnd = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
+        var cover = layout.coverBounds
+        cover.origin.x = layout.lineStartX + layout.selectedStartX
+        cover.size.width = max(coverEnd - layout.selectedStartX, 0)
         context.setFillColor(NSColor.white.cgColor)
         context.fill(cover)
 
@@ -179,22 +173,13 @@ enum PDFTextRenderer {
         } else {
             drawLine(plan.line, at: 0, in: context)
         }
-        if redrawsSuffix {
-            let lineFont = edit.lineFont ?? font
-            for glyph in layout.glyphs[layout.selectedRange.upperBound...] {
-                let glyphText = glyph.text as CFString
-                let drawableFont = CTFontCreateForString(lineFont, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText)))
-                drawText(glyph.text, font: drawableFont, color: edit.fontColor, at: glyph.offsetX - layout.selectedStartX + plan.shift, in: context)
-            }
+        let lineFont = edit.lineFont ?? font
+        for glyph in layout.glyphs[layout.selectedRange.upperBound...] {
+            let glyphText = glyph.text as CFString
+            let drawableFont = CTFontCreateForString(lineFont, glyphText, CFRange(location: 0, length: CFStringGetLength(glyphText)))
+            drawText(glyph.text, font: drawableFont, color: edit.fontColor, at: glyph.offsetX - layout.selectedStartX + plan.shift, in: context)
         }
         context.restoreGState()
-    }
-
-    /// PDF 内の宣言幅と CoreText の実測幅には 1/100pt 程度の差が出る。
-    /// その差だけで行末まで白塗りし直さないため、視認できない範囲は同幅とみなす。
-    static func needsSuffixReflow(plan: ReflowPlan, fontSize: CGFloat) -> Bool {
-        let widthTolerance = max(0.02, fontSize * 0.002)
-        return plan.scale != 1 || abs(plan.shift) > widthTolerance
     }
 
     struct ComposedReplacementPlacement {
