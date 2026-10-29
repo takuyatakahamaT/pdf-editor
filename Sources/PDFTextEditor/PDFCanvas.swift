@@ -290,6 +290,33 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         pow(1.1, -delta / 90)
     }
 
+    static func inlineEditorRequiredHeight(for field: NSTextField) -> CGFloat {
+        ceil(max(field.cell?.cellSize.height ?? 0, field.intrinsicContentSize.height)) + 2
+    }
+
+    static func inlineEditorFrame(
+        pageRect: CGRect,
+        measuredTextWidth: CGFloat,
+        requiredFieldHeight: CGFloat,
+        containerBounds: CGRect
+    ) -> CGRect {
+        let pageRect = pageRect.standardized
+        let x = max(pageRect.minX - 5, containerBounds.minX + 4)
+        let availableWidth = max(containerBounds.maxX - x - 8, 90)
+        let width = min(
+            max(pageRect.width + 18, measuredTextWidth + 24, 90),
+            availableWidth
+        )
+        let height = max(pageRect.height + 10, requiredFieldHeight, 25)
+        let centeredY = pageRect.midY - height / 2
+        let minimumY = containerBounds.minY + 4
+        let maximumY = containerBounds.maxY - height - 4
+        let y = maximumY >= minimumY
+            ? min(max(centeredY, minimumY), maximumY)
+            : centeredY
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
     var replacementOverlayProvider: ReplacementPreviewOverlayProvider?
     var editorMode: EditorMode = .replacement
     var markupTool: PDFMarkupTool = .highlight
@@ -888,9 +915,13 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         field.focusRingType = .none
         field.cell?.lineBreakMode = .byClipping
         let measuredWidth = (field.stringValue as NSString).size(withAttributes: [.font: field.font!]).width
-        let width = min(max(pageRect.width + 18, measuredWidth + 24, 90), max(container.bounds.maxX - pageRect.minX - 8, 90))
-        field.frame = CGRect(x: pageRect.minX - 5, y: pageRect.minY - 4,
-                             width: width, height: max(pageRect.height + 10, 25))
+        let requiredHeight = Self.inlineEditorRequiredHeight(for: field)
+        field.frame = Self.inlineEditorFrame(
+            pageRect: pageRect,
+            measuredTextWidth: measuredWidth,
+            requiredFieldHeight: requiredHeight,
+            containerBounds: container.bounds
+        )
         container.addSubview(field)
         inlineField = field
         window?.makeFirstResponder(field)

@@ -121,4 +121,51 @@ struct PDFZoomStateTests {
         #expect(ClickablePDFView.zoomMultiplier(forScrollDelta: 90) < 1)
         #expect(ClickablePDFView.zoomMultiplier(forScrollDelta: -90) > 1)
     }
+
+    @Test("高倍率でもインライン入力欄がフォントを切らない")
+    @MainActor
+    func inlineEditorFitsLargeFont() {
+        let field = NSTextField()
+        field.stringValue = "09"
+        field.isBezeled = true
+        field.font = NSFont(name: "Noto Sans JP", size: 100)
+            ?? NSFont.systemFont(ofSize: 100)
+        let requiredHeight = ClickablePDFView.inlineEditorRequiredHeight(for: field)
+        let pageRect = CGRect(x: 120, y: 300, width: 80, height: 46)
+        let containerBounds = CGRect(x: 0, y: 0, width: 900, height: 1_200)
+
+        let frame = ClickablePDFView.inlineEditorFrame(
+            pageRect: pageRect,
+            measuredTextWidth: 130,
+            requiredFieldHeight: requiredHeight,
+            containerBounds: containerBounds
+        )
+
+        #expect(frame.height >= requiredHeight)
+        #expect(abs(frame.midY - pageRect.midY) < 0.01)
+        #expect(frame.width >= 154)
+    }
+
+    @Test("大きいインライン入力欄を表示領域の上下端に収める")
+    @MainActor
+    func clampsTallInlineEditorAtContainerEdges() {
+        let containerBounds = CGRect(x: 0, y: 0, width: 600, height: 500)
+        let bottomFrame = ClickablePDFView.inlineEditorFrame(
+            pageRect: CGRect(x: 50, y: 0, width: 50, height: 20),
+            measuredTextWidth: 80,
+            requiredFieldHeight: 126,
+            containerBounds: containerBounds
+        )
+        let topFrame = ClickablePDFView.inlineEditorFrame(
+            pageRect: CGRect(x: 50, y: 490, width: 50, height: 20),
+            measuredTextWidth: 80,
+            requiredFieldHeight: 126,
+            containerBounds: containerBounds
+        )
+
+        #expect(bottomFrame.minY >= containerBounds.minY + 4)
+        #expect(topFrame.maxY <= containerBounds.maxY - 4)
+        #expect(bottomFrame.height == 126)
+        #expect(topFrame.height == 126)
+    }
 }
