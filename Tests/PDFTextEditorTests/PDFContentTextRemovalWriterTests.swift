@@ -48,8 +48,13 @@ struct PDFContentTextRemovalWriterTests {
         deletion.storage = .internalPDFium
         #expect(PDFInternalTextEditEngine.eligibility(sourceURL: source, edit: deletion) == .supported)
         try PDFInternalTextEditEngine.apply(sourceURL: source, edits: [deletion], to: output)
-        let remainingText = PDFDocument(url: output)?.page(at: 0)?.string ?? ""
-        #expect(remainingText.isEmpty)
+        let saved = try #require(PDFDocument(url: output))
+        defer { withExtendedLifetime(saved) {} }
+        let savedPage = try #require(saved.page(at: 0))
+        // PDFKitの版によって空showの位置を空白として抽出する。描画命令から
+        // glyphが除去されたことを別途検証し、抽出のレイアウト用空白だけを許容する。
+        #expect((savedPage.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        #expect(PDFGlyphIndex.makeIndex(for: savedPage).runs.flatMap(\.glyphs).isEmpty)
         try PDFVisualIntegrityValidator.verify(sourceURL: source, outputURL: output, edits: [deletion])
     }
 

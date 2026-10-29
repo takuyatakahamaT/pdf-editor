@@ -41,11 +41,19 @@ enum PDFTextEditPlanner {
         for edit in edits where edit.storage.needsForeground {
             guard let page = document.page(at: edit.pageIndex) else { throw PDFExportError.unreadableSource }
             let index = PDFGlyphIndex.makeIndex(for: page)
-            let region = edit.bounds.union(edit.displayedTextBounds).insetBy(dx: -1, dy: -1)
-            let text = index.runs.flatMap(\.glyphs).filter {
-                $0.isVisible && region.contains(CGPoint(x: $0.advanceBox.midX, y: $0.advanceBox.midY))
-            }.sorted { $0.paintOrder < $1.paintOrder }.map(\.text).joined()
-            guard text.contains(edit.replacement) else {
+            let emitted = try PDFTextRenderer.emittedGlyphs(for: edit)
+            let glyphs = index.runs.flatMap(\.glyphs)
+            // 元の文字枠やinkの高さには依存しない。句読点や大幅なサイズ変更も、
+            // rendererが確定した各glyphの原点・サイズ・Unicodeで照合する。
+            guard emitted.map(\.text).joined() == edit.replacement,
+                  emitted.allSatisfy({ expected in
+                      glyphs.filter { glyph in
+                          glyph.isVisible && !glyph.isInsideForm && glyph.text == expected.text
+                              && abs(glyph.advanceBox.minX - expected.origin.x) <= 0.05
+                              && abs(glyph.baseline - expected.origin.y) <= 0.05
+                              && abs(glyph.fontSize - expected.fontSize) <= 0.05
+                      }.count == 1
+                  }) else {
                 throw PDFInternalTextEditError.failed("変更した文字を保存結果から確認できませんでした。")
             }
         }

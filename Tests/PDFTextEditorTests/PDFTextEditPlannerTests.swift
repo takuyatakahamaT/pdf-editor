@@ -6,7 +6,7 @@ import Testing
 
 @Suite("文字編集計画と背景保持", .serialized)
 struct PDFTextEditPlannerTests {
-    private func fixture(extra: String = "") -> URL {
+    private func fixture(extra: String = "", fontSize: Int = 14, pageHeight: Int = 100) -> URL {
         let cmap = """
         /CIDInit /ProcSet findresource begin 12 dict begin begincmap
         /CMapName /Test def /CMapType 2 def
@@ -22,10 +22,10 @@ struct PDFTextEditPlannerTests {
         return RawPDFBuilder.build(objects: [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 \(pageHeight)] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>",
             RawPDFBuilder.streamObject(dict: "", streamContent:
-                "0.8 g 10 35 220 35 re f 0 G 1 w 10 35 m 230 35 l S 0 g BT /F1 14 Tf 1 0 0 1 20 48 Tm (ABCD) Tj ET " + extra),
+                "0.8 g 10 35 220 35 re f 0 G 1 w 10 35 m 230 35 l S 0 g BT /F1 \(fontSize) Tf 1 0 0 1 20 48 Tm (ABCD) Tj ET " + extra),
             RawPDFBuilder.streamObject(dict: "", streamContent: cmap)
         ])
     }
@@ -111,6 +111,43 @@ struct PDFTextEditPlannerTests {
         #expect(edit.storage == .reconstructed)
         let preview = try PDFTextEditPlanner.previewDocument(sourceURL: source, edits: [edit])
         #expect(preview.page(at: 0)?.string?.contains("Edit") == true)
+    }
+
+    @Test("10ptから72ptへ変更した英字・句読点・日本語を保存して位置で検証する",
+          arguments: ["A", ".", "東"])
+    func largeForegroundUsesEmittedPositions(replacement: String) throws {
+        guard hasPDFium else { return }
+        let source = fixture(fontSize: 10, pageHeight: 240)
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("planner-large-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let document = try #require(PDFDocument(url: source))
+        defer { withExtendedLifetime(document) {} }
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "ABCD" })
+        let target = try #require(index.target(in: run, range: 0..<4, pageIndex: 0))
+        let font = CTFontCreateWithName("HiraginoSans-W3" as CFString, 72, nil)
+        var edit = ReplacementEdit(target: target, replacement: replacement, resolvedFont: font, fontIsExact: false)
+        edit.storage = PDFTextEditPlanner.storage(sourceURL: source, edit: edit)
+        #expect(edit.storage == .reconstructed)
+        #expect(PDFTextRenderer.fitResult(for: edit, in: page.bounds(for: .mediaBox)).fits)
+        let preview = try PDFTextEditPlanner.previewDocument(sourceURL: source, edits: [edit])
+        #expect(preview.page(at: 0)?.string?.contains(replacement) == true)
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        try PDFTextEditPlanner.verifyForeground(in: output, edits: [edit])
+        // 同じ文字が別の位置に存在しても、誤った原点の編集としては成功させない。
+        let misplacedTarget = TextTarget(
+            pageIndex: 0, bounds: target.bounds, baseline: target.baseline + 20,
+            originalText: target.originalText, fontSize: target.fontSize, fontColor: target.fontColor,
+            fontKey: target.fontKey, fontIsExact: target.fontIsExact,
+            coverBounds: target.coverBounds, maxWidth: target.maxWidth
+        )
+        var misplaced = ReplacementEdit(target: misplacedTarget, replacement: replacement,
+                                        resolvedFont: font, fontIsExact: false)
+        misplaced.storage = .reconstructed
+        #expect(throws: (any Error).self) {
+            try PDFTextEditPlanner.verifyForeground(in: output, edits: [misplaced])
+        }
     }
 
     @Test("編集済み文字を削除しても前の文字を残さずundoで復元する")
