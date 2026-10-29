@@ -310,8 +310,12 @@ struct PageTextIndex {
         if let nearestLeftEnd { coverMinX = max(coverMinX, nearestLeftEnd) }
         if let nearestRightStart { coverMaxX = min(coverMaxX, nearestRightStart) }
         if coverMaxX < coverMinX { coverMaxX = coverMinX }
-        var coverMinY = bounds.minY - 0.05 * fontSize
-        var coverMaxY = bounds.maxY + 0.05 * fontSize
+        // `advanceBox` はフォントの ascent/descent を含み、元グリフを消すために
+        // 必要な縦範囲をすでに持っている。ここをさらに膨張させると、請求書の
+        // 日付欄のように文字へ近接した罫線まで白塗りしてしまうため、縦方向は
+        // 文字ボックスそのものに限定する。左右だけは隣接文字との隙間内で余白を取る。
+        var coverMinY = bounds.minY
+        var coverMaxY = bounds.maxY
 
         // 上下の行の box を越えないようクランプする。
         for other in runs where other.fontKey != run.fontKey || abs(other.baseline - run.baseline) > 0.01 || other.box != run.box {
