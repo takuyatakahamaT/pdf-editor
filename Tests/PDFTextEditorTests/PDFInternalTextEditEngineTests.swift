@@ -14,25 +14,32 @@ struct PDFInternalTextEditEngineTests {
         /CMapName /InternalEditLatin def
         /CMapType 2 def
         1 begincodespacerange <00> <FF> endcodespacerange
-        4 beginbfchar
+        5 beginbfchar
         <41> <0041>
         <42> <0042>
         <43> <0043>
+        <44> <0044>
         <45> <0045>
         endbfchar
         endcmap CMapName currentdict /CMap defineresource pop end end
         """
 
-    private func fixture(content: String) -> URL {
-        RawPDFBuilder.build(objects: [
+    private func fixture(content: String, withLink: Bool = false) -> URL {
+        var objects = [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
-                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+                + "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R "
+                + (withLink ? "/Annots [7 0 R] >>" : ">>"),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>",
             RawPDFBuilder.streamObject(dict: "", streamContent: content),
             RawPDFBuilder.streamObject(dict: "", streamContent: asciiToUnicode)
-        ])
+        ]
+        if withLink {
+            objects.append("<< /Type /Annot /Subtype /Link /Rect [150 40 190 60] /Border [0 0 0] "
+                + "/A << /S /URI /URI (https://example.com) >> >>")
+        }
+        return RawPDFBuilder.build(objects: objects)
     }
 
     private func pdfiumIsConfigured() -> Bool {
@@ -92,6 +99,42 @@ struct PDFInternalTextEditEngineTests {
         let editedAgain = try #require(PDFDocument(url: reopenedOutput)?.page(at: 0)?.string)
         #expect(editedAgain.contains("E"))
         #expect(!editedAgain.contains("B"))
+    }
+
+    @Test("別々の文字objectを同時に内部置換し、元のリンクを保持する")
+    @MainActor
+    func multipleInternalEditsPreserveLink() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET "
+                + "BT /F1 14 Tf 1 0 0 1 20 20 Tm (C) Tj ET",
+            withLink: true
+        )
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-multiple-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+        for (oldText, newText) in [("A", "E"), ("C", "D")] {
+            let index = PDFGlyphIndex.makeIndex(for: page)
+            let run = try #require(index.runs.first { $0.text == oldText })
+            let target = try #require(index.target(in: run, range: 0..<run.glyphs.count, pageIndex: 0))
+            model.select(target)
+            model.updateEditorText(newText)
+            model.commitEditorText()
+        }
+        let edits = model.activeReplacements
+        #expect(edits.count == 2)
+        #expect(edits.allSatisfy { $0.storage == .internalPDFium })
+        try PDFExportEngine.export(sourceURL: source, edits: edits, to: output)
+        let outputPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        let text = try #require(outputPage.string)
+        #expect(text.contains("E") && text.contains("D"))
+        #expect(!text.contains("A") && !text.contains("C"))
+        #expect(outputPage.annotations.contains { $0.type == "Link" })
     }
 
     @Test("同じ選択を再編集しても内部状態とundo/redoを保つ")
