@@ -234,7 +234,7 @@ enum PDFInternalTextEditEngine {
             throw PDFInternalTextEditError.unsupported("選択位置に別の可視文字が重なっており対象objectが曖昧です。")
         }
         guard edit.sourceIsPlainTextObject else {
-            throw PDFInternalTextEditError.unsupported("単一Tj以外（TJ・複数show・Form・marked content）は対象外です。")
+            throw PDFInternalTextEditError.unsupported("単一Tjまたは単一文字列TJ以外（複数show・調整付きTJ・Form・marked content）は対象外です。")
         }
         guard edit.hasExplicitSourceMapping else {
             throw PDFInternalTextEditError.unsupported("選択文字の明示ToUnicodeがありません。")

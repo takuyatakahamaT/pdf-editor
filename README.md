@@ -41,7 +41,7 @@ mainに入った変更は署名付きリリースとして公開されます。�
 
 未埋め込みフォントの置換では、同じ行に続く文字を右へ移して置換後の幅を作ります。PDFのフォント名に一致するローカルフォントがない場合は、同梱のNoto Sans JPを使います。このMacにMicrosoft Wordがあれば、Word内の `msgothic.ttc` をこのアプリの実行中だけ登録し、MS ゴシックを置換とテキスト追加に使えます。フォント本体はアプリへコピーしません。Wordにない別の `.ttf` / `.otf` / `.ttc` は上部の「ツール」メニューの「フォントを読み込む…」から登録できます。Noto Sans JPのライセンスは `Resources/ThirdParty/NotoSansJP-OFL.txt` に収録しています。
 
-既存文字のうち、PDFiumとPageTextIndexの両方で「ページ直下の単一`Tj` text object全体、明示ToUnicode、標準14フォント、同じglyph幅、非回転・非透明・非marked content」と証明できた置換だけは、保存時に元objectの文字列をPDF内部で置換します。保存後のファイルを再openし、置換文字、元文字の不在、ページ数・geometryを再検証します。条件外は理由を表示して従来のoverlayへ送り、PDFiumが無いSwiftPMビルドでもoverlayは利用できます。
+既存文字のうち、PDFiumとPageTextIndexの両方で「ページ直下の単一`Tj`または単一文字列だけの`TJ` text object全体、明示ToUnicode、標準14フォント、同じglyph幅、非回転・非透明・非marked content」と証明できた置換だけは、保存時に元objectの文字列をPDF内部で置換します。保存後のファイルを再openし、置換文字、元文字の不在、ページ数・geometryを再検証します。条件外は理由を表示して従来のoverlayへ送り、PDFiumが無いSwiftPMビルドでもoverlayは利用できます。
 
 PDF表示の右下の操作で拡大・縮小、倍率の直接入力、ページ全体・ページ幅・実寸表示を切り替えられます。上部のファイル名の横でページを送れます。`+` / `-` / `0` キー、CommandまたはControlキーを押しながらのマウスホイール／スクロール、トラックパッドのピンチ操作でも倍率を変えられます。虫眼鏡を使うとポインター付近を一時的に拡大でき、`Esc`で閉じられます。表示倍率の変更はPDFの内容や編集座標を変更しません。
 

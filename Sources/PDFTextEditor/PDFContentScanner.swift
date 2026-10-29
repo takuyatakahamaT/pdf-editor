@@ -326,7 +326,8 @@ private func opShowTextArray(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRa
     for index in 0..<count {
         var stringRef: CGPDFStringRef?
         if CGPDFArrayGetString(array, index, &stringRef), let stringRef {
-            showString(stringRef, state: state, operatorKind: .tjArray, operationID: operationID)
+            let kind: PDFTextShowOperator = count == 1 ? .singleStringTJ : .tjArray
+            showString(stringRef, state: state, operatorKind: kind, operationID: operationID)
             continue
         }
         var number: CGPDFReal = 0

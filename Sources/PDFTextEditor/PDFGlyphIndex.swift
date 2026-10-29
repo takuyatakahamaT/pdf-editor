@@ -28,7 +28,7 @@ struct ScannedGlyph {
     var textRenderingMode: Int = 0
     /// content streamを走査した順番。後から描かれた重なり文字を選択するために使う。
     var paintOrder: Int = 0
-    /// 元のshow演算子。内部置換は単一の `Tj` 全体だけを許可する。
+    /// 元のshow演算子。内部置換は単一の `Tj` または単一文字列だけの `TJ` 全体を許可する。
     var showOperator: PDFTextShowOperator = .unknown
     var showOperationID: Int = -1
     var isInsideForm: Bool = false
@@ -39,6 +39,7 @@ struct ScannedGlyph {
 
 enum PDFTextShowOperator: Equatable {
     case tj
+    case singleStringTJ
     case tjArray
     case quote
     case doubleQuote
@@ -390,7 +391,8 @@ struct PageTextIndex {
         let sourceIsPlainTextObject = operationIDs.count == 1
             && operationIDs.first.map { $0 >= 0 } == true
             && clusterGlyphs.allSatisfy {
-                $0.showOperator == .tj && !$0.isInsideForm && !$0.isInsideMarkedContent
+                ($0.showOperator == .tj || $0.showOperator == .singleStringTJ)
+                    && !$0.isInsideForm && !$0.isInsideMarkedContent
             }
 
         return TextTarget(

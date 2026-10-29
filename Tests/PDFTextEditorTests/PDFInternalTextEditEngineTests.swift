@@ -14,10 +14,11 @@ struct PDFInternalTextEditEngineTests {
         /CMapName /InternalEditLatin def
         /CMapType 2 def
         1 begincodespacerange <00> <FF> endcodespacerange
-        3 beginbfchar
+        4 beginbfchar
         <41> <0041>
         <42> <0042>
         <43> <0043>
+        <45> <0045>
         endbfchar
         endcmap CMapName currentdict /CMap defineresource pop end end
         """
@@ -61,9 +62,12 @@ struct PDFInternalTextEditEngineTests {
         let sourceData = try Data(contentsOf: source)
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdfium-internal-supported-\(UUID().uuidString).pdf")
+        let reopenedOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-reopened-\(UUID().uuidString).pdf")
         defer {
             try? FileManager.default.removeItem(at: source)
             try? FileManager.default.removeItem(at: output)
+            try? FileManager.default.removeItem(at: reopenedOutput)
         }
 
         let model = try replacementModel(source: source, replacement: "B")
@@ -80,6 +84,14 @@ struct PDFInternalTextEditEngineTests {
         #expect(reopened.page(at: 0)?.string?.contains("A") == false)
         #expect(PDFDocument(url: source)?.page(at: 0)?.string?.contains("A") == true)
         #expect(try Data(contentsOf: source) == sourceData)
+
+        let reopenedModel = try replacementModel(source: output, replacement: "E")
+        let reopenedEdit = try #require(reopenedModel.activeReplacements.first)
+        #expect(reopenedEdit.storage == .internalPDFium)
+        try PDFExportEngine.export(sourceURL: output, edits: [reopenedEdit], to: reopenedOutput)
+        let editedAgain = try #require(PDFDocument(url: reopenedOutput)?.page(at: 0)?.string)
+        #expect(editedAgain.contains("E"))
+        #expect(!editedAgain.contains("B"))
     }
 
     @Test("同じ選択を再編集しても内部状態とundo/redoを保つ")
@@ -137,12 +149,12 @@ struct PDFInternalTextEditEngineTests {
         #expect(PDFDocument(url: output)?.page(at: 0)?.string?.contains("B") == true)
     }
 
-    @Test("TJ・marked content・分割show・重複objectを内部置換しない")
+    @Test("複数要素TJ・marked content・分割show・重複objectを内部置換しない")
     @MainActor
     func splitAndAmbiguousSelectionsAreUnsupported() throws {
         guard pdfiumIsConfigured() else { return }
         let split = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj [(B) 0 (C)] TJ ET")
-        let tjArray = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm [(A)] TJ ET")
+        let tjArray = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm [(A) 0 (B)] TJ ET")
         let marked = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm /Span BMC (A) Tj EMC ET")
         let ambiguous = fixture(content: """
             BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET
@@ -163,12 +175,12 @@ struct PDFInternalTextEditEngineTests {
         }
         #expect(splitReason.contains("複数show"))
 
-        let tjModel = try replacementModel(source: tjArray, replacement: "B")
+        let tjModel = try replacementModel(source: tjArray, replacement: "BC")
         guard case .overlay(let tjReason) = try #require(tjModel.activeReplacements.first).storage else {
             Issue.record("TJが内部置換として扱われました。")
             return
         }
-        #expect(tjReason.contains("単一Tj"))
+        #expect(tjReason.contains("調整付きTJ"))
 
         let markedModel = try replacementModel(source: marked, replacement: "B")
         guard case .overlay(let markedReason) = try #require(markedModel.activeReplacements.first).storage else {
