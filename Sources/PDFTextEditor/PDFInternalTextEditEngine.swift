@@ -124,7 +124,7 @@ enum PDFInternalTextEditEngine {
         do { try writer.data.write(to: stagedURL, options: .atomic) }
         catch { throw PDFInternalTextEditError.failed("一時PDFを書き出せませんでした。") }
 
-        try verify(sourceURL: sourceURL, outputURL: stagedURL, edits: edits, api: api)
+        try verify(sourceURL: sourceURL, outputURL: stagedURL, edits: edits, api: api, requireObjectGeometry: true)
         do { try writer.data.write(to: outputURL, options: .atomic) }
         catch { throw PDFInternalTextEditError.failed("検証済みPDFを一時出力へ配置できませんでした。") }
     }
@@ -136,7 +136,7 @@ enum PDFInternalTextEditEngine {
         let api = try PDFiumAPI.load()
         api.initialize()
         defer { api.destroyLibrary() }
-        try verify(sourceURL: sourceURL, outputURL: outputURL, edits: edits, api: api)
+        try verify(sourceURL: sourceURL, outputURL: outputURL, edits: edits, api: api, requireObjectGeometry: false)
     }
 
     private static func validateEditSet(_ edits: [ReplacementEdit]) throws {
@@ -442,7 +442,8 @@ enum PDFInternalTextEditEngine {
         sourceURL: URL,
         outputURL: URL,
         edits: [ReplacementEdit],
-        api: PDFiumAPI
+        api: PDFiumAPI,
+        requireObjectGeometry: Bool
     ) throws {
         guard let sourcePDF = PDFDocument(url: sourceURL), let outputPDF = PDFDocument(url: outputURL),
               sourcePDF.pageCount == outputPDF.pageCount else {
@@ -472,6 +473,17 @@ enum PDFInternalTextEditEngine {
                 throw PDFInternalTextEditError.failed("保存後の文字を再抽出できません。")
             }
             pageTexts.append(api.extractedText(textPage))
+            if requireObjectGeometry {
+                do {
+                    for edit in edits where edit.pageIndex == pageIndex {
+                        try verifyEditedGeometry(edit, page: page, textPage: textPage, api: api)
+                    }
+                } catch {
+                    api.closeTextPage(textPage)
+                    api.closePage(page)
+                    throw error
+                }
+            }
             api.closeTextPage(textPage)
             api.closePage(page)
         }
@@ -481,6 +493,62 @@ enum PDFInternalTextEditEngine {
                   pageTexts[edit.pageIndex].contains(edit.replacement),
                   !allText.contains(edit.sourceText) else {
                 throw PDFInternalTextEditError.failed("保存後に置換文字を確認できないか、元文字が抽出結果に残っています。")
+            }
+        }
+    }
+
+    private static func verifyEditedGeometry(
+        _ edit: ReplacementEdit,
+        page: PDFiumHandle,
+        textPage: PDFiumHandle,
+        api: PDFiumAPI
+    ) throws {
+        let replacementScalars = Array(edit.replacement.unicodeScalars)
+        let charCount = api.textCountChars(textPage)
+        let objectCount = api.pageObjectCount(page)
+        guard charCount > 0, objectCount >= 0,
+              replacementScalars.count == edit.sourceGlyphBounds.count else {
+            throw PDFInternalTextEditError.failed("保存後の文字単位geometryを照合できません。")
+        }
+        var indicesByObject: [UInt: [Int32]] = [:]
+        for index in 0..<charCount {
+            guard let object = api.textObjectForCharacter(textPage, index) else { continue }
+            indicesByObject[UInt(bitPattern: object), default: []].append(index)
+        }
+        var matched: [[Int32]] = []
+        for objectIndex in 0..<objectCount {
+            guard let object = api.pageObject(page, objectIndex), api.pageObjectType(object) == 1,
+                  api.objectText(object, textPage: textPage) == edit.replacement,
+                  let indices = indicesByObject[UInt(bitPattern: object)],
+                  indices.count == replacementScalars.count else { continue }
+            var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
+            guard api.pageObjectBounds(object, &left, &bottom, &right, &top) != 0 else { continue }
+            let bounds = CGRect(
+                x: CGFloat(left), y: CGFloat(bottom),
+                width: CGFloat(right - left), height: CGFloat(top - bottom)
+            ).standardized
+            guard bounds.intersects(edit.bounds.insetBy(dx: -edit.sourceFontSize, dy: -edit.sourceFontSize)) else {
+                continue
+            }
+            matched.append(indices)
+        }
+        guard matched.count == 1, let indices = matched.first else {
+            throw PDFInternalTextEditError.failed("保存後の文字objectを一意に特定できません。")
+        }
+        for (offset, index) in indices.enumerated() {
+            var box = PDFiumRect()
+            let hasBox = withUnsafeMutablePointer(to: &box) {
+                api.textLooseCharBox(textPage, index, UnsafeMutableRawPointer($0))
+            }
+            let savedBox = CGRect(
+                x: CGFloat(box.left), y: CGFloat(box.bottom),
+                width: CGFloat(box.right - box.left), height: CGFloat(box.top - box.bottom)
+            )
+            guard hasBox != 0,
+                  api.textUnicode(textPage, index) == replacementScalars[offset].value,
+                  abs(api.textFontSize(textPage, index) - Double(edit.sourceFontSize)) <= 0.05,
+                  boxesMatch(edit.sourceGlyphBounds[offset], savedBox, fontSize: edit.sourceFontSize) else {
+                throw PDFInternalTextEditError.failed("保存後の文字サイズ・位置を維持できませんでした。")
             }
         }
     }
