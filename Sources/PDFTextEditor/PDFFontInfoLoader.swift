@@ -66,6 +66,7 @@ enum PDFFontInfoLoader {
             descent: descent,
             hasEmbeddedProgram: hasEmbedded,
             unicodeToCode: unicodeToCode,
+            simpleEncodingGlyphNames: [:],
             isIdentityCIDToGID: isIdentity
         )
     }
@@ -173,6 +174,7 @@ enum PDFFontInfoLoader {
             // ToUnicode の逆引きは保持し、埋込 TrueType の cmap で code→GID を
             // 解決できたときだけ厳密描画に使う。
             unicodeToCode: invertToUnicode(toUnicode),
+            simpleEncodingGlyphNames: differencesGlyphNames(in: fontDict),
             isIdentityCIDToGID: false
         )
     }
@@ -295,6 +297,35 @@ enum PDFFontInfoLoader {
 
     private static func supportedStandardEncoding(_ name: String) -> Bool {
         ["StandardEncoding", "WinAnsiEncoding", "MacRomanEncoding"].contains(name)
+    }
+
+    private static func differencesGlyphNames(in fontDict: CGPDFDictionaryRef) -> [Int: String] {
+        var encodingDict: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(fontDict, "Encoding", &encodingDict), let encodingDict else {
+            return [:]
+        }
+        var differences: CGPDFArrayRef?
+        guard CGPDFDictionaryGetArray(encodingDict, "Differences", &differences), let differences else {
+            return [:]
+        }
+
+        var result: [Int: String] = [:]
+        var code: Int?
+        for index in 0..<CGPDFArrayGetCount(differences) {
+            var integer: CGPDFInteger = 0
+            if CGPDFArrayGetInteger(differences, index, &integer) {
+                let value = Int(integer)
+                code = (0...255).contains(value) ? value : nil
+                continue
+            }
+            var glyphNamePtr: UnsafePointer<Int8>?
+            guard CGPDFArrayGetName(differences, index, &glyphNamePtr),
+                  let glyphNamePtr,
+                  let current = code else { continue }
+            result[current] = String(cString: glyphNamePtr)
+            code = current < 255 ? current + 1 : nil
+        }
+        return result
     }
 
     private static func name(in dict: CGPDFDictionaryRef, key: String) -> String? {

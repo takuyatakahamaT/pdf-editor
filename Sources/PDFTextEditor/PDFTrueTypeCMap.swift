@@ -18,11 +18,12 @@ enum PDFTrueTypeCMap {
             switch (platformID, encodingID) {
             case (3, 0): return 0 // Windows Symbol
             case (1, 0): return 1 // Macintosh Roman / subset code space
-            case (3, 1): return 2 // Windows Unicode BMP
-            case (3, 10): return 3 // Windows Unicode full repertoire
-            case (0, _): return 4 // Unicode platform
-            default: return 5
+            default: return 2
             }
+        }
+
+        var usesPDFCodeSpaceDirectly: Bool {
+            (platformID == 3 && encodingID == 0) || (platformID == 1 && encodingID == 0)
         }
     }
 
@@ -56,7 +57,7 @@ enum PDFTrueTypeCMap {
         }
 
         var visitedOffsets = Set<Int>()
-        for record in records.sorted(by: { lhs, rhs in
+        for record in records.filter(\.usesPDFCodeSpaceDirectly).sorted(by: { lhs, rhs in
             lhs.priority == rhs.priority ? lhs.offset < rhs.offset : lhs.priority < rhs.priority
         }) where visitedOffsets.insert(record.offset).inserted {
             var candidateCodes = [code]

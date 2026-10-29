@@ -273,7 +273,12 @@ enum PDFEmbeddedFontLoader {
             if info.isIdentityCIDToGID {
                 glyph = code <= Int(CGGlyph.max) ? CGGlyph(code) : nil
             } else if info.bytesPerCode == 1 {
-                glyph = PDFTrueTypeCMap.glyphID(forCharacterCode: code, in: font)
+                glyph = simpleTrueTypeGlyph(
+                    for: String(character),
+                    pdfCode: code,
+                    info: info,
+                    font: font
+                )
             } else {
                 glyph = nil
             }
@@ -281,6 +286,66 @@ enum PDFEmbeddedFontLoader {
             result.append((glyph, info.width(for: code)))
         }
         return result
+    }
+
+    private static func simpleTrueTypeGlyph(
+        for character: String,
+        pdfCode: Int,
+        info: PDFFontInfo,
+        font: CTFont
+    ) -> CGGlyph? {
+        if let glyphName = info.simpleEncodingGlyphNames[pdfCode] {
+            let graphicsFont = CTFontCopyGraphicsFont(font, nil)
+            let namedGlyph = graphicsFont.getGlyphWithGlyphName(name: glyphName as CFString)
+            if isValidGlyphID(Int(namedGlyph), in: font) {
+                return namedGlyph
+            }
+        }
+
+        let directGlyph = PDFTrueTypeCMap.glyphID(forCharacterCode: pdfCode, in: font)
+        let unicodeGlyph = unicodeGlyph(for: character, in: font)
+        if let directGlyph, directGlyph == unicodeGlyph {
+            return directGlyph
+        }
+
+        let pdfWidth = info.width(for: pdfCode)
+        let directMatchesWidth = directGlyph.map {
+            glyph($0, matchesPDFWidth: pdfWidth, in: font)
+        } ?? false
+        let unicodeMatchesWidth = unicodeGlyph.map {
+            glyph($0, matchesPDFWidth: pdfWidth, in: font)
+        } ?? false
+
+        switch (directMatchesWidth, unicodeMatchesWidth) {
+        case (true, false): return directGlyph
+        case (false, true): return unicodeGlyph
+        default:
+            // Encoding と cmap の文字空間が衝突し、どちらが正しいか
+            // 一意に証明できない。誤字を「厳密」扱いせず代替経路へ戻す。
+            return nil
+        }
+    }
+
+    private static func unicodeGlyph(for character: String, in font: CTFont) -> CGGlyph? {
+        let utf16 = Array(character.utf16)
+        guard utf16.count == 1 else { return nil }
+        var codeUnit = utf16[0]
+        var glyph: CGGlyph = 0
+        guard CTFontGetGlyphsForCharacters(font, &codeUnit, &glyph, 1),
+              isValidGlyphID(Int(glyph), in: font) else { return nil }
+        return glyph
+    }
+
+    private static func glyph(_ glyph: CGGlyph, matchesPDFWidth pdfWidth: CGFloat, in font: CTFont) -> Bool {
+        let size = CTFontGetSize(font)
+        guard size.isFinite, size > 0, pdfWidth.isFinite, pdfWidth > 0 else { return false }
+        var candidate = glyph
+        var advance = CGSize.zero
+        guard CTFontGetAdvancesForGlyphs(font, .horizontal, &candidate, &advance, 1) > 0,
+              advance.width.isFinite else { return false }
+        let emWidth = advance.width / size
+        let tolerance = max(0.02, pdfWidth * 0.03)
+        return abs(emWidth - pdfWidth) <= tolerance
     }
 
     static func isValidGlyphID(_ code: Int, in font: CTFont) -> Bool {

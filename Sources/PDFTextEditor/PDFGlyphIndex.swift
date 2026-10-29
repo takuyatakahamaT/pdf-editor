@@ -752,6 +752,9 @@ struct PDFFontInfo {
     /// 埋込 cmap を使って実際の GID を求める。置換文字列の全文字を解決できた
     /// 場合だけ、Unicode レイアウトを介さず元の GID を直接描画する。
     var unicodeToCode: [String: Int]
+    /// 単純フォントの `/Encoding /Differences` で明示された code→glyph name。
+    /// 埋込フォントに glyph name が残っている場合は cmap より優先する。
+    var simpleEncodingGlyphNames: [Int: String] = [:]
     /// Type0/CIDFontType2 で `/CIDToGIDMap` が `/Identity`（または省略= 既定 Identity）
     /// の場合のみ true。true のときは code をそのまま GID として使う。
     /// 単純 TrueType フォントは false だが、別途 cmap で code→GID を解決する。
@@ -769,6 +772,7 @@ struct PDFFontInfo {
         descent: -0.2,
         hasEmbeddedProgram: false,
         unicodeToCode: [:],
+        simpleEncodingGlyphNames: [:],
         isIdentityCIDToGID: false
     )
 }
