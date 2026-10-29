@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- PDF editor のアプリアイコン（NIHO の配色・生成りの角丸タイル）。scripts/build-app-icon.sh で AppIcon.png と AppIcon.icns を作る -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FDFCF9"/>
+      <stop offset="1" stop-color="#F1EDE6"/>
+    </linearGradient>
+    <filter id="tile-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#2E2A24" flood-opacity=".22"/>
+    </filter>
+    <filter id="paper-lift" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#4D5E71" flood-opacity=".16"/>
+    </filter>
+  </defs>
+
+  <!-- タイル -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#tile)" filter="url(#tile-shadow)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="185" fill="none" stroke="#FFFFFF" stroke-opacity=".9" stroke-width="3"/>
+
+  <!-- 紙と折り返し -->
+  <g filter="url(#paper-lift)">
+    <path d="M342,212 C435.6,202.7 538.5,213 612,212 C653.6,258.6 689.8,290.2 738,338 C732.7,492 744.1,646 738,754 Q738,778 714,778 C591,772.1 465,781.3 342,778 Q318,778 318,754 C308.3,579.9 324.6,410.1 318,236 Q318,212 342,212 Z" fill="#FFFFFF"/>
+  </g>
+  <path d="M612,212 C616,262.4 610,300.2 614,320 Q616,338 634,338 L738,338 C689.8,290.2 653.6,258.6 612,212 Z" fill="#ECE7DF"/>
+
+  <!-- 文字の行・選択・入力カーソル -->
+  <path d="M392,382 C449.4,376 506.8,378.4 566,381.8" fill="none" stroke="#4D5E71" stroke-width="44" stroke-linecap="round"/>
+  <path d="M388,446 C467.3,442.1 562.7,447.9 642,446 Q674,446 674,478 C674.5,480.3 675.9,509.7 674,512 Q674,544 642,544 C562.7,545.7 467.3,543 388,544 Q356,544 356,512 C358,509.7 356.2,480.3 356,478 Q356,446 388,446 Z" fill="#BCD499"/>
+  <path d="M394,495 C468.6,489 543.2,494.2 620,494.1" fill="none" stroke="#4D5E71" stroke-width="44" stroke-linecap="round"/>
+  <path d="M676,439.4 L676,550.6 M648,424 C663.4,424 676,428.2 676,439.4 C676,428.2 688.6,424 704,424 M648,566 C663.4,566 676,561.8 676,550.6 C676,561.8 688.6,566 704,566" fill="none" stroke="#4D5E71" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- PDF の札 -->
+  <path d="M304,610 C363.6,605.2 464.4,613.1 524,610 Q583,610 584,688 Q583,766 524,766 C464.4,763.2 363.6,762.6 304,766 Q245,766 246,688 Q246,610 304,610 Z" fill="#F09B84"/>
+  <path d="M321,725 V649 H343 C377,649 377,693 343,693 H321 M395,649 V725 H409 C459,725 459,649 409,649 Z M515,649 H477 V725 M477,686 H509" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
