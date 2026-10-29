@@ -21,7 +21,7 @@ struct EditorScreen: View {
                 NihoDivider()
             }
 
-            if let document = model.document {
+            if let document = model.displayedDocument {
                 HStack(spacing: 0) {
                     canvas(document)
                     ContextPanel()
@@ -296,6 +296,7 @@ struct EditorScreen: View {
     private func canvas(_ document: PDFDocument) -> some View {
         PDFCanvas(
             document: document,
+            sourceDocumentRevision: model.sourceDocumentRevision,
             revision: model.revision,
             mode: model.mode,
             markupTool: model.selectedMarkupTool,

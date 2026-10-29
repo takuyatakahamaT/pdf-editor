@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Foundation
 import PDFKit
 import Testing
@@ -48,6 +49,81 @@ struct PDFInternalTextEditEngineTests {
         return path.map { FileManager.default.fileExists(atPath: $0) } == true
     }
 
+    private func embeddedTrueTypeFixture(
+        sourceText: String = "DETAILS",
+        mappedReplacement: String = "1"
+    ) throws -> URL {
+        let fontURL = URL(fileURLWithPath: "/System/Library/Fonts/Supplemental/Arial.ttf")
+        let fontData = try Data(contentsOf: fontURL)
+        guard let provider = CGDataProvider(url: fontURL as CFURL),
+              let graphicsFont = CGFont(provider) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let font = CTFontCreateWithGraphicsFont(graphicsFont, 1000, nil, nil)
+        let widths = (0...255).map { code -> String in
+            var character = UniChar(code)
+            var glyph: CGGlyph = 0
+            var advance = CGSize.zero
+            guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0,
+                  CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1) > 0 else {
+                return "0"
+            }
+            return String(format: "%.0f", advance.width)
+        }.joined(separator: " ")
+        func toUnicodeCMap(for text: String, name: String) -> String {
+            let mappedCharacters = Set(text).sorted()
+            let entries = mappedCharacters.map { character -> String in
+                let scalar = character.unicodeScalars.first!.value
+                return String(format: "<%02X> <%04X>", scalar, scalar)
+            }.joined(separator: "\n")
+            return """
+                /CIDInit /ProcSet findresource begin
+                12 dict begin begincmap
+                /CMapName /\(name) def
+                /CMapType 2 def
+                1 begincodespacerange <00> <FF> endcodespacerange
+                \(mappedCharacters.count) beginbfchar
+                \(entries)
+                endbfchar
+                endcmap CMapName currentdict /CMap defineresource pop end end
+                """
+        }
+        let toUnicode = toUnicodeCMap(for: sourceText, name: "EmbeddedSource")
+        let donorToUnicode = toUnicodeCMap(for: mappedReplacement, name: "EmbeddedDonor")
+        let sourceHex = sourceText.utf8.map { String(format: "%02X", $0) }.joined()
+        let content = """
+            0.82 g 10 35 180 30 re f
+            0 G 0.7 w 10 35 180 30 re S
+            0 g BT /F1 9 Tf 1 0 0 1 20 49 Tm <\(sourceHex)> Tj ET
+            BT /F2 9 Tf 3 Tr 1 0 0 1 220 10 Tm <31> Tj ET
+            """
+        let bbox = CTFontGetBoundingBox(font)
+        let descriptor = """
+            << /Type /FontDescriptor /FontName /ArialMT /Flags 32
+            /FontBBox [\(Int(bbox.minX)) \(Int(bbox.minY)) \(Int(bbox.maxX)) \(Int(bbox.maxY))]
+            /ItalicAngle 0 /Ascent \(Int(CTFontGetAscent(font))) /Descent \(-Int(CTFontGetDescent(font)))
+            /CapHeight \(Int(CTFontGetCapHeight(font))) /StemV 80 /MissingWidth 500 /FontFile2 7 0 R >>
+            """
+        let objects: [Data] = [
+            Data("<< /Type /Catalog /Pages 2 0 R >>".utf8),
+            Data("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".utf8),
+            Data(("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 100] "
+                + "/Resources << /Font << /F1 4 0 R /F2 9 0 R >> >> /Contents 8 0 R >>").utf8),
+            Data(("<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+ArialMT /Encoding /WinAnsiEncoding "
+                + "/FirstChar 0 /LastChar 255 /Widths [\(widths)] "
+                + "/FontDescriptor 5 0 R /ToUnicode 6 0 R >>").utf8),
+            Data(descriptor.utf8),
+            RawPDFBuilder.streamObject(dict: "", streamData: Data(toUnicode.utf8)),
+            RawPDFBuilder.streamObject(dict: "/Length1 \(fontData.count)", streamData: fontData),
+            RawPDFBuilder.streamObject(dict: "", streamData: Data(content.utf8)),
+            Data(("<< /Type /Font /Subtype /TrueType /BaseFont /GHIJKL+ArialMT /Encoding /WinAnsiEncoding "
+                + "/FirstChar 0 /LastChar 255 /Widths [\(widths)] "
+                + "/FontDescriptor 5 0 R /ToUnicode 10 0 R >>").utf8),
+            RawPDFBuilder.streamObject(dict: "", streamData: Data(donorToUnicode.utf8))
+        ]
+        return RawPDFBuilder.build(objects: objects)
+    }
+
     @MainActor
     private func replacementModel(source: URL, replacement: String) throws -> EditorModel {
         let model = EditorModel(initialURL: source)
@@ -81,8 +157,10 @@ struct PDFInternalTextEditEngineTests {
         let edit = try #require(model.activeReplacements.first)
         #expect(edit.storage == .internalPDFium)
         #expect(model.statusMessage.contains("PDF内部の単一text object"))
-        // プレビュー中は元PDFを変えず、annotationだけで置換表示する。
+        // 元PDFを変えず、画面には保存と同じ内部編集PDFを表示する。
         #expect(model.document?.page(at: 0)?.string?.contains("A") == true)
+        #expect(model.displayedDocument?.page(at: 0)?.string?.contains("B") == true)
+        #expect(model.displayedDocument?.page(at: 0)?.string?.contains("A") == false)
         #expect(try Data(contentsOf: source) == sourceData)
 
         try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
@@ -135,6 +213,74 @@ struct PDFInternalTextEditEngineTests {
         #expect(text.contains("E") && text.contains("D"))
         #expect(!text.contains("A") && !text.contains("C"))
         #expect(outputPage.annotations.contains { $0.type == "Link" })
+    }
+
+    @Test("組合せを検証できない内部置換はoverlayへ戻して表示を失わない")
+    @MainActor
+    func conflictingInternalEditSetFallsBackBeforeCommit() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET "
+                + "BT /F1 14 Tf 1 0 0 1 20 20 Tm (C) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+
+        for (oldText, newText) in [("A", "B"), ("C", "A")] {
+            let index = PDFGlyphIndex.makeIndex(for: page)
+            let run = try #require(index.runs.first { $0.text == oldText })
+            let target = try #require(index.target(in: run, range: 0..<run.glyphs.count, pageIndex: 0))
+            model.select(target)
+            model.updateEditorText(newText)
+            model.commitEditorText()
+        }
+
+        let edits = model.activeReplacements
+        #expect(edits.count == 2)
+        #expect(edits.filter { $0.storage.isInternal }.count == 1)
+        #expect(edits.contains { !$0.storage.isInternal })
+        #expect(model.displayedDocument != nil)
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName?.hasPrefix(PDFEditEngine.annotationMarkerPrefix) == true
+        } == true)
+    }
+
+    @Test("内部置換プレビューへ追加テキストのドラフトと再編集を同期する")
+    @MainActor
+    func insertionDraftStaysVisibleOnInternalPreview() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = try replacementModel(source: source, replacement: "B")
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 80, y: 50))
+        model.updateEditorText("draft")
+        var draft = try #require(model.displayedDocument?.page(at: 0)?.annotations.first {
+            $0.userName == PDFEditEngine.draftMarker
+        })
+        #expect(draft.contents == "draft")
+
+        model.commitEditorText()
+        let insertion = try #require(model.activeReplacements.first { $0.kind == .insertion })
+        model.beginReeditingInsertion(id: insertion.id)
+        model.updateEditorText("updated")
+        draft = try #require(model.displayedDocument?.page(at: 0)?.annotations.first {
+            $0.userName == PDFEditEngine.draftMarker
+        })
+        #expect(draft.contents == "updated")
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.annotationMarkerPrefix + insertion.id.uuidString
+        } == false)
+
+        model.cancelInsertionEditing()
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.annotationMarkerPrefix + insertion.id.uuidString
+        } == true)
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.draftMarker
+        } == false)
     }
 
     @Test("同じ選択を再編集しても内部状態とundo/redoを保つ")
@@ -192,13 +338,14 @@ struct PDFInternalTextEditEngineTests {
         #expect(PDFDocument(url: output)?.page(at: 0)?.string?.contains("B") == true)
     }
 
-    @Test("複数要素TJ・marked content・分割show・重複objectを内部置換しない")
+    @Test("複数要素TJ・marked content・clip・分割show・重複objectを内部置換しない")
     @MainActor
     func splitAndAmbiguousSelectionsAreUnsupported() throws {
         guard pdfiumIsConfigured() else { return }
         let split = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj [(B) 0 (C)] TJ ET")
         let tjArray = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm [(A) 0 (B)] TJ ET")
         let marked = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm /Span BMC (A) Tj EMC ET")
+        let clipped = fixture(content: "q 0 0 100 100 re W n BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET Q")
         let ambiguous = fixture(content: """
             BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET
             BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET
@@ -207,6 +354,7 @@ struct PDFInternalTextEditEngineTests {
             try? FileManager.default.removeItem(at: split)
             try? FileManager.default.removeItem(at: tjArray)
             try? FileManager.default.removeItem(at: marked)
+            try? FileManager.default.removeItem(at: clipped)
             try? FileManager.default.removeItem(at: ambiguous)
         }
 
@@ -231,6 +379,12 @@ struct PDFInternalTextEditEngineTests {
             return
         }
         #expect(markedReason.contains("marked content"))
+
+        let clippedModel = try replacementModel(source: clipped, replacement: "B")
+        guard case .overlay = try #require(clippedModel.activeReplacements.first).storage else {
+            Issue.record("clip付きobjectが内部置換として扱われました。")
+            return
+        }
 
         let ambiguousModel = try replacementModel(source: ambiguous, replacement: "B")
         let ambiguousEdit = try #require(ambiguousModel.activeReplacements.first)
@@ -268,19 +422,68 @@ struct PDFInternalTextEditEngineTests {
 
     @Test("背景や罫線に重なる文字は内部置換のプレビューと出力を食い違わせない")
     @MainActor
-    func nonTextOverlapIsNotInternallyEdited() throws {
+    func nonTextOverlapPreservesBackgroundAndRule() throws {
         guard pdfiumIsConfigured() else { return }
-        let source = fixture(content: "0.8 g 10 42 40 20 re f 0 g BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
-        defer { try? FileManager.default.removeItem(at: source) }
+        let source = fixture(content: "0.8 g 10 42 40 20 re f 0 G 10 42 40 20 re S 0 g BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-background-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
 
         let model = try replacementModel(source: source, replacement: "B")
         let edit = try #require(model.activeReplacements.first)
+        #expect(edit.storage == .internalPDFium)
+        #expect(model.displayedDocument?.page(at: 0)?.string?.contains("B") == true)
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        let page = try #require(PDFDocument(url: output)?.page(at: 0))
+        #expect(page.string?.contains("B") == true)
+        #expect(page.string?.contains("A") == false)
+    }
+
+    @Test("灰色背景上の埋込TrueType単一Tjを長文から1文字へ置換する")
+    @MainActor
+    func embeddedFontShorteningUsesIdenticalPreviewAndExportPath() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = try embeddedTrueTypeFixture()
+        let sourceData = try Data(contentsOf: source)
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-embedded-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+
+        let model = try replacementModel(source: source, replacement: "1")
+        let edit = try #require(model.activeReplacements.first)
+        #expect(edit.storage == .internalPDFium)
+        #expect(model.document?.page(at: 0)?.string?.contains("DETAILS") == true)
+        #expect(model.displayedDocument?.page(at: 0)?.string?.contains("1") == true)
+        #expect(model.displayedDocument?.page(at: 0)?.string?.contains("DETAILS") == false)
+
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        let reopened = try #require(PDFDocument(url: output))
+        #expect(reopened.page(at: 0)?.string?.contains("1") == true)
+        #expect(reopened.page(at: 0)?.string?.contains("DETAILS") == false)
+        #expect(try Data(contentsOf: source) == sourceData)
+    }
+
+    @Test("埋込フォントに明示ToUnicode逆引きがない文字はoverlayへ留める")
+    @MainActor
+    func embeddedFontWithoutProvenReplacementMappingIsUnsupported() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = try embeddedTrueTypeFixture(mappedReplacement: "")
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let model = try replacementModel(source: source, replacement: "1")
+        let edit = try #require(model.activeReplacements.first)
         guard case .overlay(let reason) = edit.storage else {
-            Issue.record("非文字要素に重なる置換を内部編集へ送っています。")
+            Issue.record("明示ToUnicode逆引きのない文字が内部置換として扱われました。")
             return
         }
-        #expect(reason.contains("非文字要素"))
-        #expect(model.statusMessage.contains("画像・罫線・背景との干渉"))
+        #expect(reason.contains("ToUnicode") || reason.contains("glyph"))
+        #expect(model.statusMessage.contains("白帯"))
     }
 
     @Test("ToUnicode推定だけでは内部置換へ昇格しない")
@@ -375,4 +578,5 @@ struct PDFInternalTextEditEngineTests {
             Issue.record("重なり以外のエラーでした: \(error)")
         }
     }
+
 }

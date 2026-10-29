@@ -533,6 +533,7 @@ final class ReplacementTextAnnotation: PDFAnnotation {
     }
 
     func drawPreview(in context: CGContext) {
+        guard !edit.storage.isInternal else { return }
         if drawsMovedTextOnly, edit.destinationOrigin != nil {
             PDFTextRenderer.drawMovedText(edit, in: context)
         } else {

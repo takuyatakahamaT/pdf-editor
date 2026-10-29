@@ -33,6 +33,7 @@ struct ScannedGlyph {
     var showOperationID: Int = -1
     var isInsideForm: Bool = false
     var isInsideMarkedContent: Bool = false
+    var isClipped: Bool = false
 
     var isVisible: Bool { (0...6).contains(textRenderingMode) && textRenderingMode != 3 }
 }
@@ -392,7 +393,7 @@ struct PageTextIndex {
             && operationIDs.first.map { $0 >= 0 } == true
             && clusterGlyphs.allSatisfy {
                 ($0.showOperator == .tj || $0.showOperator == .singleStringTJ)
-                    && !$0.isInsideForm && !$0.isInsideMarkedContent
+                    && !$0.isInsideForm && !$0.isInsideMarkedContent && !$0.isClipped
             }
 
         return TextTarget(
@@ -848,6 +849,8 @@ final class GlyphScanState {
     var fillColorStack: [NSColor] = [.black]
     /// 現在選択中の塗り色空間の成分数（`sc`/`scn` が読む数値の個数）。
     var fillColorSpaceComponentsStack: [Int] = [1]
+    private var clippingStack: [Bool] = [false]
+    var clippingIsActive: Bool { clippingStack.last ?? false }
 
     var tm: CGAffineTransform = .identity
     var tlm: CGAffineTransform = .identity
@@ -946,6 +949,7 @@ final class GlyphScanState {
         ctmStack.append(ctm)
         fillColorStack.append(fillColorStack[fillColorStack.count - 1])
         fillColorSpaceComponentsStack.append(fillColorSpaceComponentsStack[fillColorSpaceComponentsStack.count - 1])
+        clippingStack.append(clippingIsActive)
         textGraphicsStateStack.append(TextGraphicsState(
             fontKey: fontKey,
             fontSize: fontSize,
@@ -962,6 +966,7 @@ final class GlyphScanState {
         if ctmStack.count > 1 { ctmStack.removeLast() }
         if fillColorStack.count > 1 { fillColorStack.removeLast() }
         if fillColorSpaceComponentsStack.count > 1 { fillColorSpaceComponentsStack.removeLast() }
+        if clippingStack.count > 1 { clippingStack.removeLast() }
         if let saved = textGraphicsStateStack.popLast() {
             fontKey = saved.fontKey
             fontSize = saved.fontSize
@@ -972,6 +977,10 @@ final class GlyphScanState {
             textRise = saved.textRise
             textRenderingMode = saved.textRenderingMode
         }
+    }
+
+    func markClippingActive() {
+        clippingStack[clippingStack.count - 1] = true
     }
 }
 

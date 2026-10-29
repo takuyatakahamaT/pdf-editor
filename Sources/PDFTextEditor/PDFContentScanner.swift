@@ -14,6 +14,8 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "q", opPushGState)
     CGPDFOperatorTableSetCallback(table, "Q", opPopGState)
     CGPDFOperatorTableSetCallback(table, "cm", opConcatCTM)
+    CGPDFOperatorTableSetCallback(table, "W", opSetClip)
+    CGPDFOperatorTableSetCallback(table, "W*", opSetClip)
     CGPDFOperatorTableSetCallback(table, "Do", opInvokeXObject)
     CGPDFOperatorTableSetCallback(table, "BT", opBeginText)
     CGPDFOperatorTableSetCallback(table, "Tf", opSetFont)
@@ -41,6 +43,10 @@ func makeOperatorTable() -> CGPDFOperatorTableRef? {
     CGPDFOperatorTableSetCallback(table, "sc", opSetFillColorN)
     CGPDFOperatorTableSetCallback(table, "scn", opSetFillColorN)
     return table
+}
+
+private func opSetClip(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    state(from: info)?.markClippingActive()
 }
 
 private func state(from info: UnsafeMutableRawPointer?) -> GlyphScanState? {
@@ -414,7 +420,8 @@ private func showString(
                 showOperator: operatorKind,
                 showOperationID: operationID,
                 isInsideForm: state.formDepth > 0,
-                isInsideMarkedContent: !state.markedContentStack.isEmpty
+                isInsideMarkedContent: !state.markedContentStack.isEmpty,
+                isClipped: state.clippingIsActive
             ))
         }
     }

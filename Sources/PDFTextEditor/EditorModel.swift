@@ -49,6 +49,8 @@ enum PendingPrintInputDecision {
 @MainActor
 final class EditorModel: ObservableObject {
     @Published private(set) var document: PDFDocument?
+    @Published private(set) var previewDocument: PDFDocument?
+    @Published private(set) var sourceDocumentRevision = 0
     @Published private(set) var sourceURL: URL?
     @Published private(set) var mode: EditorMode = .replacement
     @Published var selectedTarget: TextTarget?
@@ -96,6 +98,7 @@ final class EditorModel: ObservableObject {
 
     private var redoEdits: [AppliedEdit] = []
     private var editingReplacementID: UUID?
+    private var previewInsertionDraftAnnotation: PDFAnnotation?
 
     init(initialURL: URL?) {
         importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
@@ -130,6 +133,7 @@ final class EditorModel: ObservableObject {
         }
         return visible.map(\.1)
     }
+    var displayedDocument: PDFDocument? { previewDocument ?? document }
     var canPrint: Bool { document != nil && sourceURL != nil && redactionRegions.isEmpty }
     var canExport: Bool { document != nil && redactionRegions.isEmpty }
     var hasOCRLayer: Bool { ocrLayerPresent }
@@ -373,6 +377,9 @@ final class EditorModel: ObservableObject {
         }
 
         discardInsertionDraft()
+        sourceDocumentRevision += 1
+        previewDocument = nil
+        previewInsertionDraftAnnotation = nil
         document = loadedDocument
         sourceURL = url
         ocrLayerPresent = PDFOCREngine.hasLayer(url: url)
@@ -478,6 +485,7 @@ final class EditorModel: ObservableObject {
     func setMode(_ newMode: EditorMode) {
         guard mode != newMode else { return }
         discardInsertionDraft()
+        refreshPreviewDocument()
         mode = newMode
         selectedTarget = nil
         selectedMarkupID = nil
@@ -822,6 +830,7 @@ final class EditorModel: ObservableObject {
     func beginInsertion(pageIndex: Int, point: CGPoint) {
         guard mode == .insertion, let document, let page = document.page(at: pageIndex) else { return }
         discardInsertionDraft()
+        refreshPreviewDocument()
 
         let style = PDFFontResolver.resolve(on: page, at: point)
         insertionFontChoice = .automatic
@@ -851,6 +860,7 @@ final class EditorModel: ObservableObject {
             editingID: nil,
             restoredAnnotations: []
         )
+        syncInsertionDraftIntoPreviewDocument()
         replacementFocusRequest += 1
         revision += 1
         statusMessage = "\(pageIndex + 1)ページ目に入力位置を置きました。文字を入力してください。"
@@ -864,6 +874,7 @@ final class EditorModel: ObservableObject {
               edit.kind == .insertion,
               let page = document.page(at: edit.pageIndex) else { return }
         discardInsertionDraft()
+        refreshPreviewDocument()
 
         for annotation in applied.annotations { page.removeAnnotation(annotation) }
         let actualFontName = edit.fontName ?? "Hiragino Sans"
@@ -891,6 +902,7 @@ final class EditorModel: ObservableObject {
             editingID: id,
             restoredAnnotations: applied.annotations
         )
+        syncInsertionDraftIntoPreviewDocument()
         replacementFocusRequest += 1
         revision += 1
         statusMessage = "追加済みテキストを再編集しています。現在の出力は\(formattedPointSize(edit.fontSize)) ptです。"
@@ -899,6 +911,7 @@ final class EditorModel: ObservableObject {
     func cancelInsertionEditing() {
         guard insertionDraft != nil else { return }
         discardInsertionDraft()
+        refreshPreviewDocument()
         replacementText = ""
         revision += 1
         statusMessage = "テキスト追加の編集をキャンセルしました。"
@@ -1013,6 +1026,28 @@ final class EditorModel: ObservableObject {
             replacement.storage = .overlay(reason: "移動または行再配置を含むためPDF内部置換の対象外です。")
         }
 
+        if replacement.storage.isInternal, let sourceURL {
+            var prospective = activeReplacements.filter { existing in
+                guard existing.id != replacement.id else { return false }
+                guard replacement.destinationOrigin == nil,
+                      let replacementLayout = replacement.lineLayout,
+                      existing.destinationOrigin == nil,
+                      let existingLayout = existing.lineLayout else { return true }
+                return !replacementLayout.hasSameSourceLine(as: existingLayout)
+            }
+            prospective.append(replacement)
+            do {
+                _ = try PDFInternalTextEditEngine.previewDocument(
+                    sourceURL: sourceURL,
+                    edits: prospective.filter { $0.storage.isInternal }
+                )
+            } catch {
+                replacement.storage = .overlay(
+                    reason: "他の内部置換との組合せを安全に検証できませんでした: \(error.localizedDescription)"
+                )
+            }
+        }
+
         let restoredAnnotations = supersededApplied?.annotations ?? []
         for annotation in restoredAnnotations { page.removeAnnotation(annotation) }
         let annotations: [PDFAnnotation]
@@ -1039,9 +1074,9 @@ final class EditorModel: ObservableObject {
         let storageMessage: String
         switch replacement.storage {
         case .internalPDFium:
-            storageMessage = "保存時にPDF内部の単一text objectを置換し、再読込検証します。"
+            storageMessage = "画面と保存の両方でPDF内部の単一text objectを置換し、再読込検証します。"
         case .overlay(let reason):
-            storageMessage = "白い重ね描きで保存します（\(reason)）。元の文字データはPDF内に残ります。画像・罫線・背景との干渉は完全には判定できません。墨消しには使えません。"
+            storageMessage = "白い重ね描きで保存します（\(reason)）。元の文字データはPDF内に残ります。背景が白でなければ白帯になります。画像・罫線・背景との干渉は完全には判定できません。墨消しには使えません。"
         }
         statusMessage = "文字を置換しました（出力 \(formattedPointSize(replacement.fontSize)) pt）。\(storageMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }
@@ -1150,13 +1185,14 @@ final class EditorModel: ObservableObject {
             id: id,
             outputFontSelection: selectedInsertionFontSelection
         )
+        insertionDraft = nil
+        previewInsertionDraftAnnotation = nil
         recordEdit(AppliedEdit(
             pageIndex: draft.pageIndex,
             annotations: [draft.annotation],
             replacement: edit,
             restoredAnnotations: draft.restoredAnnotations
         ))
-        insertionDraft = nil
         replacementText = ""
         revision += 1
         statusMessage = draft.editingID == nil
@@ -1168,6 +1204,7 @@ final class EditorModel: ObservableObject {
         guard marker.hasPrefix(PDFEditEngine.annotationMarkerPrefix) else { return }
         if marker == PDFEditEngine.draftMarker {
             insertionDraft?.annotation.bounds = bounds
+            previewInsertionDraftAnnotation?.bounds = bounds
             revision += 1
             return
         }
@@ -1219,6 +1256,7 @@ final class EditorModel: ObservableObject {
         for annotation in edit.restoredAnnotations { page.addAnnotation(annotation) }
         if let change = edit.markupChange { undoMarkupState(change) }
         redoEdits.append(edit)
+        refreshPreviewDocument()
         selectedMarkupID = nil
         selectedTarget = nil
         isInlineEditing = false
@@ -1239,6 +1277,7 @@ final class EditorModel: ObservableObject {
         for annotation in edit.annotations { page.addAnnotation(annotation) }
         if let change = edit.markupChange { redoMarkupState(change) }
         edits.append(edit)
+        refreshPreviewDocument()
         selectedTarget = nil
         isInlineEditing = false
         editingReplacementID = nil
@@ -1484,6 +1523,65 @@ final class EditorModel: ObservableObject {
     private func recordEdit(_ edit: AppliedEdit) {
         edits.append(edit)
         redoEdits.removeAll()
+        refreshPreviewDocument()
+    }
+
+    private func refreshPreviewDocument() {
+        guard let sourceURL else {
+            previewDocument = nil
+            previewInsertionDraftAnnotation = nil
+            return
+        }
+        let replacements = activeReplacements
+        let internalEdits = replacements.filter { $0.storage.isInternal }
+        guard !internalEdits.isEmpty else {
+            previewDocument = nil
+            previewInsertionDraftAnnotation = nil
+            return
+        }
+        do {
+            let preview = try PDFInternalTextEditEngine.previewDocument(
+                sourceURL: sourceURL,
+                edits: internalEdits
+            )
+            for pageIndex in 0..<preview.pageCount {
+                guard let page = preview.page(at: pageIndex) else { continue }
+                for annotation in page.annotations where
+                    annotation.userName?.hasPrefix(PDFMarkupEngine.markerPrefix) == true {
+                    page.removeAnnotation(annotation)
+                }
+            }
+            for markup in activeMarkupEdits {
+                preview.page(at: markup.pageIndex)?.addAnnotation(PDFMarkupEngine.makeAnnotation(for: markup))
+            }
+            for edit in replacements {
+                guard let page = preview.page(at: edit.pageIndex) else { continue }
+                switch edit.kind {
+                case .insertion:
+                    page.addAnnotation(PDFEditEngine.makeInsertionAnnotation(
+                        bounds: edit.bounds,
+                        text: edit.replacement,
+                        fontName: edit.fontName ?? "Hiragino Sans",
+                        fontSize: edit.fontSize,
+                        fontColor: edit.fontColor,
+                        marker: PDFEditEngine.annotationMarkerPrefix + edit.id.uuidString
+                    ))
+                case .replacement:
+                    if edit.destinationOrigin != nil {
+                        PDFEditEngine.addMovementAnnotations(for: edit, to: page)
+                    } else {
+                        page.addAnnotation(ReplacementTextAnnotation(edit: edit))
+                    }
+                }
+            }
+            previewDocument = preview
+            previewInsertionDraftAnnotation = nil
+            syncInsertionDraftIntoPreviewDocument()
+        } catch {
+            previewDocument = nil
+            previewInsertionDraftAnnotation = nil
+            notice("PDF内部置換のプレビューを再生成できませんでした: \(error.localizedDescription)")
+        }
     }
 
     private func formattedPointSize(_ size: CGFloat) -> String {
@@ -1531,7 +1629,33 @@ final class EditorModel: ObservableObject {
             fontSize: CGFloat(insertionFontSize),
             fontColor: insertionFontColor
         )
+        syncInsertionDraftIntoPreviewDocument()
         revision += 1
+    }
+
+    private func syncInsertionDraftIntoPreviewDocument() {
+        if let annotation = previewInsertionDraftAnnotation, let page = annotation.page {
+            page.removeAnnotation(annotation)
+        }
+        previewInsertionDraftAnnotation = nil
+        guard let previewDocument, let draft = insertionDraft,
+              let page = previewDocument.page(at: draft.pageIndex) else { return }
+
+        if let editingID = draft.editingID {
+            let marker = PDFEditEngine.annotationMarkerPrefix + editingID.uuidString
+            for annotation in page.annotations where annotation.userName == marker {
+                page.removeAnnotation(annotation)
+            }
+        }
+        let annotation = PDFEditEngine.makeInsertionAnnotation(
+            bounds: draft.annotation.bounds,
+            text: replacementText,
+            fontName: effectiveInsertionFontName,
+            fontSize: CGFloat(insertionFontSize),
+            fontColor: insertionFontColor
+        )
+        page.addAnnotation(annotation)
+        previewInsertionDraftAnnotation = annotation
     }
 
     private func discardInsertionDraft() {
@@ -1542,11 +1666,16 @@ final class EditorModel: ObservableObject {
                 page.addAnnotation(annotation)
             }
         }
+        if let annotation = previewInsertionDraftAnnotation, let page = annotation.page {
+            page.removeAnnotation(annotation)
+        }
         insertionDraft = nil
+        previewInsertionDraftAnnotation = nil
     }
 
     private func discardPendingEditorInput() {
         discardInsertionDraft()
+        refreshPreviewDocument()
         selectedTarget = nil
         isInlineEditing = false
         replacementText = ""
