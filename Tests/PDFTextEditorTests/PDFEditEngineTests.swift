@@ -125,8 +125,8 @@ struct PDFEditEngineTests {
         #expect(abs(b.advanceBox.minX - a.advanceBox.minX - a.advanceBox.width) < 0.01)
     }
 
-    @Test("font shrinks to keep longer replacement inside the original bounds")
-    func fitsLongText() {
+    @Test("insertion text keeps its existing bounded-box fitting behavior")
+    func insertionFitsLongTextInsideItsBox() {
         let font = PDFEditEngine.fittedFont(
             named: nil,
             preferredSize: 18,
@@ -315,8 +315,8 @@ struct PDFEditEngineTests {
         ])
     }
 
-    @Test("replacement does not distort glyphs horizontally when space is tight")
-    func replacementKeepsGlyphProportionsWhenShrinking() {
+    @Test("standalone replacement render keeps the requested point size when space is tight")
+    func replacementRenderDoesNotShrinkWhenTight() {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
         let originalLine = CTLineCreateWithAttributedString(NSAttributedString(
             string: "8",
@@ -330,12 +330,12 @@ struct PDFEditEngineTests {
             maxWidth: originalWidth
         )
 
-        #expect(plan.fontSize < 12)
+        #expect(plan.fontSize == 12)
         #expect(plan.scale == 1)
     }
 
-    @Test("replacement shrinks uniformly for text that does not fit")
-    func replacementShrinksForVeryLongText() {
+    @Test("standalone replacement render never silently scales very long text")
+    func replacementRenderDoesNotScaleVeryLongText() {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
         let originalLine = CTLineCreateWithAttributedString(NSAttributedString(
             string: "8",
@@ -349,8 +349,8 @@ struct PDFEditEngineTests {
             maxWidth: originalWidth
         )
 
-        #expect(plan.fontSize < 12)
-        #expect(plan.fontSize >= 6)
+        #expect(plan.fontSize == 12)
+        #expect(plan.scale == 1)
     }
 
     @Test("replacement expands the run by shifting following glyphs")
@@ -440,7 +440,8 @@ struct PDFEditEngineTests {
         let font = CTFontCreateWithName("HelveticaNeue" as CFString, 12, nil)
         let plan = PDFTextRenderer.reflowPlan(text: "11", font: font, layout: layout)
         #expect(plan.shift > 0)
-        #expect(plan.scale < 1)
+        #expect(plan.scale == 1)
+        #expect(plan.outputEnd > layout.maxWidth)
     }
 
     @Test("line reflow keeps later glyphs with a different fill color out of the selected run")
@@ -561,7 +562,8 @@ struct PDFEditEngineTests {
             .appendingPathComponent("pdf-editor-move-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: output) }
         try PDFExportEngine.export(sourceURL: fixtureURL, edits: model.activeReplacements, to: output)
-        let exported = try #require(PDFDocument(url: output)?.page(at: 0))
+        let exportedDocument = try #require(PDFDocument(url: output))
+        let exported = try #require(exportedDocument.page(at: 0))
         #expect(exported.string?.contains("4") == true)
 
         model.undoLastEdit()

@@ -80,12 +80,14 @@ enum PDFEmbeddedFontLoader {
                 }
                 return fallbackResolution(
                     fontDict: fontDict, size: size, requiredText: requiredText,
-                    reason: "指定フォント「\(preferredFontName)」に \(missing.joined(separator: "")) のグリフがないため代替します。"
+                    reason: "指定フォント「\(preferredFontName)」に \(missing.joined(separator: "")) のグリフがないため代替します。",
+                    preserveReasonForExactInstalledFont: true
                 )
             }
             return fallbackResolution(
                 fontDict: fontDict, size: size, requiredText: requiredText,
-                reason: "指定フォント「\(preferredFontName)」がこのMacで利用できないため代替します。"
+                reason: "指定フォント「\(preferredFontName)」がこのMacで利用できないため代替します。",
+                preserveReasonForExactInstalledFont: true
             )
         }
 
@@ -157,13 +159,19 @@ enum PDFEmbeddedFontLoader {
         fontDict: CGPDFDictionaryRef,
         size: CGFloat,
         requiredText: String,
-        reason: String
+        reason: String,
+        preserveReasonForExactInstalledFont: Bool = false
     ) -> Resolution {
         if let baseFontName = readBaseFontName(fontDict) {
             let cleaned = strippingSubsetPrefix(baseFontName)
             if let installed = installedFont(named: cleaned, size: size),
                coversAllCharacters(of: requiredText, font: installed) {
-                return Resolution(font: installed, isExact: true, exactGlyphs: nil, reason: nil)
+                return Resolution(
+                    font: installed,
+                    isExact: true,
+                    exactGlyphs: nil,
+                    reason: preserveReasonForExactInstalledFont ? reason : nil
+                )
             }
         }
 

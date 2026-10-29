@@ -13,13 +13,51 @@ enum PDFEditEngine {
         _ replacement: String,
         to page: PDFPage,
         target: TextTarget,
-        preferredFontName: String? = nil
+        preferredFontName: String? = nil,
+        outputFontSize: CGFloat? = nil,
+        id: UUID = UUID(),
+        destinationOrigin: CGPoint? = nil,
+        outputFontSelection: ReplacementFontSelection = .automatic
     ) -> (annotation: PDFAnnotation, edit: ReplacementEdit, fontIsExact: Bool) {
-        let resolution = resolveFont(for: target, on: page, replacement: replacement,
-                                     preferredFontName: preferredFontName)
+        let result = prepareReplacement(
+            replacement,
+            on: page,
+            target: target,
+            preferredFontName: preferredFontName,
+            outputFontSize: outputFontSize,
+            id: id,
+            destinationOrigin: destinationOrigin,
+            outputFontSelection: outputFontSelection
+        )
+        let annotation = ReplacementTextAnnotation(edit: result.edit)
+        page.addAnnotation(annotation)
+        return (annotation, result.edit, result.fontIsExact)
+    }
+
+    /// ページを変更せずに置換候補を作る。EditorModel はfit判定後にだけ注釈を差し替える。
+    static func prepareReplacement(
+        _ replacement: String,
+        on page: PDFPage,
+        target: TextTarget,
+        preferredFontName: String? = nil,
+        outputFontSize: CGFloat? = nil,
+        id: UUID = UUID(),
+        destinationOrigin: CGPoint? = nil,
+        outputFontSelection: ReplacementFontSelection = .automatic
+    ) -> (edit: ReplacementEdit, fontIsExact: Bool) {
+        let requestedSize = outputFontSize ?? target.fontSize
+        let requestedFontName = outputFontSelection.requestedFontName ?? preferredFontName
+        let resolution = resolveFont(
+            for: target,
+            on: page,
+            replacement: replacement,
+            preferredFontName: requestedFontName,
+            size: requestedSize
+        )
         let lineFont: CTFont
-        if target.fontPostScriptNameOverride != nil {
-            lineFont = resolution.font
+        if let sourceFontName = target.fontPostScriptNameOverride {
+            lineFont = PDFEmbeddedFontLoader.availableFont(named: sourceFontName, size: target.fontSize)
+                ?? CTFontCreateCopyWithAttributes(resolution.font, target.fontSize, nil, nil)
         } else if let layout = target.lineLayout,
            let fontKey = target.fontKey,
            let fontDict = PDFGlyphIndex.fontDictionary(for: fontKey, page: page) {
@@ -39,11 +77,12 @@ enum PDFEditEngine {
             resolvedFont: resolution.font,
             fontIsExact: resolution.isExact,
             exactGlyphs: resolution.exactGlyphs,
-            lineFont: lineFont
+            lineFont: lineFont,
+            id: id,
+            destinationOrigin: destinationOrigin,
+            outputFontSelection: outputFontSelection
         )
-        let annotation = ReplacementTextAnnotation(edit: edit)
-        page.addAnnotation(annotation)
-        return (annotation, edit, resolution.isExact)
+        return (edit, resolution.isExact)
     }
 
     static func applyDeletion(to page: PDFPage, target: TextTarget) -> (annotation: PDFAnnotation, edit: ReplacementEdit) {
@@ -83,13 +122,15 @@ enum PDFEditEngine {
         for target: TextTarget,
         on page: PDFPage,
         replacement: String,
-        preferredFontName: String? = nil
+        preferredFontName: String? = nil,
+        size: CGFloat? = nil
     ) -> PDFEmbeddedFontLoader.Resolution {
+        let resolvedSize = size ?? target.fontSize
         if preferredFontName == nil,
            let searchableFontName = target.fontPostScriptNameOverride,
            let resolution = PDFEmbeddedFontLoader.resolveSearchableFont(
                named: searchableFontName,
-               size: target.fontSize,
+               size: resolvedSize,
                replacementText: replacement,
                supportingText: target.lineLayout?.text(replacingWith: replacement)
            ) {
@@ -105,10 +146,10 @@ enum PDFEditEngine {
                     || (0x3400...0x4DBF).contains(value) || (0xFF66...0xFF9F).contains(value)
             }
             let fallbackName = containsJapanese ? "Noto Sans JP" : "Helvetica Neue"
-            let fallback = PDFEmbeddedFontLoader.availableFont(named: fallbackName, size: target.fontSize)
-                ?? CTFontCreateWithName(fallbackName as CFString, target.fontSize, nil)
+            let fallback = PDFEmbeddedFontLoader.availableFont(named: fallbackName, size: resolvedSize)
+                ?? CTFontCreateWithName(fallbackName as CFString, resolvedSize, nil)
             let requestedFont = preferredFontName.flatMap {
-                PDFEmbeddedFontLoader.availableFont(named: $0, size: target.fontSize)
+                PDFEmbeddedFontLoader.availableFont(named: $0, size: resolvedSize)
             }
             let missing = requestedFont.map {
                 PDFEmbeddedFontLoader.missingCharacters(in: requiredText, font: $0)
@@ -127,7 +168,7 @@ enum PDFEditEngine {
         }
         return PDFEmbeddedFontLoader.resolveFont(
             fontDict: fontDict,
-            size: target.fontSize,
+            size: resolvedSize,
             replacementText: replacement,
             supportingText: target.lineLayout?.text(replacingWith: replacement),
             selectedWidth: target.lineLayout?.selectedAdvance ?? target.bounds.width,

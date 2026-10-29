@@ -283,8 +283,8 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "代替"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
-        #expect(model.statusMessage.contains("元の内容はPDF内に残ります"))
+        #expect(model.statusMessage.contains("白い重ね描き"))
+        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
         #expect(model.statusMessage.contains("墨消しには使えません"))
 
         let output = FileManager.default.temporaryDirectory
@@ -305,7 +305,7 @@ struct PDFHybridEditingBoundaryTests {
         #expect(context.makeImage() != nil)
     }
 
-    @Test("ASCII補完で読めてもToUnicodeがない場合は警告する")
+    @Test("ASCII補完で読めてもoverlayの原文残存を警告する")
     @MainActor
     func asciiFallbackReplacementStatus() throws {
         let url = simpleFontFixture(
@@ -323,10 +323,11 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "B"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
+        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
+        #expect(model.statusMessage.contains("墨消しには使えません"))
     }
 
-    @Test("ToUnicodeで全グリフを解決できれば警告しない")
+    @Test("ToUnicodeで全グリフを解決できてもoverlayの原文残存を警告する")
     @MainActor
     func explicitToUnicodeReplacementStatus() throws {
         let url = simpleFontFixture(
@@ -346,10 +347,11 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "B"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(!model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
+        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
+        #expect(model.statusMessage.contains("墨消しには使えません"))
     }
 
-    @Test("選択内にToUnicode未対応グリフが混ざれば警告する")
+    @Test("選択内にToUnicode未対応グリフが混ざっても同じoverlay警告を出す")
     @MainActor
     func mixedExplicitAndFallbackSelectionWarns() throws {
         let url = simpleFontFixture(
@@ -370,6 +372,7 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "CD"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("ToUnicodeで元の文字との対応づけを確認できない"))
+        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
+        #expect(model.statusMessage.contains("墨消しには使えません"))
     }
 }

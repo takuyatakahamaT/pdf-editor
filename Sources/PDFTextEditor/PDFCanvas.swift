@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import PDFKit
 import SwiftUI
 
@@ -21,6 +22,7 @@ struct PDFCanvas: NSViewRepresentable {
     let onMoveInsertion: (String, Int, CGRect) -> Void
     let onMoveSelection: (CGPoint) -> Void
     let onMoveExistingEdit: (UUID, CGPoint) -> Void
+    let onBeginExistingReplacementEditing: (UUID) -> Void
     let onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
     let onRedactionRegion: (Int, CGRect) -> Void
     let onSelectMarkup: (UUID?) -> Void
@@ -37,6 +39,7 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveInsertion: onMoveInsertion,
             onMoveSelection: onMoveSelection,
             onMoveExistingEdit: onMoveExistingEdit,
+            onBeginExistingReplacementEditing: onBeginExistingReplacementEditing,
             onMarkupCreate: onMarkupCreate,
             onRedactionRegion: onRedactionRegion,
             onSelectMarkup: onSelectMarkup,
@@ -87,6 +90,7 @@ struct PDFCanvas: NSViewRepresentable {
         context.coordinator.onMoveInsertion = onMoveInsertion
         context.coordinator.onMoveSelection = onMoveSelection
         context.coordinator.onMoveExistingEdit = onMoveExistingEdit
+        context.coordinator.onBeginExistingReplacementEditing = onBeginExistingReplacementEditing
         context.coordinator.onMarkupCreate = onMarkupCreate
         context.coordinator.onRedactionRegion = onRedactionRegion
         context.coordinator.onSelectMarkup = onSelectMarkup
@@ -151,6 +155,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.moveInsertionHandler = coordinator.handleMoveInsertion
         view.moveSelectionHandler = coordinator.handleMoveSelection
         view.moveExistingEditHandler = coordinator.handleMoveExistingEdit
+        view.beginExistingReplacementEditingHandler = coordinator.handleBeginExistingReplacementEditing
         view.markupCreateHandler = coordinator.handleMarkupCreate
         view.redactionRegionHandler = coordinator.handleRedactionRegion
         view.selectMarkupHandler = coordinator.handleSelectMarkup
@@ -167,6 +172,7 @@ struct PDFCanvas: NSViewRepresentable {
         var onMoveInsertion: (String, Int, CGRect) -> Void
         var onMoveSelection: (CGPoint) -> Void
         var onMoveExistingEdit: (UUID, CGPoint) -> Void
+        var onBeginExistingReplacementEditing: (UUID) -> Void
         var onMarkupCreate: (Int, CGRect, [CGPoint]) -> Void
         var onRedactionRegion: (Int, CGRect) -> Void
         var onSelectMarkup: (UUID?) -> Void
@@ -185,6 +191,7 @@ struct PDFCanvas: NSViewRepresentable {
             onMoveInsertion: @escaping (String, Int, CGRect) -> Void,
             onMoveSelection: @escaping (CGPoint) -> Void,
             onMoveExistingEdit: @escaping (UUID, CGPoint) -> Void,
+            onBeginExistingReplacementEditing: @escaping (UUID) -> Void,
             onMarkupCreate: @escaping (Int, CGRect, [CGPoint]) -> Void,
             onRedactionRegion: @escaping (Int, CGRect) -> Void,
             onSelectMarkup: @escaping (UUID?) -> Void,
@@ -202,6 +209,7 @@ struct PDFCanvas: NSViewRepresentable {
             self.onMoveInsertion = onMoveInsertion
             self.onMoveSelection = onMoveSelection
             self.onMoveExistingEdit = onMoveExistingEdit
+            self.onBeginExistingReplacementEditing = onBeginExistingReplacementEditing
             self.onMarkupCreate = onMarkupCreate
             self.onRedactionRegion = onRedactionRegion
             self.onSelectMarkup = onSelectMarkup
@@ -226,6 +234,7 @@ struct PDFCanvas: NSViewRepresentable {
         }
         func handleMoveSelection(_ delta: CGPoint) { onMoveSelection(delta) }
         func handleMoveExistingEdit(_ id: UUID, _ delta: CGPoint) { onMoveExistingEdit(id, delta) }
+        func handleBeginExistingReplacementEditing(_ id: UUID) { onBeginExistingReplacementEditing(id) }
         func handleMarkupCreate(_ pageIndex: Int, _ bounds: CGRect, _ points: [CGPoint]) {
             onMarkupCreate(pageIndex, bounds, points)
         }
@@ -280,6 +289,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var moveInsertionHandler: ((String, Int, CGRect) -> Void)?
     var moveSelectionHandler: ((CGPoint) -> Void)?
     var moveExistingEditHandler: ((UUID, CGPoint) -> Void)?
+    var beginExistingReplacementEditingHandler: ((UUID) -> Void)?
     var markupCreateHandler: ((Int, CGRect, [CGPoint]) -> Void)?
     var redactionRegionHandler: ((Int, CGRect) -> Void)?
     var selectMarkupHandler: ((UUID?) -> Void)?
@@ -793,19 +803,71 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func showInlineEditor(for target: TextTarget) {
+        showInlineEditor(
+            pageIndex: target.pageIndex,
+            bounds: target.bounds,
+            text: target.originalText,
+            color: target.fontColor,
+            pointSize: target.fontSize
+        )
+    }
+
+    private func showInlineEditor(for edit: ReplacementEdit) {
+        showInlineEditor(
+            pageIndex: edit.pageIndex,
+            bounds: edit.displayedTextBounds,
+            text: edit.replacement,
+            color: edit.fontColor,
+            pointSize: edit.fontSize
+        )
+    }
+
+    private func showInlineEditor(for edit: ReplacementEdit, replacement: TextRunReplacement) {
+        guard let layout = edit.lineLayout,
+              let plan = PDFTextRenderer.composedReflowPlan(
+                  layout: layout,
+                  replacements: edit.lineReplacements,
+                  startingAt: edit.lineCompositionStart
+              ),
+              let placement = plan.replacements.first(where: { $0.replacement.id == replacement.id }) else {
+            showInlineEditor(for: edit)
+            return
+        }
+        showInlineEditor(
+            pageIndex: edit.pageIndex,
+            bounds: CGRect(
+                x: layout.lineStartX + placement.offsetX,
+                y: layout.coverBounds.minY,
+                width: max(replacement.renderedWidth, 1),
+                height: layout.coverBounds.height
+            ),
+            text: replacement.text,
+            color: replacement.color,
+            pointSize: CTFontGetSize(replacement.font)
+        )
+    }
+
+    private func showInlineEditor(
+        pageIndex: Int,
+        bounds: CGRect,
+        text: String,
+        color: NSColor,
+        pointSize: CGFloat
+    ) {
         guard inlineField == nil else { return }
-        guard let page = document?.page(at: target.pageIndex), let container = documentView else { return }
-        let pageRect = container.convert(convert(target.bounds, from: page), from: self)
+        guard let page = document?.page(at: pageIndex), let container = documentView else { return }
+        let pageRect = container.convert(convert(bounds, from: page), from: self)
         let field = NSTextField()
         field.delegate = self
-        field.stringValue = target.originalText
+        field.stringValue = text
         field.isBezeled = true
         field.isEditable = true
         field.drawsBackground = true
         field.backgroundColor = .white
-        field.textColor = target.fontColor
-        field.font = NSFont(name: "Noto Sans JP", size: max(13, pageRect.height * 0.82))
-            ?? NSFont.systemFont(ofSize: max(13, pageRect.height * 0.82))
+        field.textColor = color
+        let displayedSize = max(13, pointSize * scaleFactor)
+        field.font = NSFont(name: "Noto Sans JP", size: displayedSize)
+            ?? NSFont.systemFont(ofSize: displayedSize)
         field.focusRingType = .none
         field.cell?.lineBreakMode = .byClipping
         let measuredWidth = (field.stringValue as NSString).size(withAttributes: [.font: field.font!]).width
@@ -1005,11 +1067,26 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         let pagePoint = convert(viewPoint, to: page)
         if allowMovingExistingContent,
            let existing = page.annotations.reversed().compactMap({ $0 as? ReplacementTextAnnotation })
-            .first(where: { !$0.edit.replacement.isEmpty && $0.edit.displayedTextBounds.contains(pagePoint) }) {
-            movingExistingEdit = existing.edit
-            movementStartPoint = pagePoint
-            movementDelta = .zero
-            return
+            .first(where: { !$0.edit.replacement.isEmpty && $0.edit.replacementID(at: pagePoint) != nil }) {
+            if event.clickCount >= 2 {
+                let replacementID = existing.edit.replacementID(at: pagePoint) ?? existing.edit.id
+                beginExistingReplacementEditingHandler?(replacementID)
+                if let run = existing.edit.lineReplacements.first(where: { $0.id == replacementID }) {
+                    showInlineEditor(for: existing.edit, replacement: run)
+                } else {
+                    showInlineEditor(for: existing.edit)
+                }
+                return
+            }
+            // 合成行の各置換はダブルクリックで再編集できるが、移動は従来どおり
+            // outer edit 自身の範囲だけで開始する。合成行全体を単一文字として
+            // 移動すると他の置換を落としてしまうため。
+            if existing.edit.displayedTextBounds.contains(pagePoint) {
+                movingExistingEdit = existing.edit
+                movementStartPoint = pagePoint
+                movementDelta = .zero
+                return
+            }
         }
         if allowMovingExistingContent,
            let selectedTextTarget,

@@ -165,7 +165,8 @@ struct PDFEditingAcceptanceTests {
         let output = temporaryPDFURL(prefix: "multi-date-acceptance")
         defer { try? FileManager.default.removeItem(at: output) }
         try PDFExportEngine.export(sourceURL: fixture.url, edits: model.activeReplacements, to: output)
-        let exportedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        let exportedDocument = try #require(PDFDocument(url: output))
+        let exportedPage = try #require(exportedDocument.page(at: 0))
         let raster = try rasterMetrics(page: exportedPage, focus: layout.coverBounds, scale: 4)
         #expect(raster.darkPixels > 0)
         #expect(raster.antialiasPixels > 0)
@@ -175,6 +176,61 @@ struct PDFEditingAcceptanceTests {
         #expect(model.activeReplacements.count == 1)
         #expect(prior.lineReplacements.count == 1)
         #expect(page.annotations.count == 1)
+    }
+
+    @Test("同じ行に合成された先行置換も現在値から再編集できる")
+    @MainActor
+    func earlierComposedReplacementCanBeReedited() throws {
+        let fixture = try makeDateFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let model = EditorModel(initialURL: fixture.url)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.glyphs.map(\.text).joined() == fixture.date })
+        let firstIndex = try #require(run.glyphs.firstIndex { $0.text == "9" })
+        let secondIndex = try #require(run.glyphs.firstIndex { $0.text == "3" })
+        let firstTarget = try #require(index.target(in: run, range: firstIndex..<(firstIndex + 1), pageIndex: 0))
+        let secondTarget = try #require(index.target(in: run, range: secondIndex..<(secondIndex + 1), pageIndex: 0))
+
+        model.select(firstTarget)
+        model.setCustomFontName("Menlo")
+        model.updateEditorText("10")
+        model.commitEditorText()
+        let firstID = try #require(model.activeReplacements.first?.id)
+        model.select(secondTarget)
+        model.updateEditorText("4")
+        model.commitEditorText()
+
+        let composed = try #require(model.activeReplacements.first)
+        let layout = try #require(composed.lineLayout)
+        let plan = try #require(PDFTextRenderer.composedReflowPlan(
+            layout: layout,
+            replacements: composed.lineReplacements,
+            startingAt: composed.lineCompositionStart
+        ))
+        let firstPlacement = try #require(plan.replacements.first { $0.replacement.id == firstID })
+        let hitPoint = CGPoint(
+            x: layout.lineStartX + firstPlacement.offsetX + firstPlacement.replacement.renderedWidth / 2,
+            y: layout.coverBounds.midY
+        )
+        #expect(composed.replacementID(at: hitPoint) == firstID)
+
+        model.beginReeditingReplacement(id: firstID)
+        #expect(model.replacementText == "10")
+        #expect(model.replacementFontChoice == .custom)
+        #expect(model.customFontName == "Menlo")
+        model.updateEditorText("11")
+        model.commitEditorText()
+
+        let revised = try #require(model.activeReplacements.first)
+        #expect(revised.lineReplacements.first(where: { $0.id == firstID })?.text == "11")
+        #expect(revised.lineReplacements.contains(where: { $0.text == "4" }))
+        #expect(page.annotations.count == 1)
+
+        model.undoLastEdit()
+        let restored = try #require(model.activeReplacements.first)
+        #expect(restored.lineReplacements.first(where: { $0.id == firstID })?.text == "10")
+        #expect(restored.lineReplacements.contains(where: { $0.text == "4" }))
     }
 
     @Test("日本語の日付で9を10に置換してもサイズとベクター描画を保つ")
@@ -441,6 +497,339 @@ struct PDFEditingAcceptanceTests {
 
         model.undoLastEdit()
         #expect(page.annotations.isEmpty)
+    }
+
+    @Test("置換済み文字をA→B→Cと再編集しrevisionごとにundo/redoできる")
+    @MainActor
+    func replacementCanBeReeditedWithStableIdentityAndHistory() throws {
+        let fixture = try makeStandaloneReplacementFixture(maxWidth: 100)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let model = EditorModel(initialURL: fixture.url)
+        let page = try #require(model.document?.page(at: 0))
+
+        model.select(fixture.target)
+        model.updateEditorText("B")
+        model.commitEditorText()
+        let first = try #require(model.activeReplacements.first)
+        #expect(first.replacement == "B")
+        #expect(page.annotations.count == 1)
+
+        model.beginReeditingReplacement(id: first.id)
+        #expect(model.isInlineEditing)
+        #expect(model.replacementText == "B")
+        model.updateEditorText("C")
+        model.commitEditorText()
+
+        let revised = try #require(model.activeReplacements.first)
+        #expect(revised.id == first.id)
+        #expect(revised.replacement == "C")
+        #expect(page.annotations.count == 1)
+
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.id == first.id)
+        #expect(model.activeReplacements.first?.replacement == "B")
+        #expect(page.annotations.compactMap { $0 as? ReplacementTextAnnotation }.first?.edit.replacement == "B")
+        model.redoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "C")
+        #expect(page.annotations.compactMap { $0 as? ReplacementTextAnnotation }.first?.edit.replacement == "C")
+
+        let output = temporaryPDFURL(prefix: "replacement-revision")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: fixture.url, edits: model.activeReplacements, to: output)
+        #expect(PDFDocument(url: output)?.page(at: 0)?.string?.contains("C") == true)
+    }
+
+    @Test("置換のカスタムフォントと出力サイズは同一IDの再編集で維持される")
+    @MainActor
+    func replacementReeditPreservesCustomFontUntilUserChangesIt() throws {
+        let fixture = try makeStandaloneReplacementFixture(maxWidth: 100)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let model = EditorModel(initialURL: fixture.url)
+        let menlo = try #require(NSFont(name: "Menlo", size: 14))
+        let menloName = menlo.fontName
+
+        model.select(fixture.target)
+        model.setCustomFontName("Menlo")
+        model.setReplacementFontSize(14)
+        model.updateEditorText("B")
+        model.commitEditorText()
+
+        let first = try #require(model.activeReplacements.first)
+        let firstFont = try #require(first.resolvedFont)
+        #expect(first.outputFontSelection == ReplacementFontSelection(
+            choice: .custom,
+            customFontName: "Menlo"
+        ))
+        #expect(CTFontCopyPostScriptName(firstFont) as String == menloName)
+        #expect(abs(first.fontSize - 14) < 0.01)
+
+        model.beginReeditingReplacement(id: first.id)
+        #expect(model.replacementText == "B")
+        #expect(model.replacementFontChoice == .custom)
+        #expect(model.customFontName == "Menlo")
+        #expect(abs(model.replacementFontSize - 14) < 0.01)
+        model.updateEditorText("C")
+        model.commitEditorText()
+
+        let unchanged = try #require(model.activeReplacements.first)
+        #expect(unchanged.id == first.id)
+        #expect(CTFontCopyPostScriptName(try #require(unchanged.resolvedFont)) as String == menloName)
+        #expect(abs(unchanged.fontSize - 14) < 0.01)
+
+        model.beginReeditingReplacement(id: first.id)
+        model.setReplacementFontSize(13)
+        model.updateEditorText("D")
+        model.commitEditorText()
+
+        let resized = try #require(model.activeReplacements.first)
+        #expect(resized.outputFontSelection == ReplacementFontSelection(
+            choice: .custom,
+            customFontName: "Menlo"
+        ))
+        #expect(CTFontCopyPostScriptName(try #require(resized.resolvedFont)) as String == menloName)
+        #expect(abs(resized.fontSize - 13) < 0.01)
+
+        model.beginReeditingReplacement(id: first.id)
+        model.setReplacementFontChoice(.helveticaNeue)
+        #expect(abs(model.replacementFontSize - 13) < 0.01)
+        model.updateEditorText("E")
+        model.commitEditorText()
+
+        let changed = try #require(model.activeReplacements.first)
+        let changedFontName = CTFontCopyPostScriptName(try #require(changed.resolvedFont)) as String
+        #expect(changed.outputFontSelection.choice == .helveticaNeue)
+        #expect(changedFontName != menloName)
+        #expect(abs(changed.fontSize - 13) < 0.01)
+
+        model.beginReeditingReplacement(id: first.id)
+        model.setCustomFontName("PDFEditor Definitely Missing Font")
+        #expect(model.replacementFontPreview?.reason?.contains("利用できない") == true)
+        model.updateEditorText("F")
+        model.commitEditorText()
+
+        let fallback = try #require(model.activeReplacements.first)
+        #expect(fallback.outputFontSelection == ReplacementFontSelection(
+            choice: .custom,
+            customFontName: "PDFEditor Definitely Missing Font"
+        ))
+        #expect(CTFontCopyPostScriptName(try #require(fallback.resolvedFont)) as String != "PDFEditor Definitely Missing Font")
+        #expect(model.statusMessage.contains("利用できない"))
+        model.beginReeditingReplacement(id: first.id)
+        #expect(model.replacementFontChoice == .custom)
+        #expect(model.customFontName == "PDFEditor Definitely Missing Font")
+        #expect(model.replacementFontPreview?.reason?.contains("利用できない") == true)
+    }
+
+    @Test("移動済みの置換を再編集しても移動先と履歴を保つ")
+    @MainActor
+    func movedReplacementCanBeReedited() throws {
+        let fixture = try makeStandaloneReplacementFixture(maxWidth: 100)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let model = EditorModel(initialURL: fixture.url)
+        let page = try #require(model.document?.page(at: 0))
+
+        model.select(fixture.target)
+        model.updateEditorText("B")
+        model.commitEditorText()
+        let initial = try #require(model.activeReplacements.first)
+        model.moveExistingEdit(id: initial.id, by: CGPoint(x: 36, y: 18))
+        let moved = try #require(model.activeReplacements.first)
+        let destination = try #require(moved.destinationOrigin)
+
+        model.beginReeditingReplacement(id: moved.id)
+        #expect(model.replacementText == "B")
+        model.updateEditorText("C")
+        model.commitEditorText()
+
+        let revised = try #require(model.activeReplacements.first)
+        #expect(revised.id == moved.id)
+        #expect(revised.replacement == "C")
+        #expect(revised.destinationOrigin == destination)
+        #expect(page.annotations.compactMap { $0 as? ReplacementCoverAnnotation }.count == 1)
+        #expect(page.annotations.compactMap { $0 as? ReplacementTextAnnotation }.count == 1)
+
+        model.undoLastEdit()
+        #expect(model.activeReplacements.first?.replacement == "B")
+        #expect(model.activeReplacements.first?.destinationOrigin == destination)
+    }
+
+    @Test("置換は元サイズを保ち、overflowを拒否し、明示した小さいサイズなら受け入れる")
+    @MainActor
+    func replacementUsesExplicitFitPolicy() throws {
+        let fittingFixture = try makeStandaloneReplacementFixture(maxWidth: 100)
+        defer { try? FileManager.default.removeItem(at: fittingFixture.url) }
+        let fittingModel = EditorModel(initialURL: fittingFixture.url)
+        fittingModel.select(fittingFixture.target)
+        fittingModel.updateEditorText("B")
+        fittingModel.commitEditorText()
+        let fitting = try #require(fittingModel.activeReplacements.first)
+        #expect(abs(fitting.fontSize - fittingFixture.target.fontSize) < 0.01)
+        #expect(abs(CTFontGetSize(try #require(fitting.resolvedFont)) - fittingFixture.target.fontSize) < 0.01)
+
+        let output = temporaryPDFURL(prefix: "replacement-size-reopen")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(
+            sourceURL: fittingFixture.url,
+            edits: fittingModel.activeReplacements,
+            to: output
+        )
+        let reopenedDocument = try #require(PDFDocument(url: output))
+        let reopenedPage = try #require(reopenedDocument.page(at: 0))
+        let reopenedIndex = PDFGlyphIndex.makeIndex(for: reopenedPage)
+        let reopenedGlyph = try #require(reopenedIndex.runs
+            .flatMap(\.glyphs)
+            .filter { $0.text == "B" }
+            .max { $0.paintOrder < $1.paintOrder })
+        #expect(abs(reopenedGlyph.fontSize - fittingFixture.target.fontSize) < 0.6)
+
+        let tightFixture = try makeStandaloneReplacementFixture(maxWidth: 15)
+        defer { try? FileManager.default.removeItem(at: tightFixture.url) }
+        let tightModel = EditorModel(initialURL: tightFixture.url)
+        let tightPage = try #require(tightModel.document?.page(at: 0))
+        tightModel.select(tightFixture.target)
+        tightModel.updateEditorText("MM")
+        tightModel.commitEditorText()
+        #expect(tightModel.activeReplacements.isEmpty)
+        #expect(tightPage.annotations.isEmpty)
+        #expect(tightModel.noticeMessage?.contains("超えます") == true)
+        #expect(tightModel.isInlineEditing == false)
+        #expect(tightModel.selectedTarget == tightFixture.target)
+
+        tightModel.setReplacementFontSize(6)
+        tightModel.commitEditorText()
+        let smaller = try #require(tightModel.activeReplacements.first)
+        #expect(smaller.replacement == "MM")
+        #expect(abs(smaller.fontSize - 6) < 0.01)
+        #expect(tightPage.annotations.count == 1)
+    }
+
+    @Test("短い元inkでも同サイズのdescenderとaccentは衝突がなければ置換できる")
+    @MainActor
+    func actualInkFitAcceptsDescenderAndAccentAtSourceSize() throws {
+        let fixture = try makeStandaloneReplacementFixture(maxWidth: 100)
+        defer { try? FileManager.default.removeItem(at: fixture.url) }
+        let model = EditorModel(initialURL: fixture.url)
+
+        model.select(fixture.target)
+        model.updateEditorText("g")
+        model.commitEditorText()
+        let descender = try #require(model.activeReplacements.first)
+        #expect(abs(descender.fontSize - fixture.target.fontSize) < 0.01)
+
+        model.beginReeditingReplacement(id: descender.id)
+        model.updateEditorText("Á")
+        model.commitEditorText()
+        let accented = try #require(model.activeReplacements.first)
+        #expect(accented.replacement == "Á")
+        #expect(abs(accented.fontSize - fixture.target.fontSize) < 0.01)
+    }
+
+    @Test("大きい置換inkが別行またはページ端に当たる場合は確定を拒否する")
+    @MainActor
+    func actualInkFitRejectsOtherLineAndPageEdge() throws {
+        let collisionFixture = try makeTwoLineReplacementFixture()
+        defer { try? FileManager.default.removeItem(at: collisionFixture.url) }
+        let collisionModel = EditorModel(initialURL: collisionFixture.url)
+        let collisionPage = try #require(collisionModel.document?.page(at: 0))
+        #expect(!collisionFixture.target.nearbyTextBounds.isEmpty)
+
+        collisionModel.select(collisionFixture.target)
+        collisionModel.setReplacementFontSize(40)
+        collisionModel.updateEditorText("Á")
+        collisionModel.commitEditorText()
+        #expect(collisionModel.activeReplacements.isEmpty)
+        #expect(collisionPage.annotations.isEmpty)
+        #expect(collisionModel.noticeMessage?.contains("隣接文字またはページ境界") == true)
+
+        let edgeFixture = try makePageEdgeReplacementFixture()
+        defer { try? FileManager.default.removeItem(at: edgeFixture.url) }
+        let edgeModel = EditorModel(initialURL: edgeFixture.url)
+        let edgePage = try #require(edgeModel.document?.page(at: 0))
+        edgeModel.select(edgeFixture.target)
+        edgeModel.setReplacementFontSize(40)
+        edgeModel.updateEditorText("Á")
+        edgeModel.commitEditorText()
+        #expect(edgeModel.activeReplacements.isEmpty)
+        #expect(edgePage.annotations.isEmpty)
+        #expect(edgeModel.noticeMessage?.contains("隣接文字またはページ境界") == true)
+    }
+
+    private func makeStandaloneReplacementFixture(maxWidth: CGFloat) throws -> (url: URL, target: TextTarget) {
+        let font = NSFont(name: "Helvetica", size: 16) ?? .systemFont(ofSize: 16)
+        let url = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 120)) { context in
+            SyntheticFixture.drawLine(
+                [SyntheticFixture.GlyphSpec(character: "A", font: font)],
+                startX: 36,
+                baseline: 64,
+                gap: 0,
+                in: context
+            )
+        }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "A" })
+        let scanned = try #require(index.target(in: run, range: 0..<1, pageIndex: 0))
+        let target = TextTarget(
+            pageIndex: scanned.pageIndex,
+            bounds: scanned.bounds,
+            baseline: scanned.baseline,
+            originalText: scanned.originalText,
+            fontSize: scanned.fontSize,
+            fontColor: scanned.fontColor,
+            fontKey: scanned.fontKey,
+            fontIsExact: scanned.fontIsExact,
+            coverBounds: scanned.coverBounds,
+            maxWidth: maxWidth,
+            lineLayout: nil,
+            hasExplicitSourceMapping: scanned.hasExplicitSourceMapping,
+            fontPostScriptNameOverride: scanned.fontPostScriptNameOverride,
+            nearbyTextBounds: scanned.nearbyTextBounds
+        )
+        return (url, target)
+    }
+
+    private func makeTwoLineReplacementFixture() throws -> (url: URL, target: TextTarget) {
+        let font = NSFont(name: "Helvetica", size: 16) ?? .systemFont(ofSize: 16)
+        let url = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 120)) { context in
+            SyntheticFixture.drawLine(
+                [SyntheticFixture.GlyphSpec(character: "A", font: font)],
+                startX: 36,
+                baseline: 42,
+                gap: 0,
+                in: context
+            )
+            SyntheticFixture.drawLine(
+                [SyntheticFixture.GlyphSpec(character: "X", font: font)],
+                startX: 36,
+                baseline: 70,
+                gap: 0,
+                in: context
+            )
+        }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "A" })
+        return (url, try #require(index.target(in: run, range: 0..<1, pageIndex: 0)))
+    }
+
+    private func makePageEdgeReplacementFixture() throws -> (url: URL, target: TextTarget) {
+        let font = NSFont(name: "Helvetica", size: 16) ?? .systemFont(ofSize: 16)
+        let url = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 120)) { context in
+            SyntheticFixture.drawLine(
+                [SyntheticFixture.GlyphSpec(character: "A", font: font)],
+                startX: 36,
+                baseline: 104,
+                gap: 0,
+                in: context
+            )
+        }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "A" })
+        return (url, try #require(index.target(in: run, range: 0..<1, pageIndex: 0)))
     }
 
     private func makeDateFixture() throws -> (url: URL, date: String, replacedDigit: String) {
