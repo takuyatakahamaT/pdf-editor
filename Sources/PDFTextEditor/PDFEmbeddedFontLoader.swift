@@ -227,17 +227,18 @@ enum PDFEmbeddedFontLoader {
     }
 
     /// アプリに同梱した OFL フォントをこのプロセス内だけで登録する。
-    /// Microsoft Office にある MS Gothic も、配布用にコピーせずこのプロセス内だけで登録する。
+    /// Microsoft Office にある MS Gothic / MS Mincho も、配布用にコピーせず
+    /// このプロセス内だけで登録する。
     /// ユーザーのフォント設定やシステム全体のフォント一覧は変更しない。
     static func registerBundledFonts() {
         _ = bundledFontsRegistered
-        _ = localMSGothicRegistered
+        _ = localMicrosoftJapaneseFontsRegistered
     }
 
-    /// この Mac にある Microsoft Office の MS Gothic 系フォントを登録し、利用可能なファミリー名を返す。
+    /// この Mac にある Microsoft Office の日本語フォントを登録し、利用可能なファミリー名を返す。
     static func registerLocalFontFamilies() -> [String] {
         registerBundledFonts()
-        return localMSGothicRegistered
+        return localMicrosoftJapaneseFontsRegistered
     }
 
     /// 利用者が選んだフォントファイルをアプリ終了までの間だけ登録する。
@@ -453,18 +454,28 @@ enum PDFEmbeddedFontLoader {
 
     /// Office のインストール先は `/Applications` に置かれたアプリの symlink も解決する。
     /// フォント本体をリポジトリや PDF editor.app に複製せず、ローカルの Office から直接読む。
-    private static let localMSGothicRegistered: [String] = {
-        let fontRelativePath = "Contents/Resources/DFonts/msgothic.ttc"
-        let candidates = [
+    private static let localMicrosoftJapaneseFontsRegistered: [String] = {
+        let wordApplications = [
             URL(fileURLWithPath: "/Applications/Microsoft Word.app"),
             FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Applications/Microsoft Word.app")
-        ].map { $0.appendingPathComponent(fontRelativePath) }
+        ]
+        let fontRelativePaths = [
+            "Contents/Resources/DFonts/msgothic.ttc",
+            "Contents/Resources/DFonts/msmincho.ttc"
+        ]
 
-        guard let fontURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-            return []
+        var families = Set<String>()
+        for relativePath in fontRelativePaths {
+            let candidates = wordApplications.map { $0.appendingPathComponent(relativePath) }
+            guard let fontURL = candidates.first(where: {
+                FileManager.default.fileExists(atPath: $0.path)
+            }) else { continue }
+            if let registered = try? registerFontFile(at: fontURL) {
+                families.formUnion(registered)
+            }
         }
-        return (try? registerFontFile(at: fontURL)) ?? []
+        return families.sorted()
     }()
 
     private static func containsJapanese(_ text: String) -> Bool {
