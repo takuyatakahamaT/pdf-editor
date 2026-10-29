@@ -67,6 +67,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.pageShadowsEnabled = true
         view.backgroundColor = NihoPalette.pdfStageNSColor
         view.autoScales = false
+        view.disableNativeMagnification()
         view.scaleChangeHandler = context.coordinator.handleScaleChange
         view.magnifierChangeHandler = context.coordinator.handleMagnifierChange
         view.startObservingScaleChanges()
@@ -104,6 +105,7 @@ struct PDFCanvas: NSViewRepresentable {
             view.setMagnifierActive(false)
             view.document = document
             view.autoScales = false
+            view.disableNativeMagnification()
             view.applyZoomCommand(.fitPage)
             view.appliedZoomCommandRevision = zoomState.commandRevision
             view.reportCurrentPageLater()
@@ -240,15 +242,29 @@ struct PDFCanvas: NSViewRepresentable {
 }
 
 final class ClickablePDFView: PDFView, NSTextFieldDelegate {
+    enum ZoomGestureKind: Equatable {
+        case magnify
+        case modifiedScroll
+    }
+
     static func shouldZoomOnScroll(modifierFlags: NSEvent.ModifierFlags) -> Bool {
         modifierFlags.contains(.command) || modifierFlags.contains(.control)
     }
 
-    static func shouldCaptureZoomScroll(
+    static func zoomGestureKind(
+        eventType: NSEvent.EventType,
         modifierFlags: NSEvent.ModifierFlags,
         pointerInsidePDF: Bool
-    ) -> Bool {
-        pointerInsidePDF && shouldZoomOnScroll(modifierFlags: modifierFlags)
+    ) -> ZoomGestureKind? {
+        guard pointerInsidePDF else { return nil }
+        switch eventType {
+        case .magnify:
+            return .magnify
+        case .scrollWheel where shouldZoomOnScroll(modifierFlags: modifierFlags):
+            return .modifiedScroll
+        default:
+            return nil
+        }
     }
 
     static func zoomMultiplier(forScrollDelta delta: CGFloat) -> CGFloat {
@@ -285,7 +301,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var appliedZoomCommandRevision = 0
 
     private var scaleObserver: NSObjectProtocol?
-    private var scrollWheelMonitor: Any?
+    private var zoomGestureMonitor: Any?
     private var pageObserver: NSObjectProtocol?
     private var magnifierTrackingArea: NSTrackingArea?
     private var magnifierPoint: CGPoint?
@@ -333,35 +349,47 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         MainActor.assumeIsolated {
             if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
             if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
-            if let scrollWheelMonitor { NSEvent.removeMonitor(scrollWheelMonitor) }
+            if let zoomGestureMonitor { NSEvent.removeMonitor(zoomGestureMonitor) }
         }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if let scrollWheelMonitor {
-            NSEvent.removeMonitor(scrollWheelMonitor)
-            self.scrollWheelMonitor = nil
+        disableNativeMagnification()
+        if let zoomGestureMonitor {
+            NSEvent.removeMonitor(zoomGestureMonitor)
+            self.zoomGestureMonitor = nil
         }
         guard window != nil else { return }
 
-        // PDFKit routes wheel events through its internal PDFScrollView, bypassing
-        // PDFView.scrollWheel(with:). Monitor app events so modified wheel gestures
-        // can zoom while unmodified events continue through PDFKit's normal scroll path.
-        scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+        // PDFKit routes wheel and magnification events through its internal PDFScrollView,
+        // bypassing PDFView's responder methods. Keep one owner for zoom gestures so the
+        // native scroll-view magnification cannot fight the app's PDF scale and snap back.
+        zoomGestureMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.scrollWheel, .magnify]
+        ) { [weak self] event in
             guard let self,
                   let window = self.window,
                   event.window === window else { return event }
             let point = self.convert(event.locationInWindow, from: nil)
-            let pointerInsidePDF = self.bounds.contains(point)
-            guard Self.shouldCaptureZoomScroll(
+            guard let gesture = Self.zoomGestureKind(
+                eventType: event.type,
                 modifierFlags: event.modifierFlags,
-                pointerInsidePDF: pointerInsidePDF
-            ), self.zoom(forScrollWheel: event) else {
-                return event
+                pointerInsidePDF: self.bounds.contains(point)
+            ) else { return event }
+            switch gesture {
+            case .magnify:
+                self.zoom(forMagnify: event)
+                return nil
+            case .modifiedScroll:
+                return self.zoom(forScrollWheel: event) ? nil : event
             }
-            return nil
         }
+    }
+
+    func disableNativeMagnification() {
+        let scrollView = subviews.first(where: { $0 is NSScrollView }) as? NSScrollView
+        scrollView?.allowsMagnification = false
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -452,16 +480,10 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
-    override func magnify(with event: NSEvent) {
+    private func zoom(forMagnify event: NSEvent) {
+        guard event.magnification != 0 else { return }
         let point = convert(event.locationInWindow, from: nil)
         setScale(scaleFactor * max(0.1, 1 + event.magnification), anchoredAt: point)
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        guard zoom(forScrollWheel: event) else {
-            super.scrollWheel(with: event)
-            return
-        }
     }
 
     @discardableResult

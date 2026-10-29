@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import Testing
 @testable import PDFTextEditor
 
@@ -67,18 +68,51 @@ struct PDFZoomStateTests {
         #expect(state.scale == 1.75)
     }
 
-    @Test("only command or control scroll gestures inside the PDF canvas are captured for zoom")
+    @Test("pinch and modified scroll gestures are captured only inside the PDF canvas")
     @MainActor
-    func scopesZoomScrollCaptureToModifiedGesturesOverThePDF() {
+    func scopesZoomGesturesToThePDF() {
         #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .command))
         #expect(ClickablePDFView.shouldZoomOnScroll(modifierFlags: .control))
         #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: []))
         #expect(!ClickablePDFView.shouldZoomOnScroll(modifierFlags: .option))
 
-        #expect(ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .control, pointerInsidePDF: true))
-        #expect(ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .command, pointerInsidePDF: true))
-        #expect(!ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: [], pointerInsidePDF: true))
-        #expect(!ClickablePDFView.shouldCaptureZoomScroll(modifierFlags: .control, pointerInsidePDF: false))
+        #expect(ClickablePDFView.zoomGestureKind(
+            eventType: .magnify,
+            modifierFlags: [],
+            pointerInsidePDF: true
+        ) == .magnify)
+        #expect(ClickablePDFView.zoomGestureKind(
+            eventType: .scrollWheel,
+            modifierFlags: .control,
+            pointerInsidePDF: true
+        ) == .modifiedScroll)
+        #expect(ClickablePDFView.zoomGestureKind(
+            eventType: .scrollWheel,
+            modifierFlags: .command,
+            pointerInsidePDF: true
+        ) == .modifiedScroll)
+        #expect(ClickablePDFView.zoomGestureKind(
+            eventType: .scrollWheel,
+            modifierFlags: [],
+            pointerInsidePDF: true
+        ) == nil)
+        #expect(ClickablePDFView.zoomGestureKind(
+            eventType: .magnify,
+            modifierFlags: [],
+            pointerInsidePDF: false
+        ) == nil)
+    }
+
+    @Test("PDFKit native magnification is disabled so it cannot fight custom zoom")
+    @MainActor
+    func disablesNativePDFScrollViewMagnification() {
+        let view = ClickablePDFView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        view.document = PDFDocument()
+
+        view.disableNativeMagnification()
+
+        let scrollView = view.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView
+        #expect(scrollView?.allowsMagnification == false)
     }
 
     @Test("scroll direction changes the zoom multiplier")
