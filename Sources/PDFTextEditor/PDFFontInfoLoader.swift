@@ -169,9 +169,10 @@ enum PDFFontInfoLoader {
             ascent: ascent,
             descent: descent,
             hasEmbeddedProgram: hasEmbedded,
-            // 単純フォントは CID/GID の恒等対応という前提が成り立たないため、
-            // GID 直接指定による厳密描画の対象にはしない（cmap 経由の通常経路のみ使う）。
-            unicodeToCode: [:],
+            // 単純 TrueType フォントの文字コードは GID とは限らない。
+            // ToUnicode の逆引きは保持し、埋込 TrueType の cmap で code→GID を
+            // 解決できたときだけ厳密描画に使う。
+            unicodeToCode: invertToUnicode(toUnicode),
             isIdentityCIDToGID: false
         )
     }

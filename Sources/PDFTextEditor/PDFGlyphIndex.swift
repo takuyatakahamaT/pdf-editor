@@ -748,13 +748,13 @@ struct PDFFontInfo {
     /// `toUnicode` を反転した Unicode文字 → コード のマップ（1 文字対応分のみ）。
     /// このサンプル PDF のようにサブセット埋め込みフォントが `cmap` テーブルを
     /// 持たない場合、`CTFontGetGlyphsForCharacters` は常に失敗する。
-    /// しかし元 PDF 自身がその文字を ToUnicode で宣言済みということは、
-    /// そのコード = GID の位置に実在するグリフがある証拠なので、
-    /// 置換文字列の全文字がこのマップに載っていれば cmap を介さず直接
-    /// 元の GID でグリフを描画できる（真に「元 PDF と同じフォントそのもの」）。
+    /// このコードから、Type0/Identity-H は恒等 CID→GID、単純 TrueType は
+    /// 埋込 cmap を使って実際の GID を求める。置換文字列の全文字を解決できた
+    /// 場合だけ、Unicode レイアウトを介さず元の GID を直接描画する。
     var unicodeToCode: [String: Int]
     /// Type0/CIDFontType2 で `/CIDToGIDMap` が `/Identity`（または省略= 既定 Identity）
-    /// の場合のみ true。true のときだけ code をそのまま GID として使ってよい。
+    /// の場合のみ true。true のときは code をそのまま GID として使う。
+    /// 単純 TrueType フォントは false だが、別途 cmap で code→GID を解決する。
     var isIdentityCIDToGID: Bool
 
     func width(for code: Int) -> CGFloat { widthTable[code] ?? defaultWidth }

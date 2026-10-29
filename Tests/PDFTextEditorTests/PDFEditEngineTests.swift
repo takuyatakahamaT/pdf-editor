@@ -195,8 +195,7 @@ struct PDFEditEngineTests {
             fontDict: dictionary,
             size: fontSize,
             replacementText: "11",
-            supportingText: "2026年11月30日",
-            selectedWidth: 9.45
+            supportingText: "2026年11月30日"
         )
         let line = CTLineCreateWithAttributedString(NSAttributedString(
             string: "11",
@@ -239,11 +238,74 @@ struct PDFEditEngineTests {
         #expect(layout.maxWidth <= run.glyphs[1].advanceBox.minX - layout.lineStartX + 0.01)
     }
 
-    @Test("embedded-font replacement reflows instead of shrinking when it exceeds the selection width")
-    func widerEmbeddedFontReplacementRequestsLineReflow() {
-        #expect(PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: 9))
-        #expect(!PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 9, selectedWidth: 9))
-        #expect(!PDFEmbeddedFontLoader.replacementNeedsLineReflow(replacementWidth: 18, selectedWidth: nil))
+    @Test("line reflow preserves the source embedded font")
+    @MainActor
+    func widerReplacementPreservesEmbeddedFont() throws {
+        let font = try #require(NSFont(name: "Helvetica", size: 16))
+        let sourceText = "9130"
+        let url = try SyntheticFixture.build(pageBounds: CGRect(x: 0, y: 0, width: 240, height: 100)) { context in
+            let line = CTLineCreateWithAttributedString(NSAttributedString(
+                string: sourceText,
+                attributes: [.font: font, .foregroundColor: NSColor.black]
+            ))
+            context.textMatrix = .identity
+            context.textPosition = CGPoint(x: 30, y: 50)
+            CTLineDraw(line, context)
+        }
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.glyphs.count == sourceText.count })
+        let lineStartX = try #require(run.glyphs.first).advanceBox.minX
+        let lineEndX = try #require(run.glyphs.last).advanceBox.maxX
+        let layout = TextRunLayout(
+            glyphs: zip(sourceText.map(String.init), run.glyphs).map { text, glyph in
+                TextRunLayout.Glyph(
+                    text: text,
+                    offsetX: glyph.advanceBox.minX - lineStartX,
+                    advance: glyph.advance
+                )
+            },
+            selectedRange: 0..<1,
+            lineStartX: lineStartX,
+            lineWidth: lineEndX - lineStartX,
+            maxWidth: page.bounds(for: .mediaBox).maxX - lineStartX,
+            coverBounds: run.box
+        )
+        let selectedGlyph = try #require(run.glyphs.first)
+        let target = TextTarget(
+            pageIndex: 0,
+            bounds: selectedGlyph.advanceBox,
+            baseline: selectedGlyph.baseline,
+            originalText: "9",
+            fontSize: selectedGlyph.fontSize,
+            fontColor: selectedGlyph.fillColor,
+            fontKey: selectedGlyph.fontKey,
+            fontIsExact: true,
+            coverBounds: selectedGlyph.advanceBox,
+            maxWidth: page.bounds(for: .mediaBox).maxX - selectedGlyph.advanceBox.minX,
+            lineLayout: layout
+        )
+        let fontKey = try #require(target.fontKey)
+        let fontDictionary = try #require(PDFGlyphIndex.fontDictionary(for: fontKey, page: page))
+        let embeddedFont = try #require(PDFEmbeddedFontLoader.loadEmbeddedFont(
+            fontDict: fontDictionary,
+            size: target.fontSize
+        ))
+
+        let resolution = PDFEditEngine.resolveFont(
+            for: target,
+            on: page,
+            replacement: "10"
+        )
+
+        #expect(resolution.isExact)
+        #expect(resolution.reason == nil)
+        #expect(resolution.exactGlyphs?.count == 2)
+        #expect(CTFontGetGlyphCount(resolution.font) == CTFontGetGlyphCount(embeddedFont))
+        #expect(CTFontGetGlyphCount(resolution.font) < CTFontGetGlyphCount(font))
     }
 
     @Test("Type0 font reports subset, descendant and Identity-H safely")
