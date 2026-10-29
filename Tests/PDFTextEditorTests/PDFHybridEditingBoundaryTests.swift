@@ -122,6 +122,7 @@ struct PDFHybridEditingBoundaryTests {
             pageIndex: 0
         ))
         #expect(target.originalText == "ABC")
+        #expect(!target.sourceIsPlainTextObject)
         model.select(target)
         model.updateEditorText("XYZ")
         model.commitEditorText()
@@ -332,7 +333,7 @@ struct PDFHybridEditingBoundaryTests {
         #expect(model.statusMessage.contains("墨消しには使えません"))
     }
 
-    @Test("ToUnicodeで全グリフを解決できてもoverlayの原文残存を警告する")
+    @Test("ToUnicodeが明示されても内部編集非対応の文字数変更はoverlay警告を出す")
     @MainActor
     func explicitToUnicodeReplacementStatus() throws {
         let url = simpleFontFixture(
@@ -349,9 +350,10 @@ struct PDFHybridEditingBoundaryTests {
         #expect(target.originalText == "A")
         #expect(target.hasExplicitSourceMapping)
         model.select(target)
-        model.replacementText = "B"
+        model.replacementText = "BB"
         model.applyReplacement()
         #expect(model.edits.count == 1)
+        #expect(model.activeReplacements.first?.storage.isInternal == false)
         #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
         #expect(model.statusMessage.contains("墨消しには使えません"))
     }

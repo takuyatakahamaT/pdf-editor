@@ -39,7 +39,7 @@
 
 ## 現状の技術的な販売阻害点
 
-- 現在のビルドはad-hoc署名であり、販売用Developer ID署名・notarizationには対応していません。
+- 現在の自動更新リリースはad-hoc署名です。販売用Developer ID証明書とnotarytoolプロファイルを設定し、`scripts/package-release.sh`で公証済みZIPを作成・検証してください。
 - 既存の同梱ライセンスはpdfcpuだけでした。Go依存のライセンス・NOTICE全体を商用配布に含める必要があります。
 - 1つのビルドはビルドしたCPUアーキテクチャ向けです。Intel/Apple Silicon向けの販売ZIPを分けるか、Universal buildを構成する必要があります。
 - リポジトリが公開でもソース閲覧はできますが、商用ライセンス上の権利移転確認、著作権表示、販売版のコード署名が別途必要です。

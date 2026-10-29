@@ -28,8 +28,22 @@ struct ScannedGlyph {
     var textRenderingMode: Int = 0
     /// content streamを走査した順番。後から描かれた重なり文字を選択するために使う。
     var paintOrder: Int = 0
+    /// 元のshow演算子。内部置換は単一の `Tj` または単一文字列だけの `TJ` 全体を許可する。
+    var showOperator: PDFTextShowOperator = .unknown
+    var showOperationID: Int = -1
+    var isInsideForm: Bool = false
+    var isInsideMarkedContent: Bool = false
 
     var isVisible: Bool { (0...6).contains(textRenderingMode) && textRenderingMode != 3 }
+}
+
+enum PDFTextShowOperator: Equatable {
+    case tj
+    case singleStringTJ
+    case tjArray
+    case quote
+    case doubleQuote
+    case unknown
 }
 
 /// 同一ベースライン・同一フォント・同一サイズで視覚的に連続するグリフの並び。
@@ -101,6 +115,13 @@ struct TextTarget: Equatable {
     let fontPostScriptNameOverride: String?
     /// 選択行とは別の行にある文字占有領域。置換inkの縦方向衝突判定に使う。
     let nearbyTextBounds: [CGRect]
+    /// 選択した各文字の PageTextIndex 上のボックス。PDFium の page object と
+    /// 見た目だけでなく文字単位でも照合するために保持する。
+    let sourceGlyphBounds: [CGRect]
+    /// 選択外の可視グリフが同じ領域へ重なっている場合はobject同定を曖昧とする。
+    let sourceSelectionIsAmbiguous: Bool
+    /// PageTextIndexが単一の通常 `Tj`、非Form、非marked contentと証明したか。
+    let sourceIsPlainTextObject: Bool
 
     init(
         pageIndex: Int,
@@ -116,7 +137,10 @@ struct TextTarget: Equatable {
         lineLayout: TextRunLayout? = nil,
         hasExplicitSourceMapping: Bool = true,
         fontPostScriptNameOverride: String? = nil,
-        nearbyTextBounds: [CGRect] = []
+        nearbyTextBounds: [CGRect] = [],
+        sourceGlyphBounds: [CGRect] = [],
+        sourceSelectionIsAmbiguous: Bool = false,
+        sourceIsPlainTextObject: Bool = false
     ) {
         self.pageIndex = pageIndex
         self.bounds = bounds
@@ -132,6 +156,9 @@ struct TextTarget: Equatable {
         self.hasExplicitSourceMapping = hasExplicitSourceMapping
         self.fontPostScriptNameOverride = fontPostScriptNameOverride
         self.nearbyTextBounds = nearbyTextBounds
+        self.sourceGlyphBounds = sourceGlyphBounds
+        self.sourceSelectionIsAmbiguous = sourceSelectionIsAmbiguous
+        self.sourceIsPlainTextObject = sourceIsPlainTextObject
     }
 }
 
@@ -354,6 +381,20 @@ struct PageTextIndex {
             coverMaxY: coverMaxY
         )
 
+        let selectedPaintOrders = Set(clusterGlyphs.map(\.paintOrder))
+        let sourceSelectionIsAmbiguous = runs.flatMap(\.glyphs).contains { glyph in
+            !selectedPaintOrders.contains(glyph.paintOrder)
+                && glyph.isVisible
+                && clusterGlyphs.contains(where: { $0.advanceBox.intersects(glyph.advanceBox) })
+        }
+        let operationIDs = Set(clusterGlyphs.map(\.showOperationID))
+        let sourceIsPlainTextObject = operationIDs.count == 1
+            && operationIDs.first.map { $0 >= 0 } == true
+            && clusterGlyphs.allSatisfy {
+                ($0.showOperator == .tj || $0.showOperator == .singleStringTJ)
+                    && !$0.isInsideForm && !$0.isInsideMarkedContent
+            }
+
         return TextTarget(
             pageIndex: pageIndex,
             bounds: bounds,
@@ -370,7 +411,10 @@ struct PageTextIndex {
             fontPostScriptNameOverride: fontPostScriptNameOverrides[fontKey],
             nearbyTextBounds: runs.filter {
                 abs($0.baseline - baseline) > 0.3 * max(fontSize, $0.fontSize)
-            }.map(\.box)
+            }.map(\.box),
+            sourceGlyphBounds: clusterGlyphs.map(\.advanceBox),
+            sourceSelectionIsAmbiguous: sourceSelectionIsAmbiguous,
+            sourceIsPlainTextObject: sourceIsPlainTextObject
         )
     }
 
@@ -816,6 +860,7 @@ final class GlyphScanState {
     var textRise: CGFloat = 0
     var textRenderingMode: Int = 0
     var nextPaintOrder = 0
+    var nextShowOperationID = 0
     private var textGraphicsStateStack: [TextGraphicsState] = []
 
     var fonts: [String: PDFFontInfo] = [:]
@@ -866,6 +911,11 @@ final class GlyphScanState {
 
     func fontResourceKey(for name: String) -> String {
         (formResourcePath + [name]).joined(separator: "\u{1F}")
+    }
+
+    func takeShowOperationID() -> Int {
+        defer { nextShowOperationID += 1 }
+        return nextShowOperationID
     }
 
     func enterForm(named resourceName: String, resources: CGPDFDictionaryRef?) -> Bool {

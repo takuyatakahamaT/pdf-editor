@@ -41,6 +41,8 @@ mainに入った変更は署名付きリリースとして公開されます。�
 
 未埋め込みフォントの置換では、同じ行に続く文字を右へ移して置換後の幅を作ります。PDFのフォント名に一致するローカルフォントがない場合は、同梱のNoto Sans JPを使います。このMacにMicrosoft Wordがあれば、Word内の `msgothic.ttc` をこのアプリの実行中だけ登録し、MS ゴシックを置換とテキスト追加に使えます。フォント本体はアプリへコピーしません。Wordにない別の `.ttf` / `.otf` / `.ttc` は上部の「ツール」メニューの「フォントを読み込む…」から登録できます。Noto Sans JPのライセンスは `Resources/ThirdParty/NotoSansJP-OFL.txt` に収録しています。
 
+既存文字のうち、PDFiumとPageTextIndexの両方で「ページ直下の単一`Tj`または単一文字列だけの`TJ` text object全体、明示ToUnicode、標準14フォント、同じglyph幅、非回転・非透明・非marked content」と証明できた置換だけは、保存時に元objectの文字列をPDF内部で置換します。保存後のファイルを再openし、置換文字、元文字の不在、ページ数・geometryを再検証します。条件外は理由を表示して従来のoverlayへ送り、PDFiumが無いSwiftPMビルドでもoverlayは利用できます。
+
 PDF表示の右下の操作で拡大・縮小、倍率の直接入力、ページ全体・ページ幅・実寸表示を切り替えられます。上部のファイル名の横でページを送れます。`+` / `-` / `0` キー、CommandまたはControlキーを押しながらのマウスホイール／スクロール、トラックパッドのピンチ操作でも倍率を変えられます。虫眼鏡を使うとポインター付近を一時的に拡大でき、`Esc`で閉じられます。表示倍率の変更はPDFの内容や編集座標を変更しません。
 
 任意位置へ追加する場合は右側の「追加」へ切り替え、PDF上をクリックして入力します。周囲の文字からフォント・サイズ・色を自動推定し、必要なら右側でフォント、6〜72ptのサイズ、色を変更して「追加する」を押します。Returnで確定した後も、追加文字をPDF上でドラッグして移動できます。
@@ -78,11 +80,11 @@ PDFを開き、「ツール」メニューの「圧縮…」またはファイ�
 - 文字レイヤーを持つPDFが対象です。スキャン画像だけのPDFにはOCRが必要です。
 - 任意位置への追加は横書き1行に対応します。回転・縦書き・複数行は未対応です。
 - 編集中のプレビューでは、元文字を白で覆い、同じ位置へPDF注釈として新しい文字を重ねます。白背景の帳票向けです。
-- 書き出し時は置換・追加文字をCoreTextでPDFへ描画します。PDF上でテキストとして抽出でき、開き直したPDFでも選択できます。
+- 書き出し時は、限定条件を満たす既存文字だけPDFiumで内部置換し、それ以外の置換・追加文字をCoreTextでPDFへ描画します。内部置換とoverlayは別状態で保持します。
 - 元PDFは上書きせず、編集済みPDFを別ファイルへ保存します。
-- 置換では、同一行の後続文字（別フォントrunに分かれた文字を含む）を移動して置換文字列の幅を確保します。空き幅が足りない場合は文字の縦横比を保って縮小します。
+- 置換では、同一行の後続文字（別フォントrunに分かれた文字を含む）を移動して置換文字列の幅を確保します。空き幅が足りない場合は確定前に案内し、文字列や出力サイズの変更を促します。
 - 日本語ゴシックの既定代替として、SIL Open Font License 1.1のNoto Sans JPを同梱します。MS Gothic / MS MinchoはMicrosoft Wordにあるローカルの `msgothic.ttc` / `msmincho.ttc` をプロセス内だけで登録します。使用できるフォントファイルは「ツール」メニューの「フォントを読み込む…」から実行中のアプリへ登録できます。
-- 置換・表示からの削除は、元の文字を白で覆う方式です。content stream からは消しません。書き出したPDFに対して `pdftotext` 等でテキスト抽出すると、白で隠した元の文字列が依然として取得できます。完全に消去するには content stream の書き換えが必要です。機密情報の抹消には使用しないでください。
+- 条件外の置換と「表示から削除」は元の文字を白で覆う方式で、content streamからは消しません。内部置換も過去revision・metadata・埋め込みデータからの抹消を保証しません。どちらも機密情報の墨消しには使用せず、専用の墨消し機能を使ってください。
 - PDF結合はページをPDFKitでコピーするため、ページサイズ、回転、文字、既存注釈を保持します。しおりなど文書全体の構造は引き継ぎません。
 
 ## 開発・確認
@@ -91,7 +93,10 @@ PDFを開き、「ツール」メニューの「圧縮…」またはファイ�
 swift build
 swift test
 ./scripts/build-app.sh
+PDFIUM_LIBRARY_PATH="$PWD/dist/PDF editor.app/Contents/Frameworks/libpdfium.dylib" swift test --filter PDFInternalTextEditEngineTests --no-parallel
 PDFCPU_PATH="$PWD/dist/PDF editor.app/Contents/Helpers/pdfcpu" swift test --filter PDFPageResizeEngineTests
 ```
+
+`build-app.sh` は bblanchon/pdfium-binaries `chromium/8125` のmacOS universal archiveを固定URLから取得し、SHA256 `0cf06803b9a4acc489fc967a1b05990622ca1cf41fa027ff9cc89eeab9b19279` を検証します。オフラインでは同じarchiveを `PDFIUM_ARCHIVE=/path/to/archive.tgz` で指定できます。`libpdfium.dylib` とarchive内の全license noticeをappへ収録し、arm64/x86_64・install name・コード署名を検証します。
 
 販売ZIPの作成には、Apple Developer ID署名と公証の設定を済ませたうえで `scripts/package-release.sh` を使います。販売前の権利・販売条件・配布要件は `docs/legal/launch-checklist.md` を確認してください。

@@ -8,6 +8,16 @@ enum PDFTextEditKind {
     case insertion
 }
 
+enum PDFTextReplacementStorage: Equatable {
+    case overlay(reason: String)
+    case internalPDFium
+
+    var isInternal: Bool {
+        if case .internalPDFium = self { return true }
+        return false
+    }
+}
+
 struct ReplacementFontSelection: Equatable {
     let choice: InsertionFontChoice
     let customFontName: String?
@@ -84,6 +94,9 @@ struct ReplacementEdit {
     let sourceFontIsExact: Bool
     let sourceText: String
     let sourceNearbyTextBounds: [CGRect]
+    let sourceGlyphBounds: [CGRect]
+    let sourceSelectionIsAmbiguous: Bool
+    let sourceIsPlainTextObject: Bool
     let fontSize: CGFloat
     let fontColor: NSColor
 
@@ -109,6 +122,8 @@ struct ReplacementEdit {
     let hasExplicitSourceMapping: Bool
     let fontPostScriptNameOverride: String?
     let outputFontSelection: ReplacementFontSelection
+    /// プレビューはどちらもannotationで行うが、保存時の処理は混在させない。
+    var storage: PDFTextReplacementStorage
 
     init(
         target: TextTarget,
@@ -132,6 +147,9 @@ struct ReplacementEdit {
         sourceFontIsExact = target.fontIsExact
         sourceText = target.originalText
         sourceNearbyTextBounds = target.nearbyTextBounds
+        sourceGlyphBounds = target.sourceGlyphBounds
+        sourceSelectionIsAmbiguous = target.sourceSelectionIsAmbiguous
+        sourceIsPlainTextObject = target.sourceIsPlainTextObject
         fontSize = CTFontGetSize(resolvedFont)
         fontColor = target.fontColor
         baseline = target.baseline
@@ -146,6 +164,7 @@ struct ReplacementEdit {
         hasExplicitSourceMapping = target.hasExplicitSourceMapping
         fontPostScriptNameOverride = target.fontPostScriptNameOverride
         self.outputFontSelection = outputFontSelection
+        storage = .overlay(reason: "PDF内部置換は未確認です。")
         if let lineLayout = target.lineLayout {
             lineCompositionStart = lineLayout.selectedRange.lowerBound
             composesLineEdits = false
@@ -177,6 +196,9 @@ struct ReplacementEdit {
         sourceFontIsExact = target.fontIsExact
         sourceText = target.originalText
         sourceNearbyTextBounds = target.nearbyTextBounds
+        sourceGlyphBounds = target.sourceGlyphBounds
+        sourceSelectionIsAmbiguous = target.sourceSelectionIsAmbiguous
+        sourceIsPlainTextObject = target.sourceIsPlainTextObject
         fontSize = target.fontSize
         fontColor = target.fontColor
         baseline = target.baseline
@@ -194,6 +216,7 @@ struct ReplacementEdit {
         hasExplicitSourceMapping = target.hasExplicitSourceMapping
         fontPostScriptNameOverride = target.fontPostScriptNameOverride
         outputFontSelection = .automatic
+        storage = .overlay(reason: "削除はoverlayで処理します。")
     }
 
     init(
@@ -217,6 +240,9 @@ struct ReplacementEdit {
         sourceFontIsExact = true
         sourceText = ""
         sourceNearbyTextBounds = []
+        sourceGlyphBounds = []
+        sourceSelectionIsAmbiguous = false
+        sourceIsPlainTextObject = false
         self.fontSize = fontSize
         self.fontColor = fontColor
         baseline = bounds.midY
@@ -234,6 +260,7 @@ struct ReplacementEdit {
         hasExplicitSourceMapping = true
         fontPostScriptNameOverride = nil
         self.outputFontSelection = outputFontSelection
+        storage = .overlay(reason: "追加テキストはoverlayで処理します。")
     }
 
     func moved(to newBounds: CGRect) -> ReplacementEdit {
@@ -252,6 +279,7 @@ struct ReplacementEdit {
     func movingSelection(to point: CGPoint) -> ReplacementEdit {
         var copy = self
         copy.destinationOrigin = point
+        copy.storage = .overlay(reason: "移動した文字はPDF内部置換の対象外です。")
         return copy
     }
 
@@ -270,7 +298,10 @@ struct ReplacementEdit {
             lineLayout: lineLayout,
             hasExplicitSourceMapping: hasExplicitSourceMapping,
             fontPostScriptNameOverride: fontPostScriptNameOverride,
-            nearbyTextBounds: sourceNearbyTextBounds
+            nearbyTextBounds: sourceNearbyTextBounds,
+            sourceGlyphBounds: sourceGlyphBounds,
+            sourceSelectionIsAmbiguous: sourceSelectionIsAmbiguous,
+            sourceIsPlainTextObject: sourceIsPlainTextObject
         )
     }
 
@@ -333,6 +364,8 @@ struct ReplacementEdit {
 enum PDFExportError: Error {
     case unreadableSource
     case cannotCreateContext
+    case sourceOverwriteDenied
+    case overlappingEditPaths
 }
 
 private struct PDFInternalLinkRemap: Encodable {
@@ -357,6 +390,67 @@ enum PDFExportEngine {
         markups: [PDFMarkupEdit] = [],
         to outputURL: URL,
         linkRemapHelperURL: URL? = nil
+    ) throws {
+        guard sourceURL.standardizedFileURL != outputURL.standardizedFileURL else {
+            throw PDFExportError.sourceOverwriteDenied
+        }
+        let finalStageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-final-stage-\(UUID().uuidString).pdf")
+        let internalStageURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdf-editor-internal-stage-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: finalStageURL)
+            try? FileManager.default.removeItem(at: internalStageURL)
+        }
+
+        let internalEdits = edits.filter { $0.storage.isInternal }
+        let overlayEdits = edits.filter { !$0.storage.isInternal }
+        for internalEdit in internalEdits {
+            let internalBounds = internalEdit.coverBounds.union(internalEdit.displayedTextBounds)
+            if overlayEdits.contains(where: { overlay in
+                overlay.pageIndex == internalEdit.pageIndex
+                    && internalBounds.intersects(overlay.annotationBounds.union(overlay.displayedTextBounds))
+            }) {
+                throw PDFExportError.overlappingEditPaths
+            }
+        }
+        let renderSourceURL: URL
+        if internalEdits.isEmpty {
+            renderSourceURL = sourceURL
+        } else {
+            try PDFInternalTextEditEngine.apply(sourceURL: sourceURL, edits: internalEdits, to: internalStageURL)
+            renderSourceURL = internalStageURL
+        }
+
+        if overlayEdits.isEmpty, markups.isEmpty, !internalEdits.isEmpty {
+            let data = try Data(contentsOf: internalStageURL)
+            try data.write(to: finalStageURL, options: .atomic)
+        } else {
+            try exportOverlay(
+                sourceURL: renderSourceURL,
+                edits: overlayEdits,
+                markups: markups,
+                to: finalStageURL,
+                linkRemapHelperURL: linkRemapHelperURL
+            )
+        }
+        if !internalEdits.isEmpty {
+            try PDFInternalTextEditEngine.verifyFinalOutput(
+                sourceURL: sourceURL,
+                outputURL: finalStageURL,
+                edits: internalEdits
+            )
+        }
+        let finalData = try Data(contentsOf: finalStageURL)
+        try finalData.write(to: outputURL, options: .atomic)
+    }
+
+    private static func exportOverlay(
+        sourceURL: URL,
+        edits: [ReplacementEdit],
+        markups: [PDFMarkupEdit],
+        to outputURL: URL,
+        linkRemapHelperURL: URL?
     ) throws {
         guard let document = PDFDocument(url: sourceURL),
               let firstPage = document.page(at: 0) else {
