@@ -151,6 +151,10 @@ enum PDFTextRenderer {
 
         // 後続の文字を右へ送って幅を確保する。ページ上の次の文字に当たる場合だけ
         // 縦横比を保ったまま全体を縮め、横方向だけを押しつぶさない。
+        // 後続グリフが送り幅の左へ張り出す書体でも欠けないよう、
+        // 幅差にかかわらず後続部分は消去して同じフォントで再描画する。
+        // 近接する罫線は layout.coverBounds の縦範囲を文字ボックスに
+        // 限定することで保護する。
         let coverEnd = min(max(layout.lineWidth, plan.outputEnd), layout.maxWidth)
         var cover = layout.coverBounds
         cover.origin.x = layout.lineStartX + layout.selectedStartX

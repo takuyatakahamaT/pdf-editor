@@ -9,6 +9,45 @@ import Testing
 /// 実データを使わず、選択→置換/移動→PDFKitプレビュー/書き出しを通す受け入れテスト。
 @Suite("PDF editing acceptance")
 struct PDFEditingAcceptanceTests {
+    @Test("文字の直下にある罫線を削らずに同幅の日付を置換する")
+    @MainActor
+    func sameWidthDateReplacementPreservesAdjacentRule() throws {
+        let source = RawPDFBuilder.singlePagePDF(
+            pageBounds: CGRect(x: 0, y: 0, width: 220, height: 100),
+            contentStream: """
+            0.6 w 30 57.1 m 150 57.1 l S
+            BT /F1 12 Tf 1 0 0 1 40 60 Tm (2026-09-30) Tj ET
+            """
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let document = try #require(PDFDocument(url: source))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "2026-09-30" })
+        let monthStart = try #require(run.text.range(of: "09")).lowerBound.utf16Offset(in: run.text)
+        let target = try #require(index.target(
+            in: run,
+            range: monthStart..<(monthStart + 2),
+            pageIndex: 0
+        ))
+        let ruleFocus = CGRect(x: 30, y: 56.6, width: 120, height: 1.0)
+        let sourceRule = try rasterMetrics(page: page, focus: ruleFocus, scale: 8)
+
+        let result = PDFEditEngine.applyReplacement("10", to: page, target: target)
+        let output = temporaryPDFURL(prefix: "adjacent-rule")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: source, edits: [result.edit], to: output)
+
+        let exportedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        let exportedRule = try rasterMetrics(page: exportedPage, focus: ruleFocus, scale: 8)
+        #expect(target.coverBounds.minY >= target.bounds.minY - 0.001)
+        #expect(
+            exportedRule.darkPixels >= Int(Double(sourceRule.darkPixels) * 0.95),
+            "文字置換の白塗りで隣接する罫線の濃さを失わない"
+        )
+    }
+
     @Test("9を10に置換すると後続の日付を押し出し、元のフォントと鮮明さを保つ")
     @MainActor
     func replacementReflowsDateAndKeepsVectorRendering() throws {
