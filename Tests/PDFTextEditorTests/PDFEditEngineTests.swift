@@ -162,14 +162,53 @@ struct PDFEditEngineTests {
         #expect(!requestedPackageFallback)
     }
 
-    @Test("local Office MS Gothic is registered when its font file is available")
-    func registersLocalMSGothicWhenAvailable() {
-        let officeFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msgothic.ttc"
-        guard FileManager.default.fileExists(atPath: officeFont) else { return }
+    @Test("local Office Japanese fonts are registered when their font files are available")
+    func registersLocalOfficeJapaneseFontsWhenAvailable() {
+        let gothicFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msgothic.ttc"
+        let minchoFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msmincho.ttc"
+        guard FileManager.default.fileExists(atPath: gothicFont),
+              FileManager.default.fileExists(atPath: minchoFont) else { return }
 
         let families = PDFEmbeddedFontLoader.registerLocalFontFamilies()
         #expect(families.contains { $0.replacingOccurrences(of: " ", with: "").lowercased() == "msgothic" })
+        #expect(families.contains { $0.replacingOccurrences(of: " ", with: "").lowercased() == "msmincho" })
         #expect(PDFEmbeddedFontLoader.availableFont(named: "MS Gothic", size: 12) != nil)
+        #expect(PDFEmbeddedFontLoader.availableFont(named: "MS Mincho", size: 12) != nil)
+    }
+
+    @Test("local Office MS Mincho preserves a subset PDF font's family, size, and width")
+    func localMSMinchoMatchesSubsetPDFMetrics() throws {
+        let officeFont = "/Applications/Microsoft Word.app/Contents/Resources/DFonts/msmincho.ttc"
+        guard FileManager.default.fileExists(atPath: officeFont) else { return }
+
+        let url = type0FontFixture(
+            encoding: "Identity-H",
+            descendantSubtype: "CIDFontType0",
+            baseFont: "ABCDEF+MS-Mincho"
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try #require(PDFDocument(url: url))
+        let page = try #require(document.page(at: 0))
+        let dictionary = try #require(PDFGlyphIndex.fontDictionary(for: "F1", page: page))
+        let fontSize: CGFloat = 9.4395
+        let resolution = PDFEmbeddedFontLoader.resolveFont(
+            fontDict: dictionary,
+            size: fontSize,
+            replacementText: "11",
+            supportingText: "2026年11月30日",
+            selectedWidth: 9.45
+        )
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "11",
+            attributes: [NSAttributedString.Key(kCTFontAttributeName as String): resolution.font]
+        ))
+        let renderedWidth = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+
+        #expect(resolution.isExact)
+        #expect(resolution.reason == nil)
+        #expect(CTFontCopyFamilyName(resolution.font) as String == "MS Mincho")
+        #expect(abs(CTFontGetSize(resolution.font) - fontSize) < 0.001)
+        #expect(abs(renderedWidth - 9.4395) < 0.02)
     }
 
     @Test("valid embedded glyph IDs do not require a visible outline")
@@ -261,13 +300,17 @@ struct PDFEditEngineTests {
         #expect(model.edits.first?.replacement?.resolvedFont != nil)
     }
 
-    private func type0FontFixture(encoding: String, descendantSubtype: String = "CIDFontType2") -> URL {
+    private func type0FontFixture(
+        encoding: String,
+        descendantSubtype: String = "CIDFontType2",
+        baseFont: String = "ABCDEF+MS-Gothic"
+    ) -> URL {
         RawPDFBuilder.build(objects: [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>",
-            "<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+MS-Gothic /Encoding /\(encoding) /DescendantFonts [5 0 R] >>",
-            "<< /Type /Font /Subtype /\(descendantSubtype) /BaseFont /ABCDEF+MS-Gothic /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>",
+            "<< /Type /Font /Subtype /Type0 /BaseFont /\(baseFont) /Encoding /\(encoding) /DescendantFonts [5 0 R] >>",
+            "<< /Type /Font /Subtype /\(descendantSubtype) /BaseFont /\(baseFont) /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 1000 >>",
             RawPDFBuilder.streamObject(dict: "", streamContent: "")
         ])
     }
