@@ -14,7 +14,7 @@ enum PDFZoomCommand: Equatable {
 @MainActor
 final class PDFZoomState: ObservableObject {
     static let minimumScale: CGFloat = 0.25
-    static let maximumScale: CGFloat = 4.0
+    static let maximumScale: CGFloat = 10.0
 
     @Published private(set) var scale: CGFloat = 1
     @Published private(set) var magnifierIsActive = false

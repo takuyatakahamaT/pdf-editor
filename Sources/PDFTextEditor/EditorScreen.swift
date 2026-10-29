@@ -357,7 +357,7 @@ struct EditorScreen: View {
                     .font(.system(size: 12, weight: .semibold))
                     .monospacedDigit()
                     .multilineTextAlignment(.trailing)
-                    .frame(width: 27)
+                    .frame(width: 32)
                     .focused($zoomInputIsFocused)
                     .onSubmit {
                         zoomState.setPercent(Double(zoomInput) ?? Double(zoomState.scale * 100))
@@ -369,7 +369,7 @@ struct EditorScreen: View {
                     .foregroundStyle(NihoPalette.ink)
                     .accessibilityHidden(true)
             }
-            .frame(width: 42)
+            .frame(width: 47)
             .help("表示倍率（%）")
 
             Button {
