@@ -976,8 +976,9 @@ final class EditorModel: ObservableObject {
         if replacement.destinationOrigin == nil,
            let layout = replacement.lineLayout,
            let previous = activeReplacements.last(where: { existing in
-               existing.id != replacement.id
-                   && existing.destinationOrigin == nil
+               existing.destinationOrigin == nil
+                   && (existing.id != replacement.id
+                       || existing.lineReplacements.contains(where: { $0.id != replacement.id }))
                    && existing.lineLayout.map { layout.hasSameSourceLine(as: $0) } == true
            }) {
             let incoming = replacement.lineReplacements

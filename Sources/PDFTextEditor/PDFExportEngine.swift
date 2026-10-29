@@ -279,6 +279,7 @@ struct ReplacementEdit {
     func movingSelection(to point: CGPoint) -> ReplacementEdit {
         var copy = self
         copy.destinationOrigin = point
+        copy.storage = .overlay(reason: "移動した文字はPDF内部置換の対象外です。")
         return copy
     }
 

@@ -115,6 +115,28 @@ struct PDFInternalTextEditEngineTests {
         #expect(!text.contains("A"))
     }
 
+    @Test("内部置換を移動するとoverlayへ切り替えて書き出せる")
+    @MainActor
+    func movingInternalReplacementUsesOverlay() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdfium-internal-moved-\(UUID().uuidString).pdf")
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: output)
+        }
+        let model = try replacementModel(source: source, replacement: "B")
+        let first = try #require(model.activeReplacements.first)
+        #expect(first.storage == .internalPDFium)
+        model.moveExistingEdit(id: first.id, by: CGPoint(x: 20, y: 10))
+        let moved = try #require(model.activeReplacements.first)
+        #expect(moved.destinationOrigin != nil)
+        #expect(!moved.storage.isInternal)
+        try PDFExportEngine.export(sourceURL: source, edits: [moved], to: output)
+        #expect(PDFDocument(url: output)?.page(at: 0)?.string?.contains("B") == true)
+    }
+
     @Test("TJ・marked content・分割show・重複objectを内部置換しない")
     @MainActor
     func splitAndAmbiguousSelectionsAreUnsupported() throws {

@@ -231,6 +231,21 @@ struct PDFEditingAcceptanceTests {
         let restored = try #require(model.activeReplacements.first)
         #expect(restored.lineReplacements.first(where: { $0.id == firstID })?.text == "10")
         #expect(restored.lineReplacements.contains(where: { $0.text == "4" }))
+
+        let secondID = try #require(restored.lineReplacements.first(where: { $0.id != firstID })?.id)
+        model.beginReeditingReplacement(id: secondID)
+        model.updateEditorText("5")
+        model.commitEditorText()
+        let latestRevised = try #require(model.activeReplacements.first)
+        #expect(latestRevised.lineReplacements.count == 2)
+        #expect(latestRevised.lineReplacements.first(where: { $0.id == firstID })?.text == "10")
+        #expect(latestRevised.lineReplacements.first(where: { $0.id == secondID })?.text == "5")
+        #expect(page.annotations.count == 1)
+
+        model.undoLastEdit()
+        let latestRestored = try #require(model.activeReplacements.first)
+        #expect(latestRestored.lineReplacements.first(where: { $0.id == firstID })?.text == "10")
+        #expect(latestRestored.lineReplacements.first(where: { $0.id == secondID })?.text == "4")
     }
 
     @Test("日本語の日付で9を10に置換してもサイズとベクター描画を保つ")
