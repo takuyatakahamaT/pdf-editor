@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 struct AppliedEdit {
     let pageIndex: Int
-    let annotations: [PDFAnnotation]
+    var annotations: [PDFAnnotation]
     var replacement: ReplacementEdit?
     var restoredAnnotations: [PDFAnnotation] = []
     var markupChange: MarkupChange?
@@ -36,6 +36,8 @@ struct InsertionDraft {
     let annotation: PDFAnnotation
     let detectedFontName: String?
     let automaticFontName: String
+    let editingID: UUID?
+    let restoredAnnotations: [PDFAnnotation]
 }
 
 enum PendingPrintInputDecision {
@@ -56,6 +58,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var replacementFocusRequest = 0
     @Published private(set) var insertionFontChoice: InsertionFontChoice = .automatic
     @Published private(set) var replacementFontChoice: InsertionFontChoice = .automatic
+    @Published private(set) var replacementFontSize: Double = 12
     @Published private(set) var customFontName: String?
     @Published private(set) var insertionFontSize: Double = 12
     @Published private(set) var insertionFontColor: NSColor = .black
@@ -92,6 +95,7 @@ final class EditorModel: ObservableObject {
     @Published private(set) var searchNavigationRevision = 0
 
     private var redoEdits: [AppliedEdit] = []
+    private var editingReplacementID: UUID?
 
     init(initialURL: URL?) {
         importedFontFamilies = PDFEmbeddedFontLoader.registerLocalFontFamilies()
@@ -133,6 +137,7 @@ final class EditorModel: ObservableObject {
     var hasPendingEditorInput: Bool { isInlineEditing || insertionDraft != nil || !redactionRegions.isEmpty }
     var hasSelection: Bool { selectedTarget != nil }
     var hasInsertionLocation: Bool { insertionDraft != nil }
+    var isReeditingInsertion: Bool { insertionDraft?.editingID != nil }
     var selectedMarkup: PDFMarkupEdit? {
         guard let selectedMarkupID else { return nil }
         return activeMarkupEdits.first(where: { $0.id == selectedMarkupID })
@@ -166,11 +171,18 @@ final class EditorModel: ObservableObject {
         let choice = mode == .replacement ? replacementFontChoice : insertionFontChoice
         return choice == .custom ? customFontName : choice.fontName
     }
+    var selectedReplacementFontSelection: ReplacementFontSelection {
+        ReplacementFontSelection(choice: replacementFontChoice, customFontName: customFontName)
+    }
+    var selectedInsertionFontSelection: ReplacementFontSelection {
+        ReplacementFontSelection(choice: insertionFontChoice, customFontName: customFontName)
+    }
     var replacementFontPreview: PDFEmbeddedFontLoader.Resolution? {
         guard let target = selectedTarget, let page = document?.page(at: target.pageIndex) else { return nil }
         return PDFEditEngine.resolveFont(
             for: target, on: page, replacement: replacementText,
-            preferredFontName: selectedFontChoiceName
+            preferredFontName: selectedFontChoiceName,
+            size: CGFloat(replacementFontSize)
         )
     }
     var insertionFontPreviewReason: String? {
@@ -367,6 +379,8 @@ final class EditorModel: ObservableObject {
         selectedTarget = nil
         isInlineEditing = false
         replacementFontChoice = .automatic
+        replacementFontSize = 12
+        editingReplacementID = nil
         replacementText = ""
         edits = []
         redactionRegions = []
@@ -644,8 +658,10 @@ final class EditorModel: ObservableObject {
         selectedMarkupID = nil
         selectedTarget = target
         isInlineEditing = false
+        editingReplacementID = nil
         if mode == .replacement {
             replacementFontChoice = .automatic
+            replacementFontSize = Double(target?.fontSize ?? 12)
             replacementText = target?.originalText ?? ""
         }
         if let target {
@@ -761,14 +777,46 @@ final class EditorModel: ObservableObject {
     func beginInlineEditing() {
         guard mode == .replacement, selectedTarget != nil else { return }
         isInlineEditing = true
-        replacementText = selectedTarget?.originalText ?? ""
+        if editingReplacementID == nil {
+            replacementText = selectedTarget?.originalText ?? ""
+        }
         revision += 1
     }
 
     func cancelInlineEditing() {
         isInlineEditing = false
-        replacementText = selectedTarget?.originalText ?? ""
+        if editingReplacementID != nil {
+            selectedTarget = nil
+            replacementText = ""
+            editingReplacementID = nil
+        } else {
+            replacementText = selectedTarget?.originalText ?? ""
+        }
         revision += 1
+    }
+
+    func beginReeditingReplacement(id: UUID) {
+        guard mode == .replacement else { return }
+        let active = activeReplacements.last(where: { edit in
+            edit.id == id || edit.lineReplacements.contains(where: { $0.id == id })
+        })
+        let source = edits.last(where: { $0.replacement?.id == id })?.replacement
+        guard let active, let source, source.kind == .replacement else { return }
+        let currentRun = active.lineReplacements.first(where: { $0.id == id })
+        let currentText = currentRun?.text ?? active.replacement
+        guard !currentText.isEmpty else { return }
+        selectedTarget = source.sourceTarget
+        replacementText = currentText
+        let fontSelection = currentRun?.outputFontSelection ?? active.outputFontSelection
+        replacementFontChoice = fontSelection.choice
+        if fontSelection.choice == .custom {
+            customFontName = fontSelection.customFontName
+        }
+        replacementFontSize = Double(currentRun.map { CTFontGetSize($0.font) } ?? active.fontSize)
+        editingReplacementID = id
+        isInlineEditing = true
+        revision += 1
+        statusMessage = "置換済みの文字を再編集しています。現在の出力は\(formattedPointSize(CGFloat(replacementFontSize))) ptです。"
     }
 
     func beginInsertion(pageIndex: Int, point: CGPoint) {
@@ -799,11 +847,61 @@ final class EditorModel: ObservableObject {
             pageIndex: pageIndex,
             annotation: annotation,
             detectedFontName: style.detectedName,
-            automaticFontName: style.resolvedName
+            automaticFontName: style.resolvedName,
+            editingID: nil,
+            restoredAnnotations: []
         )
         replacementFocusRequest += 1
         revision += 1
         statusMessage = "\(pageIndex + 1)ページ目に入力位置を置きました。文字を入力してください。"
+    }
+
+    func beginReeditingInsertion(id: UUID) {
+        guard mode == .insertion,
+              let document,
+              let applied = edits.last(where: { $0.replacement?.id == id }),
+              let edit = applied.replacement,
+              edit.kind == .insertion,
+              let page = document.page(at: edit.pageIndex) else { return }
+        discardInsertionDraft()
+
+        for annotation in applied.annotations { page.removeAnnotation(annotation) }
+        let actualFontName = edit.fontName ?? "Hiragino Sans"
+        let annotation = PDFEditEngine.makeInsertionAnnotation(
+            bounds: edit.bounds,
+            text: edit.replacement,
+            fontName: actualFontName,
+            fontSize: edit.fontSize,
+            fontColor: edit.fontColor
+        )
+        page.addAnnotation(annotation)
+        let selection = edit.outputFontSelection
+        insertionFontChoice = selection.choice
+        if selection.choice == .custom {
+            customFontName = selection.customFontName
+        }
+        insertionFontSize = Double(edit.fontSize)
+        insertionFontColor = edit.fontColor
+        replacementText = edit.replacement
+        insertionDraft = InsertionDraft(
+            pageIndex: edit.pageIndex,
+            annotation: annotation,
+            detectedFontName: actualFontName,
+            automaticFontName: actualFontName,
+            editingID: id,
+            restoredAnnotations: applied.annotations
+        )
+        replacementFocusRequest += 1
+        revision += 1
+        statusMessage = "追加済みテキストを再編集しています。現在の出力は\(formattedPointSize(edit.fontSize)) ptです。"
+    }
+
+    func cancelInsertionEditing() {
+        guard insertionDraft != nil else { return }
+        discardInsertionDraft()
+        replacementText = ""
+        revision += 1
+        statusMessage = "テキスト追加の編集をキャンセルしました。"
     }
 
     func updateEditorText(_ text: String) {
@@ -818,6 +916,10 @@ final class EditorModel: ObservableObject {
 
     func setReplacementFontChoice(_ choice: InsertionFontChoice) {
         replacementFontChoice = choice
+    }
+
+    func setReplacementFontSize(_ size: Double) {
+        replacementFontSize = min(max(size, 6), 72)
     }
 
     func setCustomFontName(_ name: String) {
@@ -855,12 +957,24 @@ final class EditorModel: ObservableObject {
         }
         let previewReason = replacementFontPreview?.reason
         let selectedFontName = selectedFontChoiceName
-        let result = PDFEditEngine.applyReplacement(
-            normalized, to: page, target: target, preferredFontName: selectedFontChoiceName
+        let previousApplied = editingReplacementID.flatMap { id in
+            edits.last(where: { $0.replacement?.id == id })
+        }
+        let previousEdit = previousApplied?.replacement
+        let result = PDFEditEngine.prepareReplacement(
+            normalized,
+            on: page,
+            target: target,
+            preferredFontName: selectedFontChoiceName,
+            outputFontSize: CGFloat(replacementFontSize),
+            id: previousEdit?.id ?? UUID(),
+            destinationOrigin: previousEdit?.destinationOrigin,
+            outputFontSelection: selectedReplacementFontSelection
         )
         var replacement = result.edit
-        var annotation = result.annotation
-        if let layout = replacement.lineLayout,
+        var supersededApplied = previousApplied
+        if replacement.destinationOrigin == nil,
+           let layout = replacement.lineLayout,
            let previous = activeReplacements.last(where: { existing in
                existing.destinationOrigin == nil
                    && existing.lineLayout.map { layout.hasSameSourceLine(as: $0) } == true
@@ -875,25 +989,42 @@ final class EditorModel: ObservableObject {
             replacement.lineCompositionStart = min(previous.lineCompositionStart ?? layout.selectedRange.lowerBound,
                                                   layout.selectedRange.lowerBound)
             replacement.composesLineEdits = true
-            page.removeAnnotation(result.annotation)
-            annotation = ReplacementTextAnnotation(edit: replacement)
+            supersededApplied = edits.last(where: { $0.replacement?.id == previous.id })
+        }
+        let fit = PDFTextRenderer.fitResult(for: replacement, in: page.bounds(for: .mediaBox))
+        guard fit.fits else {
+            notice(
+                "置換文字が配置可能範囲（隣接文字またはページ境界）を\(formattedPointSize(fit.overflow)) pt超えます。"
+                    + " 出力サイズ（現在 \(formattedPointSize(CGFloat(replacementFontSize))) pt）を小さくして再度確定してください。"
+            )
+            return
+        }
+
+        let restoredAnnotations = supersededApplied?.annotations ?? []
+        for annotation in restoredAnnotations { page.removeAnnotation(annotation) }
+        let annotations: [PDFAnnotation]
+        if replacement.destinationOrigin != nil {
+            annotations = PDFEditEngine.addMovementAnnotations(for: replacement, to: page)
+        } else {
+            let annotation = ReplacementTextAnnotation(edit: replacement)
             page.addAnnotation(annotation)
+            annotations = [annotation]
         }
         recordEdit(AppliedEdit(
             pageIndex: target.pageIndex,
-            annotations: [annotation],
-            replacement: replacement
+            annotations: annotations,
+            replacement: replacement,
+            restoredAnnotations: restoredAnnotations
         ))
         selectedTarget = nil
         isInlineEditing = false
+        editingReplacementID = nil
         replacementText = ""
         revision += 1
         let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
             ? "元フォントを再現できないため代替フォントで描画します。" : "")
-        let unknownSourceMessage = !target.hasExplicitSourceMapping
-            ? "ToUnicodeで元の文字との対応づけを確認できないため、表示上の重ね描きです。元の内容はPDF内に残ります。墨消しには使えません。"
-            : ""
-        statusMessage = "文字を置換しました。\(unknownSourceMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
+        let overlayMessage = "白い重ね描きのため、元の文字データはPDF内に残ります。墨消しには使えません。"
+        statusMessage = "文字を置換しました（出力 \(formattedPointSize(replacement.fontSize)) pt）。\(overlayMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }
 
     func moveSelection(by delta: CGPoint) {
@@ -911,6 +1042,7 @@ final class EditorModel: ObservableObject {
         recordEdit(AppliedEdit(pageIndex: target.pageIndex, annotations: result.annotations, replacement: result.edit))
         selectedTarget = nil
         isInlineEditing = false
+        editingReplacementID = nil
         replacementText = ""
         revision += 1
         statusMessage = "選択した文字を移動しました。"
@@ -939,6 +1071,7 @@ final class EditorModel: ObservableObject {
                                replacement: movedEdit, restoredAnnotations: oldAnnotations))
         selectedTarget = nil
         isInlineEditing = false
+        editingReplacementID = nil
         replacementText = ""
         revision += 1
         statusMessage = "文字の位置を移動しました。"
@@ -955,19 +1088,36 @@ final class EditorModel: ObservableObject {
         ))
         selectedTarget = nil
         isInlineEditing = false
+        editingReplacementID = nil
         replacementText = ""
         revision += 1
         statusMessage = "選択した文字を表示から削除しました。確認後に編集済みPDFを書き出してください。"
     }
 
     func applyInsertion() {
-        guard let draft = insertionDraft else { return }
+        guard let draft = insertionDraft,
+              let page = document?.page(at: draft.pageIndex) else { return }
         let normalized = replacementText.trimmingCharacters(in: .newlines)
         guard !normalized.isEmpty else {
             notice("追加する文字を入力してください。")
             return
         }
-        let id = UUID()
+        let actualFontName = effectiveInsertionFontName
+        let fit = PDFEditEngine.insertionFitResult(
+            text: normalized,
+            fontName: actualFontName,
+            fontSize: CGFloat(insertionFontSize),
+            bounds: draft.annotation.bounds,
+            pageBounds: page.bounds(for: .mediaBox)
+        )
+        guard fit.fits else {
+            notice(
+                "追加テキストが入力枠またはページ境界を\(formattedPointSize(fit.overflow)) pt超えます。"
+                    + " 文字を短くするか、出力サイズ（現在 \(formattedPointSize(CGFloat(insertionFontSize))) pt）を小さくしてください。"
+            )
+            return
+        }
+        let id = draft.editingID ?? UUID()
         draft.annotation.contents = normalized
         draft.annotation.fontColor = insertionFontColor
         draft.annotation.userName = PDFEditEngine.annotationMarkerPrefix + id.uuidString
@@ -975,16 +1125,24 @@ final class EditorModel: ObservableObject {
             insertionOn: draft.pageIndex,
             bounds: draft.annotation.bounds,
             text: normalized,
-            fontName: effectiveInsertionFontName,
+            fontName: actualFontName,
             fontSize: CGFloat(insertionFontSize),
             fontColor: insertionFontColor,
-            id: id
+            id: id,
+            outputFontSelection: selectedInsertionFontSelection
         )
-        recordEdit(AppliedEdit(pageIndex: draft.pageIndex, annotations: [draft.annotation], replacement: edit))
+        recordEdit(AppliedEdit(
+            pageIndex: draft.pageIndex,
+            annotations: [draft.annotation],
+            replacement: edit,
+            restoredAnnotations: draft.restoredAnnotations
+        ))
         insertionDraft = nil
         replacementText = ""
         revision += 1
-        statusMessage = "テキストを追加しました。追加した文字はドラッグで移動できます。"
+        statusMessage = draft.editingID == nil
+            ? "テキストを追加しました（出力 \(formattedPointSize(edit.fontSize)) pt）。追加した文字はドラッグで移動できます。"
+            : "追加済みテキストを更新しました（出力 \(formattedPointSize(edit.fontSize)) pt）。"
     }
 
     func moveInsertion(marker: String, pageIndex: Int, bounds: CGRect) {
@@ -997,16 +1155,45 @@ final class EditorModel: ObservableObject {
         let rawID = String(marker.dropFirst(PDFEditEngine.annotationMarkerPrefix.count))
         guard let id = UUID(uuidString: rawID),
               let index = edits.lastIndex(where: { $0.pageIndex == pageIndex && $0.replacement?.id == id }),
-              let replacement = edits[index].replacement else { return }
-        if replacement.bounds != bounds {
-            edits[index].replacement = replacement.moved(to: bounds)
-            redoEdits.removeAll()
-        }
+              let replacement = edits[index].replacement,
+              replacement.kind == .insertion,
+              replacement.bounds != bounds,
+              let page = document?.page(at: pageIndex) else { return }
+        let priorAnnotation = PDFEditEngine.makeInsertionAnnotation(
+            bounds: replacement.bounds,
+            text: replacement.replacement,
+            fontName: replacement.fontName ?? "Hiragino Sans",
+            fontSize: replacement.fontSize,
+            fontColor: replacement.fontColor,
+            marker: marker
+        )
+        let moved = replacement.moved(to: bounds)
+        let movedAnnotation = PDFEditEngine.makeInsertionAnnotation(
+            bounds: bounds,
+            text: moved.replacement,
+            fontName: moved.fontName ?? "Hiragino Sans",
+            fontSize: moved.fontSize,
+            fontColor: moved.fontColor,
+            marker: marker
+        )
+        for annotation in edits[index].annotations { page.removeAnnotation(annotation) }
+        page.addAnnotation(movedAnnotation)
+        edits[index].annotations = [priorAnnotation]
+        recordEdit(AppliedEdit(
+            pageIndex: pageIndex,
+            annotations: [movedAnnotation],
+            replacement: moved,
+            restoredAnnotations: [priorAnnotation]
+        ))
         revision += 1
         statusMessage = "追加したテキストの位置を移動しました。"
     }
 
     func undoLastEdit() {
+        if insertionDraft != nil {
+            discardInsertionDraft()
+            replacementText = ""
+        }
         guard let document, let edit = edits.popLast(),
               let page = document.page(at: edit.pageIndex) else { return }
         for annotation in edit.annotations.reversed() { page.removeAnnotation(annotation) }
@@ -1016,18 +1203,27 @@ final class EditorModel: ObservableObject {
         selectedMarkupID = nil
         selectedTarget = nil
         isInlineEditing = false
+        editingReplacementID = nil
         replacementText = ""
         revision += 1
         statusMessage = "直前の変更を取り消しました。"
     }
 
     func redoLastEdit() {
+        if insertionDraft != nil {
+            discardInsertionDraft()
+            replacementText = ""
+        }
         guard let document, let edit = redoEdits.popLast(),
               let page = document.page(at: edit.pageIndex) else { return }
         for annotation in edit.restoredAnnotations.reversed() { page.removeAnnotation(annotation) }
         for annotation in edit.annotations { page.addAnnotation(annotation) }
         if let change = edit.markupChange { redoMarkupState(change) }
         edits.append(edit)
+        selectedTarget = nil
+        isInlineEditing = false
+        editingReplacementID = nil
+        replacementText = ""
         revision += 1
         statusMessage = "変更をやり直しました。"
     }
@@ -1269,6 +1465,10 @@ final class EditorModel: ObservableObject {
         redoEdits.removeAll()
     }
 
+    private func formattedPointSize(_ size: CGFloat) -> String {
+        Double(size).formatted(.number.precision(.fractionLength(0...1)))
+    }
+
     private func undoMarkupState(_ change: MarkupChange) {
         switch change {
         case .added(let edit):
@@ -1315,7 +1515,12 @@ final class EditorModel: ObservableObject {
 
     private func discardInsertionDraft() {
         guard let draft = insertionDraft else { return }
-        document?.page(at: draft.pageIndex)?.removeAnnotation(draft.annotation)
+        if let page = document?.page(at: draft.pageIndex) {
+            page.removeAnnotation(draft.annotation)
+            for annotation in draft.restoredAnnotations where annotation.page == nil {
+                page.addAnnotation(annotation)
+            }
+        }
         insertionDraft = nil
     }
 

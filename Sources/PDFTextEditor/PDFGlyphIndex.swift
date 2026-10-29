@@ -99,6 +99,8 @@ struct TextTarget: Equatable {
     let hasExplicitSourceMapping: Bool
     /// PDF editor が追加した不可視検索文字層に記録された元書体名。
     let fontPostScriptNameOverride: String?
+    /// 選択行とは別の行にある文字占有領域。置換inkの縦方向衝突判定に使う。
+    let nearbyTextBounds: [CGRect]
 
     init(
         pageIndex: Int,
@@ -113,7 +115,8 @@ struct TextTarget: Equatable {
         maxWidth: CGFloat,
         lineLayout: TextRunLayout? = nil,
         hasExplicitSourceMapping: Bool = true,
-        fontPostScriptNameOverride: String? = nil
+        fontPostScriptNameOverride: String? = nil,
+        nearbyTextBounds: [CGRect] = []
     ) {
         self.pageIndex = pageIndex
         self.bounds = bounds
@@ -128,6 +131,7 @@ struct TextTarget: Equatable {
         self.lineLayout = lineLayout
         self.hasExplicitSourceMapping = hasExplicitSourceMapping
         self.fontPostScriptNameOverride = fontPostScriptNameOverride
+        self.nearbyTextBounds = nearbyTextBounds
     }
 }
 
@@ -363,7 +367,10 @@ struct PageTextIndex {
             maxWidth: maxWidth,
             lineLayout: lineLayout,
             hasExplicitSourceMapping: clusterGlyphs.allSatisfy(\.hasExplicitToUnicodeMapping),
-            fontPostScriptNameOverride: fontPostScriptNameOverrides[fontKey]
+            fontPostScriptNameOverride: fontPostScriptNameOverrides[fontKey],
+            nearbyTextBounds: runs.filter {
+                abs($0.baseline - baseline) > 0.3 * max(fontSize, $0.fontSize)
+            }.map(\.box)
         )
     }
 

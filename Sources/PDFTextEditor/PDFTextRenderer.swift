@@ -6,7 +6,8 @@ import PDFKit
 /// 画面プレビュー用のページオーバーレイと書き出し（`PDFExportEngine`）が共有する描画経路。
 /// 段落レイアウトや折り返しは一切使わず、1 行の `CTLine` を
 /// ベースライン固定で描く。置換時は同じ行の後続文字を動かして空き幅を作る。
-/// 行内に空きがない場合も、横だけを細くせず縦横比を保って縮小する。
+/// 置換文字は指定point sizeのまま描く。収まらない候補は確定前に拒否し、
+/// rendererが暗黙に縮小・変形・clipすることはない。
 enum PDFTextRenderer {
     static func draw(_ edit: ReplacementEdit, in context: CGContext) {
         context.saveGState()
@@ -45,9 +46,6 @@ enum PDFTextRenderer {
         let plan = renderPlan(text: edit.replacement, font: baseFont, color: edit.fontColor, maxWidth: edit.maxWidth)
 
         context.translateBy(x: edit.bounds.minX, y: edit.baseline)
-        if plan.scale != 1 {
-            context.scaleBy(x: plan.scale, y: plan.scale)
-        }
         context.setFillColor(edit.fontColor.cgColor)
         drawGlyphOutlines(for: plan.line, in: context)
     }
@@ -85,33 +83,7 @@ enum PDFTextRenderer {
         edit: ReplacementEdit,
         in context: CGContext
     ) {
-        var currentFont = font
-        var fontSize = CTFontGetSize(font)
-
-        func totalWidth(at size: CGFloat) -> CGFloat {
-            glyphs.reduce(0) { $0 + $1.emWidth } * size
-        }
-
-        var scale: CGFloat = 1
-        while true {
-            let width = totalWidth(at: fontSize)
-            if width <= edit.maxWidth || width <= 0 {
-                break
-            }
-            if fontSize <= 6 {
-                scale = min(edit.maxWidth / width, 1)
-                break
-            }
-            let newSize = max(fontSize - 0.5, 6)
-            guard let cgFont = CTFontCopyGraphicsFont(currentFont, nil) as CGFont? else { break }
-            currentFont = CTFontCreateWithGraphicsFont(cgFont, newSize, nil, nil)
-            fontSize = newSize
-        }
-
         context.translateBy(x: edit.bounds.minX, y: edit.baseline)
-        if scale != 1 {
-            context.scaleBy(x: scale, y: scale)
-        }
         context.setFillColor(edit.fontColor.cgColor)
 
         var x: CGFloat = 0
@@ -120,11 +92,11 @@ enum PDFTextRenderer {
         for (glyph, emWidth) in glyphs {
             glyphIDs.append(glyph)
             positions.append(CGPoint(x: x, y: 0))
-            x += emWidth * fontSize
+            x += emWidth * CTFontGetSize(font)
         }
         context.textMatrix = .identity
         context.setTextDrawingMode(.fill)
-        CTFontDrawGlyphs(currentFont, glyphIDs, positions, glyphIDs.count, context)
+        CTFontDrawGlyphs(font, glyphIDs, positions, glyphIDs.count, context)
     }
 
     private static func drawReflow(
@@ -149,8 +121,7 @@ enum PDFTextRenderer {
             return
         }
 
-        // 後続の文字を右へ送って幅を確保する。ページ上の次の文字に当たる場合だけ
-        // 縦横比を保ったまま全体を縮め、横方向だけを押しつぶさない。
+        // 後続の文字を右へ送って幅を確保する。収まりを確認済みなので縮小しない。
         // 後続グリフが送り幅の左へ張り出す書体でも欠けないよう、
         // 幅差にかかわらず後続部分は消去して同じフォントで再描画する。
         // 近接する罫線は layout.coverBounds の縦範囲を文字ボックスに
@@ -164,7 +135,6 @@ enum PDFTextRenderer {
 
         context.saveGState()
         context.translateBy(x: layout.lineStartX + layout.selectedStartX, y: edit.baseline)
-        context.scaleBy(x: plan.scale, y: plan.scale)
 
         if let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
             context.saveGState()
@@ -243,11 +213,8 @@ enum PDFTextRenderer {
             }
         }
 
-        let availableWidth = max(layout.maxWidth - startX, 0)
-        let contentWidth = outputEnd - startX
-        let scale = contentWidth > availableWidth && contentWidth > 0 ? availableWidth / contentWidth : 1
         return ComposedReflowPlan(replacements: replacementPlacements, glyphs: glyphPlacements,
-                                  startX: startX, outputEnd: outputEnd, scale: scale)
+                                  startX: startX, outputEnd: outputEnd, scale: 1)
     }
 
     private static func drawComposedReflow(
@@ -272,7 +239,6 @@ enum PDFTextRenderer {
 
         context.saveGState()
         context.translateBy(x: layout.lineStartX + plan.startX, y: edit.baseline)
-        context.scaleBy(x: plan.scale, y: plan.scale)
 
         for placement in plan.replacements {
             context.saveGState()
@@ -351,12 +317,7 @@ enum PDFTextRenderer {
             prefixEnd,
             max(layout.selectedStartX + replacementWidth, (suffixEnd ?? 0) + shift)
         )
-        let outputContentWidth = outputEnd - layout.selectedStartX
-        let availableWidth = layout.maxWidth - layout.selectedStartX
-        let scale = outputContentWidth > availableWidth && outputContentWidth > 0
-            ? availableWidth / outputContentWidth
-            : 1
-        return ReflowPlan(line: line, shift: shift, outputEnd: outputEnd, scale: scale)
+        return ReflowPlan(line: line, shift: shift, outputEnd: outputEnd, scale: 1)
     }
 
     private static func drawUnscaledExactGlyphs(
@@ -394,21 +355,139 @@ enum PDFTextRenderer {
     }
 
     static func renderPlan(text: String, font: CTFont, color: NSColor, maxWidth: CGFloat) -> RenderPlan {
-        var currentFont = font
-        while true {
-            let line = makeLine(text: text, font: currentFont, color: color)
-            let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-            let currentSize = CTFontGetSize(currentFont)
+        let line = makeLine(text: text, font: font, color: color)
+        return RenderPlan(line: line, fontSize: CTFontGetSize(font), scale: 1)
+    }
 
-            if width <= maxWidth || width <= 0 {
-                return RenderPlan(line: line, fontSize: currentSize, scale: 1)
+    struct FitResult {
+        let fits: Bool
+        let overflow: CGFloat
+    }
+
+    static func fitResult(for edit: ReplacementEdit, in pageBounds: CGRect) -> FitResult {
+        let requiredEnd: CGFloat
+        let availableEnd: CGFloat
+        if let destination = edit.destinationOrigin {
+            requiredEnd = destination.x + renderedWidth(of: edit)
+            availableEnd = pageBounds.maxX
+        } else if let layout = edit.lineLayout {
+            if edit.composesLineEdits,
+               let plan = composedReflowPlan(
+                   layout: layout,
+                   replacements: edit.lineReplacements,
+                   startingAt: edit.lineCompositionStart
+               ) {
+                requiredEnd = plan.outputEnd
+            } else {
+                let font = edit.resolvedFont
+                    ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+                let exactWidth = edit.exactGlyphs.map { glyphs in
+                    glyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
+                }
+                requiredEnd = reflowPlan(
+                    text: edit.replacement,
+                    font: font,
+                    layout: layout,
+                    color: edit.fontColor,
+                    replacementWidth: exactWidth
+                ).outputEnd
             }
-            if currentSize <= 6 {
-                return RenderPlan(line: line, fontSize: currentSize, scale: min(maxWidth / width, 1))
-            }
-            let newSize = max(currentSize - 0.5, 6)
-            currentFont = CTFontCreateCopyWithAttributes(currentFont, newSize, nil, nil)
+            availableEnd = layout.maxWidth
+        } else {
+            requiredEnd = renderedWidth(of: edit)
+            availableEnd = min(edit.maxWidth, pageBounds.maxX - edit.bounds.minX)
         }
+        let horizontalOverflow = max(requiredEnd - availableEnd, 0)
+        let inkBounds = renderedInkBounds(for: edit)
+        let pageOverflow = inkBounds.reduce(CGFloat.zero) { result, bounds in
+            max(
+                result,
+                pageBounds.minX - bounds.minX,
+                bounds.maxX - pageBounds.maxX,
+                pageBounds.minY - bounds.minY,
+                bounds.maxY - pageBounds.maxY
+            )
+        }
+        let collisionOverflow = inkBounds.reduce(CGFloat.zero) { result, ink in
+            let intersections = edit.sourceNearbyTextBounds.map { ink.intersection($0) }
+                .filter { !$0.isNull && $0.width > 0.25 && $0.height > 0.25 }
+            return max(result, intersections.map { min($0.width, $0.height) }.max() ?? 0)
+        }
+        let overflow = max(horizontalOverflow, pageOverflow, collisionOverflow, 0)
+        return FitResult(fits: overflow <= 0.25, overflow: overflow)
+    }
+
+    static func renderedInkBounds(for edit: ReplacementEdit) -> [CGRect] {
+        if let destination = edit.destinationOrigin {
+            let font = edit.resolvedFont
+                ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+            return inkBounds(
+                text: edit.replacement,
+                font: font,
+                exactGlyphs: edit.exactGlyphs,
+                origin: destination
+            ).map { [$0] } ?? []
+        }
+        if edit.composesLineEdits, let layout = edit.lineLayout,
+           let plan = composedReflowPlan(
+               layout: layout,
+               replacements: edit.lineReplacements,
+               startingAt: edit.lineCompositionStart
+           ) {
+            return plan.replacements.compactMap { placement in
+                inkBounds(
+                    text: placement.replacement.text,
+                    font: placement.replacement.font,
+                    exactGlyphs: placement.replacement.exactGlyphs,
+                    origin: CGPoint(
+                        x: layout.lineStartX + placement.offsetX,
+                        y: edit.baseline
+                    )
+                )
+            }
+        }
+        let font = edit.resolvedFont
+            ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        let x = edit.lineLayout.map { $0.lineStartX + $0.selectedStartX } ?? edit.bounds.minX
+        return inkBounds(
+            text: edit.replacement,
+            font: font,
+            exactGlyphs: edit.exactGlyphs,
+            origin: CGPoint(x: x, y: edit.baseline)
+        ).map { [$0] } ?? []
+    }
+
+    private static func inkBounds(
+        text: String,
+        font: CTFont,
+        exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]?,
+        origin: CGPoint
+    ) -> CGRect? {
+        if let exactGlyphs, !exactGlyphs.isEmpty {
+            var glyphs = exactGlyphs.map(\.glyph)
+            var glyphBounds = [CGRect](repeating: .zero, count: glyphs.count)
+            CTFontGetBoundingRectsForGlyphs(font, .default, &glyphs, &glyphBounds, glyphs.count)
+            var x = origin.x
+            var bounds = CGRect.null
+            for (index, item) in exactGlyphs.enumerated() {
+                bounds = bounds.union(glyphBounds[index].offsetBy(dx: x, dy: origin.y))
+                x += item.emWidth * CTFontGetSize(font)
+            }
+            return bounds.isNull || bounds.isEmpty ? nil : bounds
+        }
+        let line = makeLine(text: text, font: font, color: .black)
+        let bounds = CTLineGetImageBounds(line, nil).offsetBy(dx: origin.x, dy: origin.y)
+        return bounds.isNull || bounds.isEmpty ? nil : bounds
+    }
+
+    private static func renderedWidth(of edit: ReplacementEdit) -> CGFloat {
+        let font = edit.resolvedFont
+            ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        if let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
+            return exactGlyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
+        }
+        let line = makeLine(text: edit.replacement, font: font, color: edit.fontColor)
+        return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
     }
 
     private static func makeLine(text: String, font: CTFont, color: NSColor) -> CTLine {

@@ -313,8 +313,10 @@ struct EditorScreen: View {
             onMoveInsertion: { marker, pageIndex, bounds in
                 model.moveInsertion(marker: marker, pageIndex: pageIndex, bounds: bounds)
             },
+            onBeginExistingInsertionEditing: { id in model.beginReeditingInsertion(id: id) },
             onMoveSelection: { delta in model.moveSelection(by: delta) },
             onMoveExistingEdit: { id, delta in model.moveExistingEdit(id: id, by: delta) },
+            onBeginExistingReplacementEditing: { id in model.beginReeditingReplacement(id: id) },
             onMarkupCreate: { pageIndex, bounds, points in
                 model.addMarkup(pageIndex: pageIndex, bounds: bounds, points: points)
             },
@@ -564,6 +566,27 @@ private struct ContextPanel: View {
                 if let reason = model.replacementFontPreview?.reason {
                     warning(reason)
                 }
+                warning("白い重ね描きで置換します。元の文字データはPDF内に残るため、機密情報の削除には使えません。")
+
+                HStack {
+                    Text("出力サイズ")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(NihoPalette.ink)
+                    Spacer()
+                    Stepper(
+                        value: Binding(
+                            get: { model.replacementFontSize },
+                            set: { model.setReplacementFontSize($0) }
+                        ),
+                        in: 6.0...72.0,
+                        step: 1.0
+                    ) {
+                        Text("\(model.replacementFontSize.formatted(.number.precision(.fractionLength(0...1)))) pt")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .monospacedDigit()
+                    }
+                    .accessibilityLabel("置換文字の出力サイズ")
+                }
 
                 HStack(spacing: 8) {
                     Button("置き換える", action: model.beginInlineEditing)
@@ -586,7 +609,7 @@ private struct ContextPanel: View {
         let detail = model.selectedFontDescription
         var parts = [
             "\(target.pageIndex + 1) ページ",
-            "\(Int(target.fontSize.rounded())) pt",
+            "選択元 \(Double(target.fontSize).formatted(.number.precision(.fractionLength(0...1)))) pt",
             detail?.installedFamily ?? detail?.pdfName ?? "書体不明",
         ]
         if detail?.hasEmbeddedProgram == false {
@@ -650,9 +673,13 @@ private struct ContextPanel: View {
                     .labelsHidden()
                 }
 
-                Button("追加する", action: model.commitEditorText)
-                    .buttonStyle(PillButtonStyle(kind: .primary))
-                    .disabled(!model.canCommit)
+                HStack(spacing: 8) {
+                    Button(model.isReeditingInsertion ? "更新する" : "追加する", action: model.commitEditorText)
+                        .buttonStyle(PillButtonStyle(kind: .primary))
+                        .disabled(!model.canCommit)
+                    Button("キャンセル", action: model.cancelInsertionEditing)
+                        .buttonStyle(PillButtonStyle(kind: .ghost))
+                }
             }
         }
     }
