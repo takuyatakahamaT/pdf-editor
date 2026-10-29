@@ -19,5 +19,8 @@ done
 for HELPER in "$APP_BUNDLE"/Contents/Helpers/*(N); do
     /usr/bin/codesign "${SIGN_ARGS[@]}" "$HELPER"
 done
+for DYLIB in "$APP_BUNDLE"/Contents/Frameworks/*.dylib(N); do
+    /usr/bin/codesign "${SIGN_ARGS[@]}" "$DYLIB"
+done
 /usr/bin/codesign "${SIGN_ARGS[@]}" "$APP_BUNDLE"
 /usr/bin/codesign --verify --strict --deep --verbose=2 "$APP_BUNDLE"

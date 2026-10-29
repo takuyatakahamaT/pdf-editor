@@ -1,20 +1,24 @@
 # ADR: 既存PDFテキスト編集を対応判定付きの混合方式へ移行する
 
-- 対象: Issue #19
-- 記録日・公式資料確認日: 2026-10-21
-- 状態: 段階移行の設計を採用。SDK選定・導入は後続の実証で決定する。
+- 対象: Issue #19、限定実装 Issue #50
+- 記録日: 2026-10-21、実装更新日: 2026-10-29
+- 状態: PDFium chromium/8125による限定内部置換を採用。条件外は理由付きoverlay。
+
+固定したmacOS universal archive `pdfium-mac-univ.tgz` のSHA-256は `0cf06803b9a4acc489fc967a1b05990622ca1cf41fa027ff9cc89eeab9b19279`。dylibはarm64/x86_64、最小macOS 13.0で、アプリの対象macOS 14以降を満たす。`LICENSE`と`licenses/`の18ファイルを配布物へ収録する。実測したアプリ容量はSDK追加前64MB、追加後79MB。固定版の脆弱性更新と再検証は本リポジトリの保守対象とする。現在の自動更新リリースはad-hocコード署名とSparkle更新署名であり、Apple Developer IDによる公証済み販売ZIPは証明書とnotarytoolプロファイルを設定して`package-release.sh`で別途作成・検証する。
 
 ## 決定
 
-元のページ内容を変更できると証明できた選択範囲だけを内部編集の候補にし、それ以外は安全性を確認したoverlayへ送る。overlayでも文字欠落や他要素の消去を防げなければ編集を拒否し、理由を表示する。SDKの導入だけで対応範囲が広がったと扱わない。
+元のページ内容を変更できると証明できた選択範囲だけを内部編集の候補にし、それ以外は理由付きoverlayへ送る。overlayでは元文字が残り、非文字要素への干渉を完全には判定できないことを明示する。SDKの導入だけで対応範囲が広がったと扱わない。overlay自体の非干渉を証明できない範囲を編集不可へ分岐させることは、引き続き必要な安全性改善である。
 
-1,000円買切りMVPではApryse・Nutrient・MuPDFの商用ライセンスを見積取得まで保留する。PDFiumをSDK使用料のない実証候補として残すが、ビルド・配布・脆弱性更新・対応範囲の実証を含む保守費を評価してから決める。今回の成果は設計と生成fixtureの境界テストであり、ランタイムの編集方式や既存rendererは変更しない。
+暗号化・権限制限・電子署名付きPDFは初期の内部編集対象から除外する。PDFiumで文書を開いた直後と保存時の再照合で検査し、署名を無告知で無効化したり、権限制限を迂回したりしない。
+
+1,000円買切りMVPではApryse・Nutrient・MuPDFの商用ライセンスを見積取得まで保留する。Issue #50で bblanchon/pdfium-binaries `chromium/8125` のmacOS universal archiveをSHA256固定し、動的ロードする限定経路を採用した。SwiftPMのsource buildはPDFiumなしでも成立し、既存rendererはoverlayとして残す。binaryと全license noticeはbuild時に検証してappへ収録し、Gitには大きなbinaryを置かない。
 
 ## 現状と解決すべき欠落
 
-`PDFGlyphIndex` / `PDFContentScanner` はcontent streamを走査し、`ScannedGlyph`を視覚的な`ScannedRun`にまとめ、`TextTarget` / `TextRunLayout`を作る。文字・送り幅・フォントリソース名はあるが、元stream、show operatorの位置・オペランド範囲、Form XObjectの参照経路、PDFiumの`FPDF_PAGEOBJECT`との対応は保持しない。見た目が連続したrunが、編集SDKの1個のtext objectに一致する保証はない。
+`PDFGlyphIndex` / `PDFContentScanner` はcontent streamを走査し、`ScannedGlyph`を視覚的な`ScannedRun`にまとめ、`TextTarget` / `TextRunLayout`を作る。Issue #50ではshow operator種別とoperation ID、Form・marked content内か、文字単位bbox、重なりの曖昧性を`TextTarget`まで保持する。永続的なPDFium handleは保持せず、確定時と保存時にpage object、Unicode、bbox、font/style/locationを毎回照合する。
 
-`PDFExportEngine.export`は元PDFをPDFKitで描き直し、`PDFTextRenderer`がcoverと置換文字の輪郭を描く。元の文字をcontent streamから削除する処理ではなく、元の文字が抽出・検索できることがある。`fontIsExact`も元フォントの再現に関する値であり、元オブジェクトを特定できたことや内部編集の可否を表す値には使えない。
+`PDFExportEngine.export`は内部編集とoverlayを分離する。内部編集は元PDFのcopyをPDFiumで変更し、`FPDFPage_GenerateContent`、非incremental保存、再open検証を行う。overlay・markupが混在するときは検証済み内部編集PDFへ別段で既存rendererを適用し、最終出力でも置換文字・元文字不在・ページgeometryを再検証する。全処理は一時ファイル上で完了し、成功時だけ出力先へatomicに配置する。`fontIsExact`だけを内部編集可否には使わない。
 
 ToUnicodeを持たない単純フォントにはASCIIの推定値を補うが、Type0では不明文字が空文字になる。現在は一部の不明文字でも選択用のboxを作れるため、「表示上選べた」ことを安全性の証明にしない。`lineLayout == nil`や空の文字列は、後続の拒否・警告判定で扱う必要がある。
 
@@ -36,9 +40,9 @@ ToUnicodeを持たない単純フォントにはASCIIの推定値を補うが、
 
 ## 対応判定の契約
 
-判定結果は、後続実装で次の3種類にする。下記は設計上の名称で、現行コードに追加済みの型ではない。
+判定結果は現在、`PDFTextReplacementStorage`で内部置換とoverlayを分離し、overlayへ理由を保持する。保存時の再照合失敗はエラーとして拒否する。
 
-- `internalCandidate`: 元の編集範囲と書き換え方法を証明できる。まだ成功を意味せず、保存・再読込・比較が通った場合だけ確定する。
+- `internalPDFium`: 元の編集範囲と書き換え方法を確定時に証明できる。まだ保存成功を意味せず、保存時の再照合・再読込・比較が通った場合だけ出力する。
 - `overlay`: 内部編集の条件を満たさないが、cover領域・必要全文字の描画・周辺非干渉を証明できる。表示には原文が残り得ることを伝える。
 - `unsupported`: どちらも安全性を証明できない。理由を表示して確定・書き出しを拒否する。
 
@@ -58,7 +62,7 @@ ToUnicodeを持たない単純フォントにはASCIIの推定値を補うが、
 
 ## 後続実装の段階と受け入れ条件
 
-### 今回完了する設計部分
+### Issue #19で完了した設計部分
 
 - 現行overlayの制約、各候補のAPI・配布・費用・ライセンス出典を記録する。
 - SDK決定を保留し、対応判定、fallback、編集拒否の境界を定める。
@@ -71,13 +75,13 @@ ToUnicodeを持たない単純フォントにはASCIIの推定値を補うが、
 
 受入: すべての表の境界に理由付きfixtureがあり、不明な文字を黙って削除・推定せず、選択・確定・保存で同一判定を使う。
 
-### 段階2: SDKを固定して限定実証する
+### 段階2: SDKを固定して限定実証する（Issue #50で完了）
 
 選定候補のversion/revision、build構成、依存ライセンス、arm64/x86_64の配布方針、署名・サイズ増分、更新責任を記録する。単一object全体・横書き・単一style等の限定ケースから、scannerとSDKの文字/object対応を比較する。PDFiumを採る場合も`FPDFText_SetText`成功だけでは合格にしない。
 
 受入: 同じ生成fixtureをSDKで変更→保存→再openし、置換後の抽出文字、glyph coverage、元文字の残存、隣接文字位置・非テキスト要素、preview/export一致を確認する。定量的なgeometry許容値は#13と整合させて先に固定する。失敗・保存エラー・判定不能で元文書を変更しないこと、overlayへのやり直しまたは拒否、undo/redoを検証する。
 
-### 段階3: 混合経路を有効化する
+### 段階3: 混合経路を有効化する（限定範囲をIssue #50で完了）
 
 証明できた限定範囲だけ内部編集へ送り、同じ文書の他範囲にはoverlay/unsupportedを適用する。異なる経路の編集が重なる場合や、先の変更が後の対象を無効にする場合は、元情報で再照合できなければ拒否する。複数ページ・保存し直し・印刷・undo/redoの整合性を確認してから対象を広げる。
 
@@ -90,9 +94,9 @@ ToUnicodeを持たない単純フォントにはASCIIの推定値を補うが、
 
 ## 生成fixtureの証跡
 
-`Tests/PDFTextEditorTests/PDFHybridEditingBoundaryTests.swift`で実行時に生成し、終了時に削除する。`RawPDFBuilder`で日本語のToUnicode、人工的なsubset名、非Identity CID map、分割Tj/TJ、ToUnicode欠損を制御する。さらに`SyntheticFixture`と同梱Noto Sans JPを使い、Quartzが生成する実フォント埋め込みsubsetを含む日本語PDFを検証する。この実フォントfixtureは埋め込みプログラムと3つの視覚glyphを作る一方、ToUnicodeを含まず現行scannerの文字列は空になることを示す。別の合成fixtureで日本語ToUnicodeの読取を検証する。subset内にない新しい文字へのcoverageやSDKでの保存・再読込は後続の受入に残す。
+`PDFHybridEditingBoundaryTests.swift`に加え、`PDFInternalTextEditEngineTests.swift`で固定PDFiumを使う生成fixtureを実行時に作り、終了時に削除する。単一object全体の変更・保存・再open、TJ/複数show/marked content/重複objectの拒否、glyph非対応時の既存出力不変、内部編集とoverlay追加の混在、再編集とundo/redoを検証する。日本語subset、CID map、ToUnicode欠損は引き続き内部編集対象外である。
 
-ToUnicode欠損のType0 fixtureは現在の空文字・行再描画不可という境界を記録する。現在のアプリ全体が`unsupported`を強制できると主張するテストではなく、その拒否gateは段階1の受入条件である。
+ToUnicode欠損のType0 fixtureは現在の空文字・行再描画不可という境界を記録する。内部置換gateは明示ToUnicodeを必須にし、推定Unicodeだけでpage objectを変更しない。
 
 ## 公式資料
 

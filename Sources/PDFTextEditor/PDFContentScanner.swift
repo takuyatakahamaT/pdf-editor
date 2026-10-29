@@ -294,7 +294,7 @@ private func opShowText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPoin
     guard let state = state(from: info) else { return }
     var stringRef: CGPDFStringRef?
     guard CGPDFScannerPopString(scanner, &stringRef), let stringRef else { return }
-    showString(stringRef, state: state)
+    showString(stringRef, state: state, operatorKind: .tj, operationID: state.takeShowOperationID())
 }
 
 private func opNextLineShowText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -302,7 +302,7 @@ private func opNextLineShowText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutabl
     var stringRef: CGPDFStringRef?
     guard CGPDFScannerPopString(scanner, &stringRef), let stringRef else { return }
     advanceToNextLine(state)
-    showString(stringRef, state: state)
+    showString(stringRef, state: state, operatorKind: .quote, operationID: state.takeShowOperationID())
 }
 
 private func opNextLineShowTextWithSpacing(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -314,18 +314,19 @@ private func opNextLineShowTextWithSpacing(_ scanner: CGPDFScannerRef, _ info: U
     state.wordSpacing = aw
     state.charSpacing = ac
     advanceToNextLine(state)
-    showString(stringRef, state: state)
+    showString(stringRef, state: state, operatorKind: .doubleQuote, operationID: state.takeShowOperationID())
 }
 
 private func opShowTextArray(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = state(from: info) else { return }
     var array: CGPDFArrayRef?
     guard CGPDFScannerPopArray(scanner, &array), let array else { return }
+    let operationID = state.takeShowOperationID()
     let count = CGPDFArrayGetCount(array)
     for index in 0..<count {
         var stringRef: CGPDFStringRef?
         if CGPDFArrayGetString(array, index, &stringRef), let stringRef {
-            showString(stringRef, state: state)
+            showString(stringRef, state: state, operatorKind: .tjArray, operationID: operationID)
             continue
         }
         var number: CGPDFReal = 0
@@ -337,7 +338,12 @@ private func opShowTextArray(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRa
 }
 
 /// 1 つの PDF 文字列 (Tj/TJ/'/") をグリフへ分解し、`state.glyphs` に追記する。
-private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
+private func showString(
+    _ stringRef: CGPDFStringRef,
+    state: GlyphScanState,
+    operatorKind: PDFTextShowOperator,
+    operationID: Int
+) {
     guard let bytePtr = CGPDFStringGetBytePtr(stringRef) else { return }
     let length = CGPDFStringGetLength(stringRef)
     let info = state.fontInfo(for: state.fontKey)
@@ -403,7 +409,11 @@ private func showString(_ stringRef: CGPDFStringRef, state: GlyphScanState) {
                 fillColor: state.fillColorStack.last ?? .black,
                 hasExplicitToUnicodeMapping: info.explicitToUnicodeCodes.contains(code),
                 textRenderingMode: state.textRenderingMode,
-                paintOrder: paintOrder
+                paintOrder: paintOrder,
+                showOperator: operatorKind,
+                showOperationID: operationID,
+                isInsideForm: state.formDepth > 0,
+                isInsideMarkedContent: !state.markedContentStack.isEmpty
             ))
         }
     }

@@ -29,9 +29,10 @@ jobs:
         run: go -C Tools/pdf-link-remap test ./...
       - name: Build PDF link remapper
         run: go -C Tools/pdf-link-remap build -trimpath -o "$RUNNER_TEMP/pdf-link-remap" .
-      - name: Build release app
-        run: swift build -c release
+      - name: Build app with pinned PDFium
+        run: PDF_EDITOR_APP_BUNDLE="$RUNNER_TEMP/PDF editor.app" scripts/build-app.sh
       - name: Run tests
-        run: swift test
+        run: swift test --no-parallel
         env:
           PDF_EDITOR_LINK_REMAP_HELPER: ${{ runner.temp }}/pdf-link-remap
+          PDFIUM_LIBRARY_PATH: ${{ runner.temp }}/PDF editor.app/Contents/Frameworks/libpdfium.dylib

@@ -29,8 +29,8 @@ jobs:
         run: brew install poppler
       - name: Release build and acceptance tests
         run: |
-          swift build -c release
-          PDF_EDITOR_LINK_REMAP_HELPER="$RUNNER_TEMP/pdf-link-remap" swift test
+          PDF_EDITOR_APP_BUNDLE="$RUNNER_TEMP/PDF editor.app" scripts/build-app.sh
+          PDFIUM_LIBRARY_PATH="$RUNNER_TEMP/PDF editor.app/Contents/Frameworks/libpdfium.dylib" PDF_EDITOR_LINK_REMAP_HELPER="$RUNNER_TEMP/pdf-link-remap" swift test --no-parallel
           python3 scripts/check-update-security.py
       - name: Build, sign updates, and publish
         run: scripts/publish-release.sh

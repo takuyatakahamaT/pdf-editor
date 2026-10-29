@@ -976,7 +976,8 @@ final class EditorModel: ObservableObject {
         if replacement.destinationOrigin == nil,
            let layout = replacement.lineLayout,
            let previous = activeReplacements.last(where: { existing in
-               existing.destinationOrigin == nil
+               existing.id != replacement.id
+                   && existing.destinationOrigin == nil
                    && existing.lineLayout.map { layout.hasSameSourceLine(as: $0) } == true
            }) {
             let incoming = replacement.lineReplacements
@@ -998,6 +999,17 @@ final class EditorModel: ObservableObject {
                     + " 出力サイズ（現在 \(formattedPointSize(CGFloat(replacementFontSize))) pt）を小さくして再度確定してください。"
             )
             return
+        }
+
+        if replacement.destinationOrigin == nil, !replacement.composesLineEdits, let sourceURL {
+            switch PDFInternalTextEditEngine.eligibility(sourceURL: sourceURL, edit: replacement) {
+            case .supported:
+                replacement.storage = .internalPDFium
+            case .unsupported(let reason):
+                replacement.storage = .overlay(reason: reason)
+            }
+        } else {
+            replacement.storage = .overlay(reason: "移動または行再配置を含むためPDF内部置換の対象外です。")
         }
 
         let restoredAnnotations = supersededApplied?.annotations ?? []
@@ -1023,8 +1035,14 @@ final class EditorModel: ObservableObject {
         revision += 1
         let fontMessage = previewReason ?? (selectedFontName == nil && !result.fontIsExact
             ? "元フォントを再現できないため代替フォントで描画します。" : "")
-        let overlayMessage = "白い重ね描きのため、元の文字データはPDF内に残ります。墨消しには使えません。"
-        statusMessage = "文字を置換しました（出力 \(formattedPointSize(replacement.fontSize)) pt）。\(overlayMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
+        let storageMessage: String
+        switch replacement.storage {
+        case .internalPDFium:
+            storageMessage = "保存時にPDF内部の単一text objectを置換し、再読込検証します。"
+        case .overlay(let reason):
+            storageMessage = "白い重ね描きで保存します（\(reason)）。元の文字データはPDF内に残ります。画像・罫線・背景との干渉は完全には判定できません。墨消しには使えません。"
+        }
+        statusMessage = "文字を置換しました（出力 \(formattedPointSize(replacement.fontSize)) pt）。\(storageMessage)\(fontMessage)確認後に編集済みPDFを書き出してください。"
     }
 
     func moveSelection(by delta: CGPoint) {
