@@ -13,8 +13,11 @@ struct PDFZoomStateTests {
         state.setPercent(10)
         #expect(state.command == .setScale(0.25))
 
-        state.setPercent(850)
-        #expect(state.command == .setScale(4))
+        state.setPercent(1_000)
+        #expect(state.command == .setScale(10))
+
+        state.setPercent(1_250)
+        #expect(state.command == .setScale(10))
     }
 
     @Test("zoom commands are delivered as distinct revisions")
