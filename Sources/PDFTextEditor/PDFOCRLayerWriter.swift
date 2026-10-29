@@ -274,7 +274,7 @@ enum PDFOCRLayerWriter {
     private static func number(_ value: CGFloat) -> String { String(format: "%.4f", Double(value)) }
 }
 
-private struct PDFObjectEditor {
+struct PDFObjectEditor {
     struct PageObject { let number: Int; let dictionary: String; let mediaBox: CGRect }
     let data: Data
     let source: NSString

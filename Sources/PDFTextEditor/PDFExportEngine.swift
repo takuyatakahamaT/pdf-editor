@@ -11,11 +11,17 @@ enum PDFTextEditKind {
 enum PDFTextReplacementStorage: Equatable {
     case overlay(reason: String)
     case internalPDFium
+    /// 元の文字だけを除去し、確定済みCoreText描画を透明な前景として加える。
+    case reconstructed
 
     var isInternal: Bool {
-        if case .internalPDFium = self { return true }
-        return false
+        switch self {
+        case .internalPDFium, .reconstructed: true
+        case .overlay: false
+        }
     }
+
+    var needsForeground: Bool { self == .reconstructed }
 }
 
 struct ReplacementFontSelection: Equatable {
@@ -122,8 +128,28 @@ struct ReplacementEdit {
     let hasExplicitSourceMapping: Bool
     let fontPostScriptNameOverride: String?
     let outputFontSelection: ReplacementFontSelection
-    /// プレビューはどちらもannotationで行うが、保存時の処理は混在させない。
+    /// 内部編集のプレビューは保存と同じPDF、従来描画のプレビューはannotationを使う。
     var storage: PDFTextReplacementStorage
+
+    /// 原本に対する編集座標を保ったまま、文字除去の計画を作る。
+    /// 描画フォントを変更した場合も原本のfont key/sizeで照合する。
+    func sourceRemoval() -> ReplacementEdit {
+        let target = TextTarget(
+            pageIndex: pageIndex, bounds: bounds, baseline: baseline,
+            originalText: sourceText, fontSize: sourceFontSize, fontColor: fontColor,
+            fontKey: sourceFontKey, fontIsExact: sourceFontIsExact,
+            coverBounds: coverBounds, maxWidth: maxWidth,
+            hasExplicitSourceMapping: hasExplicitSourceMapping,
+            fontPostScriptNameOverride: fontPostScriptNameOverride,
+            nearbyTextBounds: sourceNearbyTextBounds,
+            sourceGlyphBounds: sourceGlyphBounds,
+            sourceSelectionIsAmbiguous: sourceSelectionIsAmbiguous,
+            sourceIsPlainTextObject: sourceIsPlainTextObject
+        )
+        var removal = ReplacementEdit(deleting: target, id: id)
+        removal.storage = .internalPDFium
+        return removal
+    }
 
     init(
         target: TextTarget,
@@ -184,8 +210,8 @@ struct ReplacementEdit {
         }
     }
 
-    init(deleting target: TextTarget) {
-        id = UUID()
+    init(deleting target: TextTarget, id: UUID = UUID()) {
+        self.id = id
         kind = .replacement
         pageIndex = target.pageIndex
         bounds = target.bounds
@@ -376,6 +402,24 @@ private struct PDFInternalLinkRemap: Encodable {
 }
 
 enum PDFExportEngine {
+    /// 同じ判定を確定前と保存時に使う。透明な文字描画は行全体を占有しない。
+    static func validateEditPaths(_ edits: [ReplacementEdit]) throws {
+        let internalEdits = edits.filter { $0.storage.isInternal }
+        let foregroundEdits = edits.filter { !$0.storage.isInternal || $0.storage.needsForeground }
+        for internalEdit in internalEdits {
+            let internalBounds = internalEdit.bounds.union(internalEdit.displayedTextBounds)
+            if foregroundEdits.contains(where: { foreground in
+                let area = foreground.storage.needsForeground
+                    ? foreground.bounds.union(foreground.displayedTextBounds)
+                    : foreground.annotationBounds.union(foreground.displayedTextBounds)
+                return foreground.id != internalEdit.id && foreground.pageIndex == internalEdit.pageIndex
+                    && internalBounds.intersects(area)
+            }) {
+                throw PDFExportError.overlappingEditPaths
+            }
+        }
+    }
+
     static func annotationsToCopy(from annotations: [PDFAnnotation]) -> [PDFAnnotation] {
         let popupAnnotationIDs = Set(annotations.compactMap(\.popup).map(ObjectIdentifier.init))
         return annotations.filter { annotation in
@@ -404,21 +448,14 @@ enum PDFExportEngine {
         }
 
         let internalEdits = edits.filter { $0.storage.isInternal }
-        let overlayEdits = edits.filter { !$0.storage.isInternal }
-        for internalEdit in internalEdits {
-            let internalBounds = internalEdit.coverBounds.union(internalEdit.displayedTextBounds)
-            if overlayEdits.contains(where: { overlay in
-                overlay.pageIndex == internalEdit.pageIndex
-                    && internalBounds.intersects(overlay.annotationBounds.union(overlay.displayedTextBounds))
-            }) {
-                throw PDFExportError.overlappingEditPaths
-            }
-        }
+        let sourceEdits = internalEdits.map { $0.storage.needsForeground ? $0.sourceRemoval() : $0 }
+        let overlayEdits = edits.filter { !$0.storage.isInternal || $0.storage.needsForeground }
+        try validateEditPaths(edits)
         let renderSourceURL: URL
         if internalEdits.isEmpty {
             renderSourceURL = sourceURL
         } else {
-            try PDFInternalTextEditEngine.apply(sourceURL: sourceURL, edits: internalEdits, to: internalStageURL)
+            try PDFInternalTextEditEngine.apply(sourceURL: sourceURL, edits: sourceEdits, to: internalStageURL)
             renderSourceURL = internalStageURL
         }
 
@@ -439,6 +476,10 @@ enum PDFExportEngine {
                 sourceURL: sourceURL,
                 outputURL: finalStageURL,
                 edits: internalEdits
+            )
+            try PDFTextEditPlanner.verifyForeground(in: finalStageURL, edits: internalEdits)
+            try PDFVisualIntegrityValidator.verify(
+                sourceURL: sourceURL, outputURL: finalStageURL, edits: edits, markups: markups
             )
         }
         let finalData = try Data(contentsOf: finalStageURL)
@@ -506,7 +547,12 @@ enum PDFExportEngine {
             defer { page.rotation = originalRotation }
             context.beginPDFPage(pageInfo)
             context.saveGState()
-            page.draw(with: .mediaBox, to: context)
+            if let cgPage = page.pageRef {
+                // PDFKitの描画経路による画像の再解釈を避け、元のPDF描画を引き継ぐ。
+                context.drawPDFPage(cgPage)
+            } else {
+                page.draw(with: .mediaBox, to: context)
+            }
             context.restoreGState()
 
             for edit in edits where edit.pageIndex == pageIndex {
@@ -553,7 +599,10 @@ enum PDFExportEngine {
             helperURL: linkRemapHelperURL,
             expectedPageCount: document.pageCount
         )
-        let searchableData = try addingSearchableTextForMissingReplacements(in: data, edits: edits)
+        let mappedData = try PDFVisibleTextUnicodeWriter.addingMappings(in: data, edits: edits)
+        let searchableData = try addingSearchableTextForMissingReplacements(
+            in: mappedData, edits: edits.filter { !$0.storage.needsForeground }
+        )
         do { try searchableData.write(to: outputURL, options: .atomic) }
         catch { throw PDFExportError.cannotCreateContext }
     }

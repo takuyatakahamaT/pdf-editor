@@ -262,7 +262,7 @@ struct PDFHybridEditingBoundaryTests {
         // 元の3つのshow operandに戻すprovenanceはTextTargetに保持されない。
     }
 
-    @Test("ToUnicodeがない選択は空文字となり、警告付きoverlayを書き出して画像化できる")
+    @Test("ToUnicodeがない選択も簡単な完了表示で書き出して画像化できる")
     @MainActor
     func unmappedOverlayStatusAndRasterization() throws {
         let url = cidFixture(
@@ -284,9 +284,7 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "代替"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("白い重ね描き"))
-        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
-        #expect(model.statusMessage.contains("墨消しには使えません"))
+        #expect(model.statusMessage == "文字を変更しました。")
 
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdf-hybrid-boundary-\(UUID().uuidString).pdf")
@@ -306,7 +304,7 @@ struct PDFHybridEditingBoundaryTests {
         #expect(context.makeImage() != nil)
     }
 
-    @Test("ASCII補完で読めてもoverlayの原文残存を警告する")
+    @Test("ASCII補完で読める文書も方式の説明を表示せず編集する")
     @MainActor
     func asciiFallbackReplacementStatus() throws {
         let url = simpleFontFixture(
@@ -329,11 +327,10 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "B"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
-        #expect(model.statusMessage.contains("墨消しには使えません"))
+        #expect(model.statusMessage == "文字を変更しました。")
     }
 
-    @Test("ToUnicodeが明示されても内部編集非対応の文字数変更はoverlay警告を出す")
+    @Test("ToUnicodeが明示された文字数変更も同じ操作で確定する")
     @MainActor
     func explicitToUnicodeReplacementStatus() throws {
         let url = simpleFontFixture(
@@ -353,12 +350,10 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "BB"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.activeReplacements.first?.storage.isInternal == false)
-        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
-        #expect(model.statusMessage.contains("墨消しには使えません"))
+        #expect(model.statusMessage == "文字を変更しました。")
     }
 
-    @Test("選択内にToUnicode未対応グリフが混ざっても同じoverlay警告を出す")
+    @Test("選択内にToUnicode未対応グリフが混ざっても方式の説明を表示しない")
     @MainActor
     func mixedExplicitAndFallbackSelectionWarns() throws {
         let url = simpleFontFixture(
@@ -379,7 +374,6 @@ struct PDFHybridEditingBoundaryTests {
         model.replacementText = "CD"
         model.applyReplacement()
         #expect(model.edits.count == 1)
-        #expect(model.statusMessage.contains("元の文字データはPDF内に残ります"))
-        #expect(model.statusMessage.contains("墨消しには使えません"))
+        #expect(model.statusMessage == "文字を変更しました。")
     }
 }
