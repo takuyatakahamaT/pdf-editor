@@ -195,7 +195,6 @@ enum PDFEditEngine {
             size: resolvedSize,
             replacementText: replacement,
             supportingText: target.lineLayout?.text(replacingWith: replacement),
-            selectedWidth: target.lineLayout?.selectedAdvance ?? target.bounds.width,
             preferredFontName: preferredFontName
         )
     }

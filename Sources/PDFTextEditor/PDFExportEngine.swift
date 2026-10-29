@@ -102,7 +102,7 @@ struct ReplacementEdit {
     var composesLineEdits: Bool
     /// 既存文字を移動した場合の新しい描画原点（x、ベースライン y）。
     var destinationOrigin: CGPoint?
-    /// 元 PDF の CID を GID として直接指定できる場合の (GID, 送り幅[em]) 列。
+    /// ToUnicode と埋込フォントから確定した (GID, 送り幅[em]) 列。
     /// 埋め込みサブセットフォントが `cmap` を持たず `CTFontGetGlyphsForCharacters`
     /// が使えないときでも、元の GID を直接指定して真に同じグリフで描画するために使う。
     let exactGlyphs: [(glyph: CGGlyph, emWidth: CGFloat)]?

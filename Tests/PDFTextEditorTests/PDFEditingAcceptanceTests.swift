@@ -399,7 +399,7 @@ struct PDFEditingAcceptanceTests {
     }
 
     @Test("埋め込みフォントのUnicode cmapだけではPDFのグリフ対応とみなさない")
-    func embeddedCMapIsNotTrustedWithoutIdentityMapping() throws {
+    func embeddedCMapIsNotTrustedWithoutPDFCodeMapping() throws {
         let font = CTFontCreateWithName("Helvetica" as CFString, 12, nil)
         let units = Array("10".utf16)
         var cmapGlyphs = [CGGlyph](repeating: 0, count: units.count)
@@ -442,6 +442,40 @@ struct PDFEditingAcceptanceTests {
         ))
         #expect(exactResolution.isExact)
         #expect(exactResolution.exactGlyphs?.map(\.glyph) == [49, 48])
+    }
+
+    @Test("単純TrueTypeのDifferencesは文字コード直結より優先する")
+    func simpleTrueTypeDifferencesSelectsNamedGlyph() throws {
+        let font = CTFontCreateWithName("Helvetica" as CFString, 12, nil)
+        var units = Array("AB".utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: units.count)
+        #expect(CTFontGetGlyphsForCharacters(font, &units, &glyphs, units.count))
+        #expect(glyphs[0] != glyphs[1])
+        var bGlyph = glyphs[1]
+        var advance = CGSize.zero
+        _ = CTFontGetAdvancesForGlyphs(font, .horizontal, &bGlyph, &advance, 1)
+
+        let info = PDFFontInfo(
+            bytesPerCode: 1,
+            widthTable: [65: advance.width / CTFontGetSize(font)],
+            defaultWidth: 0.5,
+            toUnicode: [65: "B"],
+            explicitToUnicodeCodes: [65],
+            ascent: 0.8,
+            descent: -0.2,
+            hasEmbeddedProgram: true,
+            unicodeToCode: ["B": 65],
+            simpleEncodingGlyphNames: [65: "B"],
+            isIdentityCIDToGID: false
+        )
+
+        let resolution = try #require(PDFEmbeddedFontLoader.embeddedFontResolution(
+            font: font,
+            info: info,
+            replacementText: "B"
+        ))
+        #expect(resolution.exactGlyphs?.map(\.glyph) == [glyphs[1]])
+        #expect(resolution.exactGlyphs?.map(\.glyph) != [glyphs[0]])
     }
 
     @Test("元PDFと同名の端末フォントは代替フォント扱いにしない")
