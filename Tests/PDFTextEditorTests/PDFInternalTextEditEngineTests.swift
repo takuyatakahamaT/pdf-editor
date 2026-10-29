@@ -189,6 +189,23 @@ struct PDFInternalTextEditEngineTests {
         #expect(PDFDocument(url: source)?.page(at: 0)?.string?.contains("A") == true)
     }
 
+    @Test("背景や罫線に重なる文字は内部置換のプレビューと出力を食い違わせない")
+    @MainActor
+    func nonTextOverlapIsNotInternallyEdited() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(content: "0.8 g 10 42 40 20 re f 0 g BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let model = try replacementModel(source: source, replacement: "B")
+        let edit = try #require(model.activeReplacements.first)
+        guard case .overlay(let reason) = edit.storage else {
+            Issue.record("非文字要素に重なる置換を内部編集へ送っています。")
+            return
+        }
+        #expect(reason.contains("非文字要素"))
+        #expect(model.statusMessage.contains("画像・罫線・背景との干渉"))
+    }
+
     @Test("ToUnicode推定だけでは内部置換へ昇格しない")
     @MainActor
     func inferredUnicodeIsOverlayOnly() throws {

@@ -276,8 +276,24 @@ enum PDFInternalTextEditEngine {
         let objectCount = api.pageObjectCount(page)
         guard objectCount >= 0 else { throw PDFInternalTextEditError.unsupported("page objectを列挙できません。") }
         for objectIndex in 0..<objectCount {
-            guard let object = api.pageObject(page, objectIndex), api.pageObjectType(object) == 1,
-                  api.objectText(object, textPage: textPage) == edit.sourceText else { continue }
+            guard let object = api.pageObject(page, objectIndex) else {
+                throw PDFInternalTextEditError.unsupported("page objectを取得できません。")
+            }
+            if api.pageObjectType(object) != 1 {
+                var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
+                guard api.pageObjectBounds(object, &left, &bottom, &right, &top) != 0 else {
+                    throw PDFInternalTextEditError.unsupported("非文字要素の位置を判定できません。")
+                }
+                let nonTextBounds = CGRect(
+                    x: CGFloat(left), y: CGFloat(bottom),
+                    width: CGFloat(right - left), height: CGFloat(top - bottom)
+                ).standardized.insetBy(dx: -0.5, dy: -0.5)
+                if nonTextBounds.intersects(edit.coverBounds) {
+                    throw PDFInternalTextEditError.unsupported("選択文字に画像・罫線・背景などの非文字要素が重なっています。")
+                }
+                continue
+            }
+            guard api.objectText(object, textPage: textPage) == edit.sourceText else { continue }
             var left: Float = 0, bottom: Float = 0, right: Float = 0, top: Float = 0
             guard api.pageObjectBounds(object, &left, &bottom, &right, &top) != 0 else { continue }
             let objectBounds = CGRect(
