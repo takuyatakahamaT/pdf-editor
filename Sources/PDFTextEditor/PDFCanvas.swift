@@ -835,6 +835,11 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func showInlineEditor(for edit: ReplacementEdit, replacement: TextRunReplacement) {
+        // 移動後の置換は元の行位置ではなく、表示中の注釈位置に入力欄を置く。
+        if edit.destinationOrigin != nil {
+            showInlineEditor(for: edit)
+            return
+        }
         guard let layout = edit.lineLayout,
               let plan = PDFTextRenderer.composedReflowPlan(
                   layout: layout,
