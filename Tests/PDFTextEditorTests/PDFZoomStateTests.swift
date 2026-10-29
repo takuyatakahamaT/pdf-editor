@@ -118,6 +118,29 @@ struct PDFZoomStateTests {
         #expect(scrollView?.allowsMagnification == false)
     }
 
+    @Test("同じPDFのプレビュー差し替えでは現在の倍率を維持する")
+    @MainActor
+    func preservesScaleWhenReplacingPreviewDocument() throws {
+        let image = NSImage(size: CGSize(width: 600, height: 800))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: CGRect(x: 0, y: 0, width: 600, height: 800)).fill()
+        image.unlockFocus()
+        let original = PDFDocument()
+        let replacement = PDFDocument()
+        original.insert(try #require(PDFPage(image: image)), at: 0)
+        replacement.insert(try #require(PDFPage(image: image)), at: 0)
+        let view = ClickablePDFView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        view.document = original
+        view.autoScales = false
+        view.scaleFactor = 2.5
+
+        view.replaceDocumentPreservingViewport(replacement)
+
+        #expect(view.document === replacement)
+        #expect(abs(view.scaleFactor - 2.5) < 0.001)
+    }
+
     @Test("scroll direction changes the zoom multiplier")
     @MainActor
     func scrollDeltaControlsZoomDirection() {

@@ -296,6 +296,7 @@ struct EditorScreen: View {
     private func canvas(_ document: PDFDocument) -> some View {
         PDFCanvas(
             document: document,
+            sourceDocumentRevision: model.sourceDocumentRevision,
             revision: model.revision,
             mode: model.mode,
             markupTool: model.selectedMarkupTool,

@@ -5,6 +5,7 @@ import SwiftUI
 
 struct PDFCanvas: NSViewRepresentable {
     let document: PDFDocument
+    let sourceDocumentRevision: Int
     let revision: Int
     let mode: EditorMode
     let markupTool: PDFMarkupTool
@@ -64,6 +65,7 @@ struct PDFCanvas: NSViewRepresentable {
         view.pageOverlayViewProvider = replacementOverlayProvider
         if mode == .insertion { view.clearSelection() }
         view.document = document
+        view.sourceDocumentRevision = sourceDocumentRevision
         view.minScaleFactor = PDFZoomState.minimumScale
         view.maxScaleFactor = PDFZoomState.maximumScale
         view.displayMode = .singlePageContinuous
@@ -108,14 +110,19 @@ struct PDFCanvas: NSViewRepresentable {
         configure(view, coordinator: context.coordinator)
         view.markupTool = markupTool
         if view.document !== document {
-            view.resetFitMode()
-            view.setMagnifierActive(false)
-            view.document = document
-            view.autoScales = false
-            view.disableNativeMagnification()
-            view.applyZoomCommand(.fitPage)
-            view.appliedZoomCommandRevision = zoomState.commandRevision
-            view.reportCurrentPageLater()
+            if view.sourceDocumentRevision == sourceDocumentRevision {
+                view.replaceDocumentPreservingViewport(document)
+            } else {
+                view.resetFitMode()
+                view.setMagnifierActive(false)
+                view.document = document
+                view.autoScales = false
+                view.disableNativeMagnification()
+                view.applyZoomCommand(.fitPage)
+                view.appliedZoomCommandRevision = zoomState.commandRevision
+                view.reportCurrentPageLater()
+            }
+            view.sourceDocumentRevision = sourceDocumentRevision
         }
         if view.magnifierIsActive != zoomState.magnifierIsActive {
             view.setMagnifierActive(zoomState.magnifierIsActive)
@@ -347,6 +354,7 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     var pageChangeHandler: ((Int, Int) -> Void)?
     private(set) var magnifierIsActive = false
     var appliedZoomCommandRevision = 0
+    var sourceDocumentRevision = 0
 
     private var scaleObserver: NSObjectProtocol?
     private var zoomGestureMonitor: Any?
@@ -989,6 +997,40 @@ final class ClickablePDFView: PDFView, NSTextFieldDelegate {
     func resetFitMode() {
         fitsWidthOnResize = false
         fitsPageOnResize = false
+    }
+
+    func replaceDocumentPreservingViewport(_ replacement: PDFDocument) {
+        let oldScale = scaleFactor
+        let viewportCenter = visibleRect.center
+        let oldPage = page(for: viewportCenter, nearest: true) ?? currentPage
+        let oldPageIndex = oldPage.flatMap { document?.index(for: $0) }
+        let anchorInPage = oldPage.map { convert(viewportCenter, to: $0) }
+
+        document = replacement
+        autoScales = false
+        disableNativeMagnification()
+        scaleFactor = PDFZoomState.clampedScale(oldScale)
+        layoutDocumentView()
+        layoutSubtreeIfNeeded()
+
+        guard let oldPageIndex, let anchorInPage,
+              let page = replacement.page(at: oldPageIndex),
+              let scrollView = subviews.first(where: { $0 is NSScrollView }) as? NSScrollView,
+              let documentView = scrollView.documentView else {
+            reportCurrentPageLater()
+            return
+        }
+        let clipView = scrollView.contentView
+        let anchorInView = convert(anchorInPage, from: page)
+        let anchorInDocument = documentView.convert(anchorInView, from: self)
+        clipView.scroll(to: CGPoint(
+            x: anchorInDocument.x - clipView.bounds.width / 2,
+            y: anchorInDocument.y - clipView.bounds.height / 2
+        ))
+        scrollView.reflectScrolledClipView(clipView)
+        scaleChangeHandler?(scaleFactor)
+        reportCurrentPageLater()
+        needsDisplay = true
     }
 
     private func handleInsertionMouseDown(_ event: NSEvent) {

@@ -215,6 +215,74 @@ struct PDFInternalTextEditEngineTests {
         #expect(outputPage.annotations.contains { $0.type == "Link" })
     }
 
+    @Test("組合せを検証できない内部置換はoverlayへ戻して表示を失わない")
+    @MainActor
+    func conflictingInternalEditSetFallsBackBeforeCommit() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(
+            content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET "
+                + "BT /F1 14 Tf 1 0 0 1 20 20 Tm (C) Tj ET"
+        )
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+
+        for (oldText, newText) in [("A", "B"), ("C", "A")] {
+            let index = PDFGlyphIndex.makeIndex(for: page)
+            let run = try #require(index.runs.first { $0.text == oldText })
+            let target = try #require(index.target(in: run, range: 0..<run.glyphs.count, pageIndex: 0))
+            model.select(target)
+            model.updateEditorText(newText)
+            model.commitEditorText()
+        }
+
+        let edits = model.activeReplacements
+        #expect(edits.count == 2)
+        #expect(edits.filter { $0.storage.isInternal }.count == 1)
+        #expect(edits.contains { !$0.storage.isInternal })
+        #expect(model.displayedDocument != nil)
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName?.hasPrefix(PDFEditEngine.annotationMarkerPrefix) == true
+        } == true)
+    }
+
+    @Test("内部置換プレビューへ追加テキストのドラフトと再編集を同期する")
+    @MainActor
+    func insertionDraftStaysVisibleOnInternalPreview() throws {
+        guard pdfiumIsConfigured() else { return }
+        let source = fixture(content: "BT /F1 14 Tf 1 0 0 1 20 50 Tm (A) Tj ET")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = try replacementModel(source: source, replacement: "B")
+
+        model.setMode(.insertion)
+        model.beginInsertion(pageIndex: 0, point: CGPoint(x: 80, y: 50))
+        model.updateEditorText("draft")
+        var draft = try #require(model.displayedDocument?.page(at: 0)?.annotations.first {
+            $0.userName == PDFEditEngine.draftMarker
+        })
+        #expect(draft.contents == "draft")
+
+        model.commitEditorText()
+        let insertion = try #require(model.activeReplacements.first { $0.kind == .insertion })
+        model.beginReeditingInsertion(id: insertion.id)
+        model.updateEditorText("updated")
+        draft = try #require(model.displayedDocument?.page(at: 0)?.annotations.first {
+            $0.userName == PDFEditEngine.draftMarker
+        })
+        #expect(draft.contents == "updated")
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.annotationMarkerPrefix + insertion.id.uuidString
+        } == false)
+
+        model.cancelInsertionEditing()
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.annotationMarkerPrefix + insertion.id.uuidString
+        } == true)
+        #expect(model.displayedDocument?.page(at: 0)?.annotations.contains {
+            $0.userName == PDFEditEngine.draftMarker
+        } == false)
+    }
+
     @Test("同じ選択を再編集しても内部状態とundo/redoを保つ")
     @MainActor
     func reeditingPreservesInternalStateAndUndoRedo() throws {
