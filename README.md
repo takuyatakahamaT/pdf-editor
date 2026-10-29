@@ -6,7 +6,7 @@ Mac上でPDFを開き、既存テキストの置換、任意位置への新し�
 
 ソースはこの `pdf-editor` リポジトリで管理します。リポジトリをcloneしたディレクトリで以下のコマンドを実行します。
 
-アプリアイコンは NIHO の仲間として、生成りの角丸タイルに白い紙・若草の選択範囲・入力カーソル・珊瑚色の「PDF」の札を描いています。正は `Resources/AppIcon.svg` で、変更したら `./scripts/build-app-icon.sh` で `AppIcon.png` と `AppIcon.icns` を作り直します（描画に Google Chrome を使います）。
+アプリアイコンは NIHO の仲間として、生成りの角丸タイルに水色の線で縁取った白い紙・若草の選択範囲・入力カーソル・珊瑚色の「PDF」の札を描いています。正は `Resources/AppIcon.svg` で、変更したら `./scripts/build-app-icon.sh` で `AppIcon.png` と `AppIcon.icns` を作り直します（描画に Google Chrome を使います）。
 
 ## 起動
 
