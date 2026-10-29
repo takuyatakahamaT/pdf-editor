@@ -379,13 +379,18 @@ enum PDFEmbeddedFontLoader {
     }
 
     static func loadEmbeddedFont(fontDict: CGPDFDictionaryRef, size: CGFloat) -> CTFont? {
-        guard let descriptor = descriptorDictionary(from: fontDict) else { return nil }
-        guard let stream = PDFFontInfoLoader.fontFileStream(in: descriptor) else { return nil }
-        var format: CGPDFDataFormat = .raw
-        guard let data = CGPDFStreamCopyData(stream, &format) else { return nil }
-        guard let provider = CGDataProvider(data: data) else { return nil }
+        guard let data = embeddedFontData(fontDict: fontDict) else { return nil }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
         guard let cgFont = CGFont(provider) else { return nil }
         return CTFontCreateWithGraphicsFont(cgFont, size, nil, nil)
+    }
+
+    static func embeddedFontData(fontDict: CGPDFDictionaryRef) -> Data? {
+        guard let descriptor = descriptorDictionary(from: fontDict),
+              let stream = PDFFontInfoLoader.fontFileStream(in: descriptor) else { return nil }
+        var format: CGPDFDataFormat = .raw
+        guard let data = CGPDFStreamCopyData(stream, &format) else { return nil }
+        return data as Data
     }
 
     // MARK: - ヘルパー

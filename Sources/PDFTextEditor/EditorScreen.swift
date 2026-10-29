@@ -21,7 +21,7 @@ struct EditorScreen: View {
                 NihoDivider()
             }
 
-            if let document = model.document {
+            if let document = model.displayedDocument {
                 HStack(spacing: 0) {
                     canvas(document)
                     ContextPanel()
