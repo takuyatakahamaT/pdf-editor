@@ -15,6 +15,7 @@ enum PDFTextEditPlanner {
             // subsetに新しい漢字が無い場合や、書体/サイズを指定した場合も、
             // 原本の文字を正確に除去できれば背景を塗らずCoreTextで組版できる。
             if !edit.replacement.isEmpty,
+               PDFTextRenderer.hasSourceEvidenceForForegroundReflow(edit),
                case .supported = PDFInternalTextEditEngine.eligibility(
                    sourceURL: sourceURL, edit: edit.sourceRemoval()
                ) {
@@ -45,7 +46,14 @@ enum PDFTextEditPlanner {
             let glyphs = index.runs.flatMap(\.glyphs)
             // 元の文字枠やinkの高さには依存しない。句読点や大幅なサイズ変更も、
             // rendererが確定した各glyphの原点・サイズ・Unicodeで照合する。
-            guard emitted.map(\.text).joined() == edit.replacement,
+            let expectedText = edit.lineLayout.map { layout in
+                let range = PDFTextRenderer.sourceRemovalRange(for: edit)
+                let suffix = range.count > layout.selectedRange.count
+                    ? layout.glyphs[layout.selectedRange.upperBound...].map(\.text).joined()
+                    : ""
+                return edit.replacement + suffix
+            } ?? edit.replacement
+            guard emitted.map(\.text).joined() == expectedText,
                   emitted.allSatisfy({ expected in
                       glyphs.filter { glyph in
                           glyph.isVisible && !glyph.isInsideForm && glyph.text == expected.text
