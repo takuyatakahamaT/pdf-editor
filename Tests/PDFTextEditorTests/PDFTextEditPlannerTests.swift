@@ -6,16 +6,15 @@ import Testing
 
 @Suite("文字編集計画と背景保持", .serialized)
 struct PDFTextEditPlannerTests {
-    private func fixture(extra: String = "", fontSize: Int = 14, pageHeight: Int = 100) -> URL {
+    private func fixture(
+        extra: String = "", fontSize: Int = 14, pageHeight: Int = 100, text: String = "ABCD"
+    ) -> URL {
         let cmap = """
         /CIDInit /ProcSet findresource begin 12 dict begin begincmap
         /CMapName /Test def /CMapType 2 def
         1 begincodespacerange <00> <FF> endcodespacerange
-        4 beginbfchar
-        <41> <0041>
-        <42> <0042>
-        <43> <0043>
-        <44> <0044>
+        95 beginbfchar
+        \((32...126).map { String(format: "<%02X> <%04X>", $0, $0) }.joined(separator: "\n"))
         endbfchar
         endcmap CMapName currentdict /CMap defineresource pop end end
         """
@@ -25,7 +24,7 @@ struct PDFTextEditPlannerTests {
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 \(pageHeight)] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>",
             RawPDFBuilder.streamObject(dict: "", streamContent:
-                "0.8 g 10 35 220 35 re f 0 G 1 w 10 35 m 230 35 l S 0 g BT /F1 \(fontSize) Tf 1 0 0 1 20 48 Tm (ABCD) Tj ET " + extra),
+                "0.8 g 10 35 220 35 re f 0 G 1 w 10 35 m 230 35 l S 0 g BT /F1 \(fontSize) Tf 1 0 0 1 20 48 Tm (\(text)) Tj ET " + extra),
             RawPDFBuilder.streamObject(dict: "", streamContent: cmap)
         ])
     }
@@ -34,6 +33,45 @@ struct PDFTextEditPlannerTests {
         ProcessInfo.processInfo.environment["PDFIUM_LIBRARY_PATH"].map {
             FileManager.default.fileExists(atPath: $0)
         } ?? false
+    }
+
+    @Test("金額の桁数増加で後続文字を右へ送り、背景と文字サイズを保って保存する")
+    func growingAmountReflowsTrailingText() throws {
+        guard hasPDFium else { return }
+        let source = fixture(text: "500X")
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("planner-growing-amount-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let document = try #require(PDFDocument(url: source))
+        defer { withExtendedLifetime(document) {} }
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "500X" })
+        let target = try #require(index.target(in: run, range: 0..<3, pageIndex: 0))
+        let originalSuffix = try #require(run.glyphs.last)
+        let resolution = PDFEditEngine.resolveFont(for: target, on: page, replacement: "50,000")
+        var edit = ReplacementEdit(
+            target: target, replacement: "50,000", resolvedFont: resolution.font,
+            fontIsExact: resolution.isExact, exactGlyphs: resolution.exactGlyphs
+        )
+        edit.storage = PDFTextEditPlanner.storage(sourceURL: source, edit: edit)
+
+        #expect(edit.storage == .reconstructed)
+        #expect(edit.lineSuffixShift > 0)
+        #expect(PDFTextRenderer.fitResult(for: edit, in: page.bounds(for: .mediaBox)).fits)
+
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        let saved = try #require(PDFDocument(url: output))
+        defer { withExtendedLifetime(saved) {} }
+        let savedPage = try #require(saved.page(at: 0))
+        let savedIndex = PDFGlyphIndex.makeIndex(for: savedPage)
+        let savedGlyphs = savedIndex.runs.flatMap(\.glyphs).filter(\.isVisible)
+        let suffix = try #require(savedGlyphs.first { $0.text == "X" })
+        let visualText = savedGlyphs.sorted { $0.advanceBox.minX < $1.advanceBox.minX }
+            .map(\.text).joined()
+        #expect(visualText.contains("50,000X"))
+        #expect(abs(suffix.advanceBox.minX - (originalSuffix.advanceBox.minX + edit.lineSuffixShift)) <= 0.15)
+        #expect(abs(suffix.fontSize - originalSuffix.fontSize) <= 0.05)
     }
 
     @Test("元subsetに無い日本語を透明再描画し灰色背景と罫線を保つ",

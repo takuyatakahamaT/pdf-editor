@@ -19,6 +19,7 @@ enum PDFContentTextRemovalWriter {
     static func rewritingTextShows(sourceURL: URL, sourcePDF: PDFDocument, edits: [ReplacementEdit]) throws -> Data? {
         guard sourcePDF.pageCount == 1, !edits.isEmpty,
               edits.allSatisfy({ $0.pageIndex == 0 }),
+              edits.allSatisfy({ abs($0.lineSuffixShift) <= 0.0001 }),
               let page = sourcePDF.page(at: 0), let cgPage = sourcePDF.documentRef?.page(at: 1),
               let pageDictionary = cgPage.dictionary else { return nil }
         let original = try Data(contentsOf: sourceURL)

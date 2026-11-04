@@ -119,6 +119,9 @@ struct ReplacementEdit {
     var lineReplacements: [TextRunReplacement]
     var lineCompositionStart: Int?
     var composesLineEdits: Bool
+    /// 文字数増減によって同じ行の後続文字へ適用する横方向の移動量。
+    /// `.reconstructed` の原文除去へ引き渡す場合も、前景の置換幅と同じ値を保持する。
+    var sourceSuffixShift: CGFloat
     /// 既存文字を移動した場合の新しい描画原点（x、ベースライン y）。
     var destinationOrigin: CGPoint?
     /// ToUnicode と埋込フォントから確定した (GID, 送り幅[em]) 列。
@@ -139,6 +142,7 @@ struct ReplacementEdit {
             originalText: sourceText, fontSize: sourceFontSize, fontColor: fontColor,
             fontKey: sourceFontKey, fontIsExact: sourceFontIsExact,
             coverBounds: coverBounds, maxWidth: maxWidth,
+            lineLayout: lineLayout,
             hasExplicitSourceMapping: hasExplicitSourceMapping,
             fontPostScriptNameOverride: fontPostScriptNameOverride,
             nearbyTextBounds: sourceNearbyTextBounds,
@@ -148,6 +152,7 @@ struct ReplacementEdit {
         )
         var removal = ReplacementEdit(deleting: target, id: id)
         removal.storage = .internalPDFium
+        removal.sourceSuffixShift = lineSuffixShift
         return removal
     }
 
@@ -190,6 +195,7 @@ struct ReplacementEdit {
         hasExplicitSourceMapping = target.hasExplicitSourceMapping
         fontPostScriptNameOverride = target.fontPostScriptNameOverride
         self.outputFontSelection = outputFontSelection
+        sourceSuffixShift = 0
         storage = .overlay(reason: "PDF内部置換は未確認です。")
         if let lineLayout = target.lineLayout {
             lineCompositionStart = lineLayout.selectedRange.lowerBound
@@ -232,11 +238,12 @@ struct ReplacementEdit {
         maxWidth = target.maxWidth
         resolvedFont = nil
         fontIsExact = true
-        lineLayout = nil
+        lineLayout = target.lineLayout
         lineFont = nil
         lineReplacements = []
         lineCompositionStart = nil
         composesLineEdits = false
+        sourceSuffixShift = 0
         destinationOrigin = nil
         exactGlyphs = nil
         hasExplicitSourceMapping = target.hasExplicitSourceMapping
@@ -281,6 +288,7 @@ struct ReplacementEdit {
         lineReplacements = []
         lineCompositionStart = nil
         composesLineEdits = false
+        sourceSuffixShift = 0
         destinationOrigin = nil
         exactGlyphs = nil
         hasExplicitSourceMapping = true
@@ -329,6 +337,17 @@ struct ReplacementEdit {
             sourceSelectionIsAmbiguous: sourceSelectionIsAmbiguous,
             sourceIsPlainTextObject: sourceIsPlainTextObject
         )
+    }
+
+    /// 選択範囲の幅と置換文字列の幅との差。文字種や桁数には依存しない。
+    /// 後続文字がない場合は移動対象がないため 0 を返す。
+    var lineSuffixShift: CGFloat {
+        if abs(sourceSuffixShift) > 0.0001 { return sourceSuffixShift }
+        guard destinationOrigin == nil, !composesLineEdits,
+              let lineLayout,
+              lineLayout.selectedRange.upperBound < lineLayout.glyphs.count,
+              let replacement = lineReplacements.first(where: { $0.id == id }) else { return 0 }
+        return replacement.renderedWidth - lineLayout.selectedAdvance
     }
 
     var displayedTextBounds: CGRect {

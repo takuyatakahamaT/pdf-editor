@@ -22,8 +22,9 @@ enum PDFVisualIntegrityValidator {
             let allowed = pageEdits.map { edit in
                 let sourceInk = edit.sourceGlyphBounds.reduce(edit.bounds) { $0.union($1) }
                 let ink = PDFTextRenderer.renderedInkBounds(for: edit).reduce(sourceInk) { $0.union($1) }
-                // 従来の行再配置だけは後続文字の移動領域を含める。
-                return (edit.storage.isInternal ? ink : ink.union(edit.annotationBounds))
+                // 行再配置では、内部編集でも後続文字の移動領域までが意図した変更範囲。
+                let includesLineReflow = abs(edit.lineSuffixShift) > 0.0001
+                return (edit.storage.isInternal && !includesLineReflow ? ink : ink.union(edit.annotationBounds))
                     .insetBy(dx: -1, dy: -1)
             } + pageMarkups.map { $0.bounds.insetBy(dx: -2, dy: -2) }
             try compare(before, after, allowing: allowed)

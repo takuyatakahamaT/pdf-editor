@@ -1049,4 +1049,56 @@ struct PageTextIndexGeometryTests {
         try? FileManager.default.removeItem(at: fixture.url)
         try? FileManager.default.removeItem(at: outputURL)
     }
+
+    @Test("日付と金額を含む任意の文字数増加を実幅差で行再配置する")
+    func arbitraryGrowingTextUsesWidthDelta() throws {
+        let font = CTFontCreateWithName("HiraginoSans-W3" as CFString, 14, nil)
+        for (source, range, replacement) in [
+            ("10月1日", 3..<4, "10"),
+            ("500円", 0..<3, "50,000")
+        ] {
+            let characters = source.map(String.init)
+            let advances = characters.map { text -> CGFloat in
+                let line = CTLineCreateWithAttributedString(NSAttributedString(
+                    string: text,
+                    attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]
+                ))
+                return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            }
+            var x: CGFloat = 0
+            let glyphs = zip(characters, advances).map { text, advance in
+                defer { x += advance }
+                return TextRunLayout.Glyph(text: text, offsetX: x, advance: advance)
+            }
+            let lineWidth = advances.reduce(0, +)
+            let layout = TextRunLayout(
+                glyphs: glyphs, selectedRange: range, lineStartX: 20,
+                lineWidth: lineWidth, maxWidth: 200,
+                coverBounds: CGRect(x: 20, y: 40, width: lineWidth, height: 18)
+            )
+            let selectedStart = glyphs[range.lowerBound].offsetX
+            let selectedWidth = glyphs[range].reduce(CGFloat.zero) { $0 + $1.advance }
+            let target = TextTarget(
+                pageIndex: 0,
+                bounds: CGRect(x: 20 + selectedStart, y: 40, width: selectedWidth, height: 18),
+                baseline: 44, originalText: characters[range].joined(), fontSize: 14,
+                fontColor: .black, fontKey: "F1", fontIsExact: true,
+                coverBounds: CGRect(x: 20 + selectedStart, y: 40, width: selectedWidth, height: 18),
+                maxWidth: 200 - selectedStart, lineLayout: layout
+            )
+            var edit = ReplacementEdit(
+                target: target, replacement: replacement, resolvedFont: font, fontIsExact: true
+            )
+            edit.storage = .reconstructed
+            let plan = PDFTextRenderer.reflowPlan(
+                text: replacement, font: font, layout: layout, color: .black
+            )
+
+            #expect(edit.lineSuffixShift > 0)
+            #expect(abs(edit.lineSuffixShift - plan.shift) <= 0.001)
+            #expect(PDFTextRenderer.fitResult(
+                for: edit, in: CGRect(x: 0, y: 0, width: 240, height: 100)
+            ).fits)
+        }
+    }
 }

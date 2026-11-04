@@ -322,6 +322,9 @@ enum PDFInternalTextEditEngine {
         _ edits: [(ReplacementEdit, Match)],
         document: PDFiumHandle, page: PDFiumHandle, api: PDFiumAPI
     ) throws {
+        guard edits.allSatisfy({ abs($0.1.reflowShift) <= 0.0001 }) else {
+            throw PDFInternalTextEditError.unsupported("同じobject内の複数編集と行再配置は同時に保存できません。")
+        }
         guard let first = edits.first, let sourceFont = api.textObjectFont(first.1.object) else {
             throw PDFInternalTextEditError.failed("集約対象の元fontを取得できません。")
         }
@@ -385,9 +388,10 @@ enum PDFInternalTextEditEngine {
         var pending: [(object: PDFiumHandle, before: Bool)] = []
         defer { pending.forEach { api.destroyPageObject($0.object) } }
         for glyph in match.retainedGlyphs {
+            let origin = reflowedOrigin(for: glyph, shift: match.reflowShift)
             let object = try createPositionedObject(
                 document: document, font: sourceFont, size: edit.sourceFontSize,
-                codes: [glyph.code], origin: glyph.origin, color: match.fillColor, api: api
+                codes: [glyph.code], origin: origin, color: match.fillColor, api: api
             )
             pending.append((object, glyph.beforeSelection))
         }
@@ -601,6 +605,9 @@ enum PDFInternalTextEditEngine {
         var indexes: [Int: PageTextIndex] = [:]
         return try edits.flatMap { edit -> [ReplacementEdit] in
             guard edit.replacement.isEmpty, !edit.sourceIsPlainTextObject else { return [edit] }
+            guard abs(edit.lineSuffixShift) <= 0.0001 else {
+                throw PDFInternalTextEditError.unsupported("複数showにまたがる行再配置は内部編集できません。")
+            }
             guard edit.kind == .replacement, edit.destinationOrigin == nil, !edit.composesLineEdits,
                   edit.lineReplacements.count <= 1, !edit.sourceSelectionIsAmbiguous,
                   edit.hasExplicitSourceMapping, let key = edit.sourceFontKey,
@@ -734,6 +741,8 @@ enum PDFInternalTextEditEngine {
         let sourceFontName: String
         let selectedCharacterIndices: Set<Int32>
         let replacementAdvances: [CGFloat]
+        /// 選択範囲より後ろにある同一行の保持文字へ加える横移動量。
+        let reflowShift: CGFloat
     }
 
     private struct RetainedGlyph {
@@ -1260,6 +1269,29 @@ enum PDFInternalTextEditEngine {
            let lastWidth = fontEvidence.sourceDeclaredWidths.last {
             actualSelectionWidth = lastOrigin.x + lastWidth - firstOrigin.x
         } else { return reject("選択範囲の実送り幅を取得できません") }
+        let reflowShift = edit.replacement.isEmpty ? edit.lineSuffixShift : 0
+        if abs(reflowShift) > 0.0001 {
+            guard let layout = edit.lineLayout else { return reject("行再配置の元レイアウトがありません") }
+            let suffixScalars = layout.glyphs[layout.selectedRange.upperBound...]
+                .flatMap { $0.text.unicodeScalars.map(\.value) }
+            let trailing = retained.filter { !$0.beforeSelection }.sorted { $0.sourceIndex < $1.sourceIndex }
+            guard trailing.map(\.unicode) == suffixScalars else {
+                return reject("同じ行の後続文字が単一text objectに収まっていません")
+            }
+            let suffixEnd = layout.glyphs[layout.selectedRange.upperBound...]
+                .map { $0.offsetX + $0.advance }.max() ?? 0
+            guard suffixEnd + reflowShift <= layout.maxWidth + 0.25,
+                  layout.selectedStartX + actualSelectionWidth + reflowShift <= layout.maxWidth + 0.25 else {
+                return reject("行再配置後の文字が配置可能範囲を超えます")
+            }
+            for (glyph, layoutGlyph) in zip(trailing, layout.glyphs[layout.selectedRange.upperBound...]) {
+                let expectedX = layout.lineStartX + layoutGlyph.offsetX
+                guard abs(glyph.origin.x - expectedX) <= max(0.75, edit.sourceFontSize * 0.08),
+                      abs(glyph.origin.y - edit.baseline) <= max(0.75, edit.sourceFontSize * 0.08) else {
+                    return reject("同じ行の後続文字の元座標が一致しません")
+                }
+            }
+        }
         let allowedWidth = min(sourceWidth, actualSelectionWidth)
         guard replacementWidth <= allowedWidth + max(0.1, CGFloat(effectiveFontSize) * 0.02) else {
             return reject("置換後の幅が元objectを超えます")
@@ -1295,8 +1327,14 @@ enum PDFInternalTextEditEngine {
             requiresReconstruction: reconstruct,
             sourceFontName: api.baseFontName(font),
             selectedCharacterIndices: selectedIndices,
-            replacementAdvances: replacementAdvances
+            replacementAdvances: replacementAdvances,
+            reflowShift: reflowShift
         )
+    }
+
+    private static func reflowedOrigin(for glyph: RetainedGlyph, shift: CGFloat) -> CGPoint {
+        guard !glyph.beforeSelection else { return glyph.origin }
+        return CGPoint(x: glyph.origin.x + shift, y: glyph.origin.y)
     }
 
     private static func provenGlyphWidth(
@@ -1550,8 +1588,25 @@ enum PDFInternalTextEditEngine {
         let outputByUnicode = Dictionary(grouping: output, by: \.unicode)
         var consumed = Set<Int32>()
         for character in source where !selectedIndices.contains(character.index) {
+            let retained = pageEdits.compactMap { edit -> (RetainedGlyph, Match)? in
+                guard let match = sourceMatches[edit.id],
+                      let glyph = match.retainedGlyphs.first(where: { $0.sourceIndex == character.index }) else {
+                    return nil
+                }
+                return (glyph, match)
+            }.first
+            let expected: CharacterSnapshot
+            if let (glyph, match) = retained {
+                expected = CharacterSnapshot(
+                    index: character.index, unicode: character.unicode,
+                    origin: reflowedOrigin(for: glyph, shift: match.reflowShift),
+                    fontSize: character.fontSize, color: character.color
+                )
+            } else {
+                expected = character
+            }
             guard let saved = outputByUnicode[character.unicode]?.first(where: {
-                !consumed.contains($0.index) && character.matches($0)
+                !consumed.contains($0.index) && expected.matches($0)
             }) else {
                 // 独立space objectはPDFiumが抽出indexを省略する。この場合も、元の
                 // 実code・Unicode・font・origin・size・色をcontentとobjectから証明する。
@@ -1629,6 +1684,7 @@ enum PDFInternalTextEditEngine {
         let scannedGlyphs = preservesRetainedGrouping
             ? pdfPage.map { PDFGlyphIndex.makeIndex(for: $0).runs.flatMap(\.glyphs) } ?? [] : []
         for glyph in sourceMatch.retainedGlyphs where !editedSourceIndices.contains(glyph.sourceIndex) {
+            let expectedOrigin = reflowedOrigin(for: glyph, shift: sourceMatch.reflowShift)
             if isBlankUnicode(glyph.unicode) && !preservesRetainedGrouping {
                 let index = try verifyBlankGlyph(glyph, sourceMatch: sourceMatch, pdfPage: pdfPage, page: page, api: api)
                 guard retainedIndices.insert(index).inserted else {
@@ -1644,7 +1700,7 @@ enum PDFInternalTextEditEngine {
                 for index in indices {
                 guard api.textUnicode(textPage, index) == glyph.unicode,
                       let origin = api.characterOrigin(textPage, index: index),
-                      abs(origin.x - glyph.origin.x) <= 0.02, abs(origin.y - glyph.origin.y) <= 0.02,
+                      abs(origin.x - expectedOrigin.x) <= 0.02, abs(origin.y - expectedOrigin.y) <= 0.02,
                       abs(api.effectiveCharacterFontSize(textPage, index: index) - Double(edit.sourceFontSize)) <= 0.02,
                       let font = api.textObjectFont(object),
                       api.baseFontName(font) == sourceMatch.sourceFontName,
@@ -1654,8 +1710,8 @@ enum PDFInternalTextEditEngine {
                     let scanned = scannedGlyphs.filter {
                         $0.sourceCharacterCode == Int(glyph.code) && $0.text.unicodeScalars.first?.value == glyph.unicode
                             && $0.fontKey == edit.sourceFontKey
-                            && abs($0.advanceBox.minX - glyph.origin.x) <= 0.02
-                            && abs($0.baseline - glyph.origin.y) <= 0.02
+                            && abs($0.advanceBox.minX - expectedOrigin.x) <= 0.02
+                            && abs($0.baseline - expectedOrigin.y) <= 0.02
                             && abs($0.fontSize - edit.sourceFontSize) <= 0.02
                     }
                     guard scanned.count == 1 else { continue }
@@ -1813,13 +1869,14 @@ enum PDFInternalTextEditEngine {
         page: PDFiumHandle, api: PDFiumAPI
     ) throws -> Int32 {
         guard let pdfPage else { throw PDFInternalTextEditError.failed("未選択spaceを再走査できません。") }
+        let expectedOrigin = reflowedOrigin(for: glyph, shift: sourceMatch.reflowShift)
         let scannedGlyphs: [ScannedGlyph] = PDFGlyphIndex.makeIndex(for: pdfPage).runs.flatMap(\.glyphs)
         let scanned: [ScannedGlyph] = scannedGlyphs.filter { scannedGlyph in
             guard scannedGlyph.sourceCharacterCode == Int(glyph.code),
                   scannedGlyph.text.unicodeScalars.count == 1,
                   scannedGlyph.text.unicodeScalars.first?.value == glyph.unicode else { return false }
-            return abs(scannedGlyph.advanceBox.minX - glyph.origin.x) <= 0.02
-                && abs(scannedGlyph.baseline - glyph.origin.y) <= 0.02
+            return abs(scannedGlyph.advanceBox.minX - expectedOrigin.x) <= 0.02
+                && abs(scannedGlyph.baseline - expectedOrigin.y) <= 0.02
         }
         guard scanned.count == 1 else {
             throw PDFInternalTextEditError.failed("未選択spaceの元charcode・Unicode・originを再照合できません。")
@@ -1832,8 +1889,8 @@ enum PDFInternalTextEditEngine {
             var matrix = PDFiumMatrix()
             var size: Float = 0
             guard withUnsafeMutablePointer(to: &matrix, { api.pageObjectMatrix(object, UnsafeMutableRawPointer($0)) }) != 0,
-                  abs(CGFloat(matrix.e) - glyph.origin.x) <= 0.02,
-                  abs(CGFloat(matrix.f) - glyph.origin.y) <= 0.02,
+                  abs(CGFloat(matrix.e) - expectedOrigin.x) <= 0.02,
+                  abs(CGFloat(matrix.f) - expectedOrigin.y) <= 0.02,
                   abs(matrix.a - 1) <= 0.0001, abs(matrix.d - 1) <= 0.0001,
                   abs(matrix.b) <= 0.0001, abs(matrix.c) <= 0.0001,
                   api.textObjectFontSize(object, &size) != 0,

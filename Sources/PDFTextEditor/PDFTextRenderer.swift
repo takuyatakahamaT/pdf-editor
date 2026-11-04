@@ -441,7 +441,7 @@ enum PDFTextRenderer {
         if let destination = edit.destinationOrigin {
             requiredEnd = destination.x + renderedWidth(of: edit)
             availableEnd = pageBounds.maxX
-        } else if let layout = edit.lineLayout, !edit.storage.needsForeground {
+        } else if let layout = edit.lineLayout {
             if edit.composesLineEdits,
                let plan = composedReflowPlan(
                    layout: layout,
