@@ -22,8 +22,12 @@ enum PDFVisualIntegrityValidator {
             let allowed = pageEdits.map { edit in
                 let sourceInk = edit.sourceGlyphBounds.reduce(edit.bounds) { $0.union($1) }
                 let ink = PDFTextRenderer.renderedInkBounds(for: edit).reduce(sourceInk) { $0.union($1) }
-                // 従来の行再配置だけは後続文字の移動領域を含める。
-                return (edit.storage.isInternal ? ink : ink.union(edit.annotationBounds))
+                // reconstructedの行再配置は、元の後続文字があった領域と移動先の
+                // 両方が意図した変更範囲。短縮して左へ詰める場合も元領域を許可する。
+                let allowedInk = edit.storage.needsForeground
+                    ? ink.union(PDFTextRenderer.affectedBounds(for: edit))
+                    : (edit.storage.isInternal ? ink : ink.union(edit.annotationBounds))
+                return allowedInk
                     .insetBy(dx: -1, dy: -1)
             } + pageMarkups.map { $0.bounds.insetBy(dx: -2, dy: -2) }
             try compare(before, after, allowing: allowed)

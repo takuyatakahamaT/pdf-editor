@@ -170,6 +170,16 @@ struct TextRunLayout: Equatable {
         let text: String
         let offsetX: CGFloat
         let advance: CGFloat
+        /// 元PDF上の送り幅ボックス。reconstructedで後続文字を移動するとき、
+        /// 元文字をUnicode・font・座標まで再照合して除去する証跡に使う。
+        let advanceBox: CGRect?
+
+        init(text: String, offsetX: CGFloat, advance: CGFloat, advanceBox: CGRect? = nil) {
+            self.text = text
+            self.offsetX = offsetX
+            self.advance = advance
+            self.advanceBox = advanceBox
+        }
     }
 
     let glyphs: [Glyph]
@@ -514,7 +524,8 @@ struct PageTextIndex {
             TextRunLayout.Glyph(
                 text: $0.glyph.text,
                 offsetX: $0.glyph.advanceBox.minX - lineStartX,
-                advance: $0.glyph.advance
+                advance: $0.glyph.advance,
+                advanceBox: $0.glyph.advanceBox
             )
         }
         let coverBounds = CGRect(

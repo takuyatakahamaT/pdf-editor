@@ -16,21 +16,61 @@ enum PDFTextRenderer {
         let fontSize: CGFloat
     }
 
+    struct ForegroundReflowPlan {
+        let reflow: ReflowPlan
+        let replacementOrigin: CGPoint
+        let suffix: [ComposedGlyphPlacement]
+
+        var movesSuffix: Bool { abs(reflow.shift) > 0.01 && !suffix.isEmpty }
+    }
+
     /// 自分が描く文字だけの対応表。原本の不明な文字を推測で補完する用途には使わない。
     static func emittedGlyphs(for edit: ReplacementEdit) throws -> [EmittedGlyph] {
         let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
-        if let exact = edit.exactGlyphs, !exact.isEmpty {
-            let characters = Array(edit.replacement)
+        if edit.storage.needsForeground,
+           let layout = edit.lineLayout,
+           let plan = foregroundReflowPlan(for: edit), plan.movesSuffix {
+            var result = try emittedGlyphs(
+                text: edit.replacement, font: font, exactGlyphs: edit.exactGlyphs,
+                origin: plan.replacementOrigin
+            )
+            let lineFont = edit.lineFont ?? font
+            for placement in plan.suffix {
+                let glyphFont = drawableFont(for: placement.glyph.text, baseFont: lineFont)
+                result += try emittedGlyphs(
+                    text: placement.glyph.text, font: glyphFont, exactGlyphs: nil,
+                    origin: CGPoint(
+                        x: layout.lineStartX + placement.offsetX,
+                        y: edit.baseline
+                    )
+                )
+            }
+            return result
+        }
+        return try emittedGlyphs(
+            text: edit.replacement, font: font, exactGlyphs: edit.exactGlyphs,
+            origin: CGPoint(x: edit.bounds.minX, y: edit.baseline)
+        )
+    }
+
+    private static func emittedGlyphs(
+        text: String,
+        font: CTFont,
+        exactGlyphs exact: [(glyph: CGGlyph, emWidth: CGFloat)]?,
+        origin: CGPoint
+    ) throws -> [EmittedGlyph] {
+        if let exact, !exact.isEmpty {
+            let characters = Array(text)
             guard exact.count == characters.count else { throw PDFExportError.cannotCreateContext }
-            var x = edit.bounds.minX
+            var x = origin.x
             return zip(characters, exact).map { character, glyph in
                 defer { x += glyph.emWidth * CTFontGetSize(font) }
-                return EmittedGlyph(text: String(character), origin: CGPoint(x: x, y: edit.baseline),
+                return EmittedGlyph(text: String(character), origin: CGPoint(x: x, y: origin.y),
                                     fontName: CTFontCopyPostScriptName(font) as String, fontSize: CTFontGetSize(font))
             }
         }
-        let line = renderPlan(text: edit.replacement, font: font, color: edit.fontColor, maxWidth: edit.maxWidth).line
-        let string = edit.replacement as NSString
+        let line = makeLine(text: text, font: font, color: .black)
+        let string = text as NSString
         var result: [EmittedGlyph] = []
         for case let run as CTRun in CTLineGetGlyphRuns(line) as NSArray {
             let count = CTRunGetGlyphCount(run)
@@ -53,7 +93,7 @@ enum PDFTextRenderer {
                 }
                 result.append(EmittedGlyph(
                     text: string.substring(with: NSRange(location: start, length: end - start)),
-                    origin: CGPoint(x: edit.bounds.minX + positions[index].x, y: edit.baseline + positions[index].y),
+                    origin: CGPoint(x: origin.x + positions[index].x, y: origin.y + positions[index].y),
                     fontName: CTFontCopyPostScriptName(runFont) as String, fontSize: CTFontGetSize(runFont)
                 ))
             }
@@ -66,6 +106,10 @@ enum PDFTextRenderer {
         defer { context.restoreGState() }
 
         if edit.storage.needsForeground {
+            if let plan = foregroundReflowPlan(for: edit), plan.movesSuffix {
+                drawForegroundReflow(edit, plan: plan, in: context)
+                return
+            }
             drawReplacementForeground(edit, in: context)
             return
         }
@@ -118,6 +162,45 @@ enum PDFTextRenderer {
             CTLineDraw(plan.line, context)
         } else {
             drawGlyphOutlines(for: plan.line, in: context)
+        }
+    }
+
+    /// 内部工程で選択範囲から行末まで除去済み。背景へ触れず、置換文字と
+    /// 移動する後続文字だけを共通計画の座標へ可視テキストとして描き直す。
+    private static func drawForegroundReflow(
+        _ edit: ReplacementEdit,
+        plan: ForegroundReflowPlan,
+        in context: CGContext
+    ) {
+        guard let layout = edit.lineLayout else { return }
+        let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        context.saveGState()
+        context.translateBy(x: plan.replacementOrigin.x, y: plan.replacementOrigin.y)
+        if let exactGlyphs = edit.exactGlyphs, !exactGlyphs.isEmpty {
+            drawUnscaledExactGlyphs(exactGlyphs, font: font, color: edit.fontColor, in: context)
+        } else {
+            context.setFillColor(edit.fontColor.cgColor)
+            context.textMatrix = .identity
+            context.textPosition = .zero
+            context.setTextDrawingMode(.fill)
+            CTLineDraw(plan.reflow.line, context)
+        }
+        context.restoreGState()
+
+        let lineFont = edit.lineFont ?? font
+        for placement in plan.suffix {
+            let glyphFont = drawableFont(for: placement.glyph.text, baseFont: lineFont)
+            let line = makeLine(text: placement.glyph.text, font: glyphFont, color: edit.fontColor)
+            context.saveGState()
+            context.translateBy(
+                x: layout.lineStartX + placement.offsetX,
+                y: edit.baseline
+            )
+            context.textMatrix = .identity
+            context.textPosition = .zero
+            context.setTextDrawingMode(.fill)
+            CTLineDraw(line, context)
+            context.restoreGState()
         }
     }
 
@@ -367,6 +450,64 @@ enum PDFTextRenderer {
         let scale: CGFloat
     }
 
+    static func foregroundReflowPlan(for edit: ReplacementEdit) -> ForegroundReflowPlan? {
+        guard let layout = edit.lineLayout else { return nil }
+        let font = edit.resolvedFont ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+        let exactWidth = edit.exactGlyphs.map { glyphs in
+            glyphs.reduce(CGFloat.zero) { $0 + $1.emWidth } * CTFontGetSize(font)
+        }
+        let reflow = reflowPlan(
+            text: edit.replacement,
+            font: font,
+            layout: layout,
+            color: edit.fontColor,
+            replacementWidth: exactWidth
+        )
+        let suffix = layout.glyphs[layout.selectedRange.upperBound...].map {
+            ComposedGlyphPlacement(glyph: $0, offsetX: $0.offsetX + reflow.shift)
+        }
+        return ForegroundReflowPlan(
+            reflow: reflow,
+            replacementOrigin: CGPoint(
+                x: layout.lineStartX + layout.selectedStartX,
+                y: edit.baseline
+            ),
+            suffix: suffix
+        )
+    }
+
+    /// reconstructedの原文除去範囲。幅が変わるときだけ後続文字を含める。
+    static func sourceRemovalRange(for edit: ReplacementEdit) -> Range<Int> {
+        guard let layout = edit.lineLayout else { return 0..<0 }
+        guard let plan = foregroundReflowPlan(for: edit), abs(plan.reflow.shift) > 0.01 else {
+            return layout.selectedRange
+        }
+        return layout.selectedRange.lowerBound..<layout.glyphs.count
+    }
+
+    static func hasSourceEvidenceForForegroundReflow(_ edit: ReplacementEdit) -> Bool {
+        guard let layout = edit.lineLayout else { return true }
+        let range = sourceRemovalRange(for: edit)
+        guard range.count > layout.selectedRange.count else { return true }
+        return layout.glyphs[range].allSatisfy {
+            $0.advanceBox != nil && $0.text.unicodeScalars.count == 1
+        }
+    }
+
+    static func affectedBounds(for edit: ReplacementEdit) -> CGRect {
+        var result = edit.bounds.union(edit.displayedTextBounds)
+        if edit.storage.needsForeground, let layout = edit.lineLayout {
+            let range = sourceRemovalRange(for: edit)
+            for bounds in layout.glyphs[range].compactMap(\.advanceBox) {
+                result = result.union(bounds)
+            }
+            for bounds in renderedInkBounds(for: edit) {
+                result = result.union(bounds)
+            }
+        }
+        return result
+    }
+
     static func reflowPlan(
         text: String,
         font: CTFont,
@@ -441,7 +582,7 @@ enum PDFTextRenderer {
         if let destination = edit.destinationOrigin {
             requiredEnd = destination.x + renderedWidth(of: edit)
             availableEnd = pageBounds.maxX
-        } else if let layout = edit.lineLayout, !edit.storage.needsForeground {
+        } else if let layout = edit.lineLayout {
             if edit.composesLineEdits,
                let plan = composedReflowPlan(
                    layout: layout,
@@ -517,6 +658,32 @@ enum PDFTextRenderer {
                 )
             }
         }
+        if edit.storage.needsForeground,
+           let layout = edit.lineLayout,
+           let plan = foregroundReflowPlan(for: edit), plan.movesSuffix {
+            let font = edit.resolvedFont
+                ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
+            var bounds = inkBounds(
+                text: edit.replacement,
+                font: font,
+                exactGlyphs: edit.exactGlyphs,
+                origin: plan.replacementOrigin
+            ).map { [$0] } ?? []
+            let lineFont = edit.lineFont ?? font
+            bounds += plan.suffix.compactMap { placement in
+                let glyphFont = drawableFont(for: placement.glyph.text, baseFont: lineFont)
+                return inkBounds(
+                    text: placement.glyph.text,
+                    font: glyphFont,
+                    exactGlyphs: nil,
+                    origin: CGPoint(
+                        x: layout.lineStartX + placement.offsetX,
+                        y: edit.baseline
+                    )
+                )
+            }
+            return bounds
+        }
         let font = edit.resolvedFont
             ?? CTFontCreateWithName("Helvetica" as CFString, edit.fontSize, nil)
         let x = edit.lineLayout.map { $0.lineStartX + $0.selectedStartX } ?? edit.bounds.minX
@@ -559,6 +726,15 @@ enum PDFTextRenderer {
         }
         let line = makeLine(text: edit.replacement, font: font, color: edit.fontColor)
         return CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    private static func drawableFont(for text: String, baseFont: CTFont) -> CTFont {
+        let string = text as CFString
+        return CTFontCreateForString(
+            baseFont,
+            string,
+            CFRange(location: 0, length: CFStringGetLength(string))
+        )
     }
 
     private static func makeLine(text: String, font: CTFont, color: NSColor) -> CTLine {

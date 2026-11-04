@@ -134,17 +134,35 @@ struct ReplacementEdit {
     /// 原本に対する編集座標を保ったまま、文字除去の計画を作る。
     /// 描画フォントを変更した場合も原本のfont key/sizeで照合する。
     func sourceRemoval() -> ReplacementEdit {
+        let sourceRange = PDFTextRenderer.sourceRemovalRange(for: self)
+        let reflowGlyphs = lineLayout.map { Array($0.glyphs[sourceRange]) } ?? []
+        let reflowBounds = reflowGlyphs.compactMap(\.advanceBox)
+        let expandsRemoval = lineLayout != nil && sourceRange.count > (lineLayout?.selectedRange.count ?? 0)
+        let removalBounds: CGRect
+        let removalText: String
+        let removalGlyphBounds: [CGRect]
+        if expandsRemoval, reflowBounds.count == reflowGlyphs.count, let first = reflowBounds.first {
+            removalBounds = reflowBounds.dropFirst().reduce(first) { $0.union($1) }
+            removalText = reflowGlyphs.map(\.text).joined()
+            removalGlyphBounds = reflowBounds
+        } else {
+            removalBounds = bounds
+            removalText = sourceText
+            removalGlyphBounds = sourceGlyphBounds
+        }
         let target = TextTarget(
-            pageIndex: pageIndex, bounds: bounds, baseline: baseline,
-            originalText: sourceText, fontSize: sourceFontSize, fontColor: fontColor,
+            pageIndex: pageIndex, bounds: removalBounds, baseline: baseline,
+            originalText: removalText, fontSize: sourceFontSize, fontColor: fontColor,
             fontKey: sourceFontKey, fontIsExact: sourceFontIsExact,
-            coverBounds: coverBounds, maxWidth: maxWidth,
+            coverBounds: removalBounds, maxWidth: removalBounds.width,
             hasExplicitSourceMapping: hasExplicitSourceMapping,
             fontPostScriptNameOverride: fontPostScriptNameOverride,
             nearbyTextBounds: sourceNearbyTextBounds,
-            sourceGlyphBounds: sourceGlyphBounds,
+            sourceGlyphBounds: removalGlyphBounds,
             sourceSelectionIsAmbiguous: sourceSelectionIsAmbiguous,
-            sourceIsPlainTextObject: sourceIsPlainTextObject
+            // 拡張範囲は複数showに跨る可能性がある。内部engineに元PDFを
+            // 再走査させ、show単位の照合・分割を必ず通す。
+            sourceIsPlainTextObject: expandsRemoval ? false : sourceIsPlainTextObject
         )
         var removal = ReplacementEdit(deleting: target, id: id)
         removal.storage = .internalPDFium
@@ -407,10 +425,10 @@ enum PDFExportEngine {
         let internalEdits = edits.filter { $0.storage.isInternal }
         let foregroundEdits = edits.filter { !$0.storage.isInternal || $0.storage.needsForeground }
         for internalEdit in internalEdits {
-            let internalBounds = internalEdit.bounds.union(internalEdit.displayedTextBounds)
+            let internalBounds = PDFTextRenderer.affectedBounds(for: internalEdit)
             if foregroundEdits.contains(where: { foreground in
                 let area = foreground.storage.needsForeground
-                    ? foreground.bounds.union(foreground.displayedTextBounds)
+                    ? PDFTextRenderer.affectedBounds(for: foreground)
                     : foreground.annotationBounds.union(foreground.displayedTextBounds)
                 return foreground.id != internalEdit.id && foreground.pageIndex == internalEdit.pageIndex
                     && internalBounds.intersects(area)
@@ -448,6 +466,11 @@ enum PDFExportEngine {
         }
 
         let internalEdits = edits.filter { $0.storage.isInternal }
+        guard internalEdits.filter(\.storage.needsForeground).allSatisfy({
+            PDFTextRenderer.hasSourceEvidenceForForegroundReflow($0)
+        }) else {
+            throw PDFInternalTextEditError.unsupported("後続文字の元位置を一意に照合できません。")
+        }
         let sourceEdits = internalEdits.map { $0.storage.needsForeground ? $0.sourceRemoval() : $0 }
         let overlayEdits = edits.filter { !$0.storage.isInternal || $0.storage.needsForeground }
         try validateEditPaths(edits)
