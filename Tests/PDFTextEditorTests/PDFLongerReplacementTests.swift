@@ -82,6 +82,63 @@ struct PDFLongerReplacementTests {
         #expect(model.replacementText == (nextColumn ? "AAAA" : "AA"))
     }
 
+    @Test("日付・金額など任意の文字数増加を同じ幅差ロジックで保存する",
+          arguments: [("10/1X", 3..<4, "10", "10/10X"), ("500X", 0..<3, "50,000", "50,000X")])
+    @MainActor
+    func arbitraryGrowingTextReflows(
+        sourceText: String, selectedRange: Range<Int>, replacement: String, expected: String
+    ) throws {
+        let source = fixture(text: sourceText)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let model = EditorModel(initialURL: source)
+        let page = try #require(model.document?.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == sourceText })
+        let target = try #require(index.target(in: run, range: selectedRange, pageIndex: 0))
+        let originalFontSize = target.fontSize
+
+        model.select(target)
+        model.updateEditorText(replacement)
+        model.commitEditorText()
+
+        #expect(model.noticeMessage == nil)
+        let edit = try #require(model.activeReplacements.first)
+        #expect(edit.storage == .reconstructed)
+        #expect(abs(edit.fontSize - originalFontSize) < 0.01)
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("arbitrary-growing-text-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        let savedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        #expect(savedPage.string?.filter { !$0.isWhitespace } == expected)
+    }
+
+    @Test("短い置換で後続文字を左へ詰めても元領域を破損扱いしない")
+    func shorterReplacementAllowsOriginalSuffixRegion() throws {
+        let source = fixture()
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shorter-replacement-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let document = try #require(PDFDocument(url: source))
+        let page = try #require(document.page(at: 0))
+        let index = PDFGlyphIndex.makeIndex(for: page)
+        let run = try #require(index.runs.first { $0.text == "ABCD" })
+        let target = try #require(index.target(in: run, range: 0..<2, pageIndex: 0))
+        let selection = ReplacementFontSelection(choice: .custom, customFontName: "Helvetica-Bold")
+        var edit = PDFEditEngine.prepareReplacement(
+            "I", on: page, target: target, preferredFontName: "Helvetica-Bold",
+            outputFontSelection: selection
+        ).edit
+        edit.storage = PDFTextEditPlanner.storage(sourceURL: source, edit: edit)
+
+        #expect(edit.storage == .reconstructed)
+        #expect((PDFTextRenderer.foregroundReflowPlan(for: edit)?.reflow.shift ?? 0) < 0)
+        try PDFExportEngine.export(sourceURL: source, edits: [edit], to: output)
+        let savedPage = try #require(PDFDocument(url: output)?.page(at: 0))
+        #expect(savedPage.string?.filter { !$0.isWhitespace } == "ICD")
+        try PDFVisualIntegrityValidator.verify(sourceURL: source, outputURL: output, edits: [edit])
+    }
+
     private func backgroundLevel(on page: PDFPage, y: CGFloat) throws -> Double {
         let image = page.thumbnail(of: CGSize(width: 960, height: 400), for: .mediaBox)
         let tiff = try #require(image.tiffRepresentation)
@@ -90,15 +147,19 @@ struct PDFLongerReplacementTests {
         return Double(color.redComponent)
     }
 
-    private func fixture(pageWidth: Int = 240, nextColumn: Bool = false, splitShows: Bool = false) -> URL {
+    private func fixture(
+        pageWidth: Int = 240, nextColumn: Bool = false, splitShows: Bool = false, text: String = "ABCD"
+    ) -> URL {
         let cmap = """
         /CIDInit /ProcSet findresource begin 12 dict begin begincmap
         /CMapName /Longer def /CMapType 2 def
         1 begincodespacerange <00> <FF> endcodespacerange
-        4 beginbfchar <41> <0041> <42> <0042> <43> <0043> <44> <0044> endbfchar
+        95 beginbfchar
+        \((32...126).map { String(format: "<%02X> <%04X>", $0, $0) }.joined(separator: "\n"))
+        endbfchar
         endcmap CMapName currentdict /CMap defineresource pop end end
         """
-        let textShows = splitShows ? "(AB) Tj (CD) Tj" : "(ABCD) Tj"
+        let textShows = splitShows ? "(AB) Tj (CD) Tj" : "(\(text)) Tj"
         return RawPDFBuilder.build(objects: [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
